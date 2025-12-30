@@ -1,0 +1,389 @@
+// Copyright 2025 LCP Authors
+//
+// Licensed under the MIT License.
+// See the LICENSE file in the project root for license information.
+
+syntax = "proto3";
+
+// LCPD provides a gRPC API for interacting with LCP peers over Lightning.
+//
+// LCP (Lightning Compute Protocol) is a Lightning L3 overlay protocol that
+// uses BOLT #1 custom messages carrying TLV streams to negotiate and execute
+// compute jobs (quote → payment → execution → result delivery).
+//
+// This API is designed to be compatible with the LCP v0.1 wire protocol
+// described in `protocol/protocol.md`.
+
+package lcpd.v1;
+
+option go_package = "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1;lcpdv1";
+
+import "buf/validate/validate.proto";
+import "google/api/field_behavior.proto";
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service Definition
+// -----------------------------------------------------------------------------
+
+// LCPDService exposes peer discovery and the core LCP quote→pay→execute flow.
+//
+// Error model:
+// RPC failures are returned as canonical gRPC status codes (e.g. INVALID_ARGUMENT,
+// NOT_FOUND, FAILED_PRECONDITION, UNAVAILABLE). Message-level validation failures
+// are expected to return INVALID_ARGUMENT.
+service LCPDService {
+  // --- Peer Management ---
+
+  // ListLCPPeers lists currently connected peers that support LCP.
+  //
+  // Errors:
+  // - UNAVAILABLE: The daemon cannot reach the underlying Lightning node (e.g. lnd),
+  //   or peer tracking is temporarily unavailable.
+  //   Impact: No peer list is returned.
+  // - INTERNAL: Unexpected server error.
+  //   Impact: No peer list is returned.
+  rpc ListLCPPeers(ListLCPPeersRequest) returns (ListLCPPeersResponse);
+
+  // GetLocalInfo gets the local node's LCP information and manifest.
+  //
+  // Errors:
+  // - UNAVAILABLE: The daemon cannot reach the underlying Lightning node (e.g. lnd),
+  //   so local identity/capabilities cannot be fetched.
+  //   Impact: No local info is returned.
+  // - INTERNAL: Unexpected server error.
+  //   Impact: No local info is returned.
+  rpc GetLocalInfo(GetLocalInfoRequest) returns (GetLocalInfoResponse);
+
+  // --- Core Flow ---
+
+  // RequestQuote sends an `lcp_quote_request` to a specific peer.
+  //
+  // On success, it returns the provider's `lcp_quote_response` as `Terms`,
+  // including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`
+  // (invoice swapping defense).
+  // Errors:
+  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing
+  //   `task`, or invalid task spec).
+  //   Impact: No wire message is sent to the peer.
+  // - NOT_FOUND: The target peer is unknown to the daemon.
+  //   Impact: No wire message is sent to the peer.
+  // - FAILED_PRECONDITION: The target peer is not connected and ready for LCP
+  //   (e.g. no manifest observed, protocol mismatch, or LCP disabled).
+  //   Impact: No quote is returned; clients may retry after resolving the condition.
+  // - RESOURCE_EXHAUSTED: The request would exceed a payload/size limit (local
+  //   or remote `max_payload_bytes`), or the daemon refuses due to local policy.
+  //   Impact: No quote is returned.
+  // - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.
+  //   Impact: Quote outcome is unknown to the caller; retry MAY result in a new
+  //   `job_id` and a different invoice unless the implementation provides idempotency.
+  // - UNAVAILABLE: Transient transport failure sending/receiving peer messages.
+  //   Impact: Quote outcome is unknown; safe retries depend on idempotency.
+  rpc RequestQuote(RequestQuoteRequest) returns (RequestQuoteResponse);
+
+  // AcceptAndExecute pays the invoice associated with the quote and waits for
+  // the `lcp_result`.
+  //
+  // This is a blocking call. Clients SHOULD set a deadline and MAY cancel via
+  // context cancellation (gRPC) or `CancelJob`.
+  //
+  // Errors:
+  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format),
+  //   or `pay_invoice=false`.
+  //   Impact: No payment attempt is made and no execution is started.
+  // - NOT_FOUND: The daemon has no known quote/payment data for the given `job_id`.
+  //   Impact: No payment attempt is made.
+  // - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the
+  //   daemon refuses to pay/execute due to local policy.
+  //   Impact: No execution is started.
+  // - UNAVAILABLE: Transient failure interacting with the Lightning node for payment,
+  //   or transient peer messaging failure for waiting on the result.
+  //   Impact: The job/payment outcome may be unknown; callers SHOULD treat retries
+  //   with caution because a payment could have succeeded while the result wait failed.
+  // - DEADLINE_EXCEEDED: The result did not arrive before the deadline.
+  //   Impact: The job may still complete and deliver a result later; callers SHOULD
+  //   avoid blindly retrying payment logic.
+  // - INTERNAL: Unexpected server error.
+  //   Impact: Outcome may be unknown if failure happened after payment settlement.
+  rpc AcceptAndExecute(AcceptAndExecuteRequest) returns (AcceptAndExecuteResponse);
+
+  // CancelJob sends an `lcp_cancel` message to the provider.
+  //
+  // Cancellation is best-effort: the provider may have already completed the job.
+  //
+  // Errors:
+  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format).
+  //   Impact: No cancel message is sent.
+  // - NOT_FOUND: The target peer is unknown to the daemon.
+  //   Impact: No cancel message is sent.
+  // - FAILED_PRECONDITION: The daemon cannot currently send peer messages to the
+  //   target peer (e.g. not connected).
+  //   Impact: No cancel message is sent.
+  // - UNAVAILABLE: Transient transport failure sending the cancel message.
+  //   Impact: Unknown whether the provider received the cancel; retries are generally safe.
+  // - DEADLINE_EXCEEDED: The cancel attempt did not complete before the deadline.
+  //   Impact: Unknown whether the provider received the cancel; retries are generally safe.
+  // - INTERNAL: Unexpected server error.
+  //   Impact: Unknown whether the provider received the cancel.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+}
+
+// -----------------------------------------------------------------------------
+// 1. Task Definitions (Strict & Typed)
+// -----------------------------------------------------------------------------
+
+// LCPTaskKind enumerates the supported task types.
+// This is primarily used for Manifests and debugging.
+enum LCPTaskKind {
+  LCP_TASK_KIND_UNSPECIFIED = 0;
+  LCP_TASK_KIND_LLM_CHAT = 1; // "llm.chat"
+}
+
+// Task is the strict container for a job request.
+// It uses `oneof` to enforce that only one valid task specification is provided.
+message Task {
+  oneof spec {
+    option (buf.validate.oneof).required = true;
+
+    // Structured specification for "llm.chat"
+    LLMChatTaskSpec llm_chat = 1;
+  }
+}
+
+// LLMChatTaskSpec defines the inputs and parameters for an LLM Chat task.
+// Maps to:
+//   - input: UTF-8 string (prompt)
+//   - params: TLV encoded parameters
+message LLMChatTaskSpec {
+  // The prompt text to be processed.
+  string prompt = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  // The configuration parameters for the model.
+  LLMChatParams params = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+// LLMChatParams defines the tunable parameters for "llm.chat".
+message LLMChatParams {
+  // "profile" (TLV type 1).
+  // Identifier for the model or routing (e.g., "gpt-5.2").
+  string profile = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  // "temperature_milli" (TLV type 2).
+  // Scaled by 1000 (e.g., 700 = 0.7).
+  uint32 temperature_milli = 2;
+
+  // "max_output_tokens" (TLV type 3).
+  uint32 max_output_tokens = 3;
+}
+
+// -----------------------------------------------------------------------------
+// 2. Protocol Objects (Terms, Result, Manifest)
+// -----------------------------------------------------------------------------
+
+// Terms represents the commitment returned by the Provider in `lcp_quote_response`.
+message Terms {
+  // LCP protocol version (v0.1 = 1; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 1];
+
+  // Job ID (32 bytes).
+  bytes job_id = 2 [(buf.validate.field).bytes.len = 32];
+
+  // Price in millisatoshis.
+  uint64 price_msat = 3;
+
+  // Quote expiry time.
+  //
+  // Wire mapping:
+  // LCP v0.1 encodes quote expiry as Unix epoch seconds. Implementations that
+  // compute or verify `terms_hash` MUST use `quote_expiry.seconds` only and
+  // MUST treat `quote_expiry.nanos` as 0.
+  google.protobuf.Timestamp quote_expiry = 4 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel_expression = "this.nanos == 0"
+  ];
+
+  // The SHA256 commitment over the canonical TLV stream of Terms.
+  // Must match the BOLT11 invoice's description_hash.
+  bytes terms_hash = 5 [(buf.validate.field).bytes.len = 32];
+
+  // The BOLT11 invoice string provided by the peer.
+  string payment_request = 6 [(buf.validate.field).string.min_len = 1];
+}
+
+// Result represents the output from `lcp_result`.
+message Result {
+  // The raw result bytes.
+  // For "llm.chat", the client should interpret this as a UTF-8 string.
+  bytes result = 40 [(buf.validate.field).bytes.min_len = 1];
+
+  // Content type of the result (e.g., "text/plain; charset=utf-8").
+  string content_type = 41;
+}
+
+// LCPPeer represents a connected peer node.
+message LCPPeer {
+  // Peer node identifier (Lightning pubkey, hex-encoded 33-byte compressed key).
+  string peer_id = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // Peer network address, formatted as "host:port".
+  string address = 2 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  // Remote peer's last observed LCP manifest.
+  LCPManifest remote_manifest = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+// LCPManifest represents the capabilities declared by a peer via `lcp_manifest`.
+message LCPManifest {
+  // LCP protocol version (v0.1 = 1; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 1];
+
+  // Maximum supported BOLT #1 custom message payload size in bytes.
+  uint32 max_payload_bytes = 11 [
+    (buf.validate.field).uint32.gt = 0,
+    (buf.validate.field).uint32.lte = 65535
+  ];
+
+  // Task templates supported by this peer.
+  repeated LCPTaskTemplate supported_tasks = 12;
+}
+
+// LCPTaskTemplate describes a task kind supported by a peer.
+message LCPTaskTemplate {
+  // The kind of task supported.
+  LCPTaskKind kind = 1 [(buf.validate.field).required = true];
+
+  // The parameter template/defaults supported for this kind.
+  oneof params_template {
+    option (buf.validate.oneof).required = true;
+
+    LLMChatParams llm_chat = 2;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 3. RPC Request/Response Messages
+// -----------------------------------------------------------------------------
+
+// ListLCPPeersRequest is the request message for `LCPDService.ListLCPPeers`.
+message ListLCPPeersRequest {}
+
+// ListLCPPeersResponse is the response message for `LCPDService.ListLCPPeers`.
+message ListLCPPeersResponse {
+  repeated LCPPeer peers = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+// GetLocalInfoRequest is the request message for `LCPDService.GetLocalInfo`.
+message GetLocalInfoRequest {}
+
+// GetLocalInfoResponse is the response message for `LCPDService.GetLocalInfo`.
+message GetLocalInfoResponse {
+  // Local node identifier (Lightning pubkey, hex-encoded 33-byte compressed key).
+  string node_id = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // Local node's LCP manifest.
+  LCPManifest manifest = 2 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).required = true
+  ];
+}
+
+// RequestQuoteRequest is the request message for `LCPDService.RequestQuote`.
+message RequestQuoteRequest {
+  // The target peer's Node ID (Pubkey).
+  string peer_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The strict task definition.
+  Task task = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+// RequestQuoteResponse is the response message for `LCPDService.RequestQuote`.
+message RequestQuoteResponse {
+  // The peer sending the quote.
+  string peer_id = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The agreed terms and invoice.
+  Terms terms = 2 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).required = true
+  ];
+}
+
+// AcceptAndExecuteRequest is the request message for `LCPDService.AcceptAndExecute`.
+message AcceptAndExecuteRequest {
+  // The target peer's Node ID.
+  string peer_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The job_id to execute (must match a previously received Quote).
+  bytes job_id = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).bytes.len = 32
+  ];
+
+  // Authorization to pay the invoice.
+  bool pay_invoice = 3 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+// AcceptAndExecuteResponse is the response message for `LCPDService.AcceptAndExecute`.
+message AcceptAndExecuteResponse {
+  // The execution result.
+  Result result = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).required = true
+  ];
+}
+
+// CancelJobRequest is the request message for `LCPDService.CancelJob`.
+message CancelJobRequest {
+  // The target peer's Node ID.
+  string peer_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The job_id to cancel.
+  bytes job_id = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).bytes.len = 32
+  ];
+
+  // Optional human-readable cancellation reason.
+  string reason = 3 [(buf.validate.field).string.max_len = 256];
+}
+
+// CancelJobResponse is the response message for `LCPDService.CancelJob`.
+message CancelJobResponse {
+  bool success = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+}

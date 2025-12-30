@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${LCPD_GRPCD_DATA_DIR:-"$ROOT_DIR/.data/lcpd-grpcd"}"
+LOG_DIR="$DATA_DIR/logs"
+PID_DIR="$DATA_DIR/pids"
+
+BIN_PATH="${LCPD_GRPCD_BIN:-"$ROOT_DIR/bin/lcpd-grpcd"}"
+GRPC_ADDR="${LCPD_GRPCD_GRPC_ADDR:-"127.0.0.1:50051"}"
+STARTUP_TIMEOUT="${LCPD_GRPCD_STARTUP_TIMEOUT:-"20s"}"
+
+ENV_FILE="${LCPD_GRPCD_ENV_FILE:-"$ROOT_DIR/lcpd.env"}"
+
+LOG_PATH="${LCPD_GRPCD_LOG_PATH:-"$LOG_DIR/lcpd-grpcd.log"}"
+LOG_KEEP_ROTATED="${LCPD_GRPCD_LOG_KEEP_ROTATED:-"10"}"
+
+PIDFILE="$PID_DIR/lcpd-grpcd.pid"
+
+usage() {
+	cat <<'EOF'
+Background runner for lcpd-grpcd (stdout/stderr -> file).
+
+Usage:
+  ./scripts/lcpd-grpcd up [-- extra lcpd-grpcd flags...]
+  ./scripts/lcpd-grpcd down
+  ./scripts/lcpd-grpcd status
+  ./scripts/lcpd-grpcd logs [-n N]
+
+Environment variables (optional):
+  LCPD_GRPCD_BIN                 Path to lcpd-grpcd binary (default: ./bin/lcpd-grpcd)
+  LCPD_GRPCD_GRPC_ADDR           gRPC listen addr (default: 127.0.0.1:50051)
+  LCPD_GRPCD_STARTUP_TIMEOUT     fx startup timeout (default: 20s)
+  LCPD_GRPCD_ENV_FILE            Optional env file to source before start (default: ./lcpd.env)
+
+  LCPD_GRPCD_DATA_DIR            State dir (default: ./.data/lcpd-grpcd)
+  LCPD_GRPCD_LOG_PATH            Symlink path pointing at the current run log (default: $DATA_DIR/logs/lcpd-grpcd.log)
+  LCPD_GRPCD_LOG_KEEP_ROTATED    Keep this many run logs (default: 10)
+
+Notes:
+  - This script keeps a PID file under $DATA_DIR/pids/.
+  - It sends SIGINT for graceful shutdown.
+  - For long-running / auto-restart / boot-time startup, prefer systemd/launchd
+    (see docs/background.md).
+EOF
+}
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+
+ensure_cmd() {
+	local cmd="$1"
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		die "command not found: ${cmd}"
+	fi
+}
+
+is_pid_running() {
+	local pid="$1"
+	[[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_pidfile() {
+	local pidfile="$1"
+	if [[ ! -f "$pidfile" ]]; then
+		return 1
+	fi
+	local pid
+	pid="$(cat "$pidfile" 2>/dev/null || true)"
+	pid="${pid//[[:space:]]/}"
+	if [[ -z "$pid" ]]; then
+		return 1
+	fi
+	echo "$pid"
+}
+
+load_env_file() {
+	local path="$1"
+	if [[ ! -f "$path" ]]; then
+		return 0
+	fi
+
+	# This intentionally treats the file as bash (so it can include quoted values).
+	# Keep it simple: KEY="value" lines; never commit real secrets.
+	set -a
+	# shellcheck disable=SC1090
+	source "$path"
+	set +a
+}
+
+make_run_log_path() {
+	local link_path="$1"
+	local ts
+	ts="$(date +%Y%m%d-%H%M%S)"
+
+	# Uniqueness: allow multiple starts within the same second.
+	local run_id="${ts}.$$.$RANDOM"
+
+	if [[ "$link_path" == *.log ]]; then
+		echo "${link_path%.log}.${run_id}.log"
+		return 0
+	fi
+	echo "${link_path}.${run_id}.log"
+}
+
+link_log_path_to_run_log() {
+	local link_path="$1"
+	local run_log_path="$2"
+
+	mkdir -p "$(dirname "$link_path")"
+	touch "$run_log_path"
+
+	if [[ -e "$link_path" && ! -L "$link_path" ]]; then
+		local migrated
+		migrated="$(make_run_log_path "$link_path")"
+		mv "$link_path" "$migrated"
+	fi
+
+	rm -f "$link_path"
+	ln -s "$run_log_path" "$link_path"
+}
+
+cleanup_run_logs() {
+	local link_path="$1"
+	local keep="$2"
+
+	if [[ "$keep" =~ ^[0-9]+$ ]]; then
+		:
+	else
+		die "LCPD_GRPCD_LOG_KEEP_ROTATED must be an integer"
+	fi
+
+	if (( keep == 0 )); then
+		return 0
+	fi
+
+	local glob_prefix="$link_path"
+	if [[ "$glob_prefix" == *.log ]]; then
+		glob_prefix="${glob_prefix%.log}"
+	fi
+
+	local run_logs=()
+	shopt -s nullglob
+	run_logs=( "${glob_prefix}."*.log )
+	shopt -u nullglob
+	if (( ${#run_logs[@]} <= keep )); then
+		return 0
+	fi
+
+	local sorted=()
+	IFS=$'\n' sorted=( $(printf '%s\n' "${run_logs[@]}" | sort -r) )
+	unset IFS
+	for (( i=keep; i<${#sorted[@]}; i++ )); do
+		rm -f "${sorted[$i]}"
+	done
+}
+
+start_lcpd_grpcd() {
+	ensure_cmd nohup
+	load_env_file "$ENV_FILE"
+
+	if [[ ! -x "$BIN_PATH" ]]; then
+		die "lcpd-grpcd binary not found/executable: $BIN_PATH (build it via: cd go-lcpd && mkdir -p bin && GOBIN=\"$PWD/bin\" go install ./tools/lcpd-grpcd)"
+	fi
+
+	mkdir -p "$LOG_DIR" "$PID_DIR"
+
+	local pid=""
+	pid="$(read_pidfile "$PIDFILE" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		echo "already running (pid=${pid})"
+		return 0
+	fi
+	rm -f "$PIDFILE"
+
+	local run_log_path
+	run_log_path="$(make_run_log_path "$LOG_PATH")"
+	link_log_path_to_run_log "$LOG_PATH" "$run_log_path"
+	cleanup_run_logs "$LOG_PATH" "$LOG_KEEP_ROTATED"
+
+	echo "starting lcpd-grpcd (grpc_addr=${GRPC_ADDR} log=${LOG_PATH} -> ${run_log_path})"
+	(
+		cd "$ROOT_DIR"
+		nohup "$BIN_PATH" \
+			-grpc_addr="$GRPC_ADDR" \
+			-startup_timeout="$STARTUP_TIMEOUT" \
+			"$@" \
+			>>"$LOG_PATH" 2>&1 &
+		echo "$!" >"$PIDFILE"
+	)
+	echo "started (pid=$(cat "$PIDFILE"))"
+}
+
+stop_lcpd_grpcd() {
+	local pid=""
+	pid="$(read_pidfile "$PIDFILE" || true)"
+	if [[ -z "$pid" ]]; then
+		echo "not running"
+		return 0
+	fi
+	if ! is_pid_running "$pid"; then
+		rm -f "$PIDFILE"
+		echo "not running (stale pidfile removed)"
+		return 0
+	fi
+
+	echo "stopping lcpd-grpcd (pid=${pid})"
+	kill -INT "$pid" 2>/dev/null || true
+
+	local timeout_secs="${LCPD_GRPCD_STOP_TIMEOUT_SECS:-10}"
+	local start
+	start="$(date +%s)"
+	while is_pid_running "$pid"; do
+		local now
+		now="$(date +%s)"
+		if (( now - start > timeout_secs )); then
+			echo "still running after ${timeout_secs}s, sending SIGTERM"
+			kill -TERM "$pid" 2>/dev/null || true
+			break
+		fi
+		sleep 0.1
+	done
+
+	start="$(date +%s)"
+	while is_pid_running "$pid"; do
+		local now
+		now="$(date +%s)"
+		if (( now - start > 5 )); then
+			echo "still running, sending SIGKILL"
+			kill -KILL "$pid" 2>/dev/null || true
+			break
+		fi
+		sleep 0.1
+	done
+
+	rm -f "$PIDFILE"
+	echo "stopped"
+}
+
+status_lcpd_grpcd() {
+	local pid=""
+	pid="$(read_pidfile "$PIDFILE" || true)"
+	if [[ -z "$pid" ]]; then
+		echo "not running"
+		return 0
+	fi
+	if is_pid_running "$pid"; then
+		echo "running (pid=${pid})"
+		echo "log: ${LOG_PATH}"
+		return 0
+	fi
+	echo "not running (stale pidfile)"
+	return 1
+}
+
+logs_lcpd_grpcd() {
+	ensure_cmd tail
+	local n="${1:-200}"
+	if [[ ! -f "$LOG_PATH" ]]; then
+		die "log file not found: $LOG_PATH"
+	fi
+	tail -n "$n" -f "$LOG_PATH"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+	up)
+		if [[ "${1:-}" == "--" ]]; then
+			shift
+		fi
+		start_lcpd_grpcd "$@"
+		;;
+	down)
+		stop_lcpd_grpcd
+		;;
+	status)
+		status_lcpd_grpcd
+		;;
+	logs)
+		if [[ "${1:-}" == "-n" ]]; then
+			shift
+			logs_lcpd_grpcd "${1:-200}"
+		else
+			logs_lcpd_grpcd 200
+		fi
+		;;
+	-h|--help|help|"")
+		usage
+		;;
+	*)
+		usage
+		die "unknown command: $cmd"
+		;;
+esac

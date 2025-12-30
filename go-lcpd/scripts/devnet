@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${DEVNET_DATA_DIR:-"$ROOT_DIR/.data/devnet"}"
+BITCOIND_DIR="$DATA_DIR/bitcoind"
+LND_DIR="$DATA_DIR/lnd"
+LOG_DIR="$DATA_DIR/logs"
+PID_DIR="$DATA_DIR/pids"
+
+BITCOIND_RPC_PORT="${DEVNET_BITCOIND_RPC_PORT:-18443}"
+LND_DEBUGLEVEL="${DEVNET_LND_DEBUGLEVEL:-info}"
+
+ALICE_RPC_PORT="${DEVNET_LND_ALICE_RPC_PORT:-10009}"
+ALICE_P2P_PORT="${DEVNET_LND_ALICE_P2P_PORT:-9735}"
+BOB_RPC_PORT="${DEVNET_LND_BOB_RPC_PORT:-10010}"
+BOB_P2P_PORT="${DEVNET_LND_BOB_P2P_PORT:-9736}"
+
+BITCOIND_RPC_ADDR="127.0.0.1:${BITCOIND_RPC_PORT}"
+ALICE_RPC_ADDR="127.0.0.1:${ALICE_RPC_PORT}"
+ALICE_P2P_ADDR="127.0.0.1:${ALICE_P2P_PORT}"
+BOB_RPC_ADDR="127.0.0.1:${BOB_RPC_PORT}"
+BOB_P2P_ADDR="127.0.0.1:${BOB_P2P_PORT}"
+
+BITCOIND_PIDFILE="$PID_DIR/bitcoind.pid"
+LND_ALICE_PIDFILE="$PID_DIR/lnd-alice.pid"
+LND_BOB_PIDFILE="$PID_DIR/lnd-bob.pid"
+
+BITCOIND_COOKIE="$BITCOIND_DIR/regtest/.cookie"
+
+usage() {
+	cat <<'EOF'
+Regtest devnet manager (bitcoind + 2x lnd).
+
+Usage:
+  ./scripts/devnet up
+  ./scripts/devnet down
+  ./scripts/devnet status
+  ./scripts/devnet info
+  ./scripts/devnet paths <alice|bob>
+  ./scripts/devnet lncli <alice|bob> [lncli args...]
+  ./scripts/devnet bitcoin-cli [bitcoin-cli args...]
+
+Environment variables (optional):
+  DEVNET_DATA_DIR                  Override state directory (default: ./.data/devnet)
+  DEVNET_BITCOIND_RPC_PORT         (default: 18443)
+  DEVNET_LND_ALICE_RPC_PORT        (default: 10009)
+  DEVNET_LND_ALICE_P2P_PORT        (default: 9735)
+  DEVNET_LND_BOB_RPC_PORT          (default: 10010)
+  DEVNET_LND_BOB_P2P_PORT          (default: 9736)
+  DEVNET_LND_DEBUGLEVEL            (default: info)
+
+Notes:
+  - Requires `bitcoind`, `bitcoin-cli`, `lnd`, and `lncli` on PATH.
+  - If you use the optional Nix devShell, you can run: `nix develop -c ./scripts/devnet up`
+  - All state is stored under ./.data/devnet/ (gitignored).
+EOF
+}
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+
+ensure_cmd() {
+	local cmd="$1"
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		die "command not found: ${cmd} (install it and ensure it's on PATH)"
+	fi
+}
+
+is_pid_running() {
+	local pid="$1"
+	[[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_pidfile() {
+	local pidfile="$1"
+	if [[ ! -f "$pidfile" ]]; then
+		return 1
+	fi
+	local pid
+	pid="$(cat "$pidfile" 2>/dev/null || true)"
+	pid="${pid//[[:space:]]/}"
+	if [[ -z "$pid" ]]; then
+		return 1
+	fi
+	echo "$pid"
+}
+
+wait_for_file() {
+	local path="$1"
+	local timeout_secs="${2:-15}"
+	local start
+	start="$(date +%s)"
+	while [[ ! -f "$path" ]]; do
+		local now
+		now="$(date +%s)"
+		if (( now - start > timeout_secs )); then
+			die "timed out waiting for file: $path"
+		fi
+		sleep 0.1
+	done
+}
+
+start_bitcoind() {
+	mkdir -p "$BITCOIND_DIR" "$LOG_DIR" "$PID_DIR"
+
+	local pid=""
+	pid="$(read_pidfile "$BITCOIND_PIDFILE" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		return 0
+	fi
+	rm -f "$BITCOIND_PIDFILE"
+
+	local log_path="$LOG_DIR/bitcoind.log"
+	: >"$log_path"
+
+	echo "starting bitcoind (rpc_addr=$BITCOIND_RPC_ADDR)"
+	bitcoind \
+		-regtest \
+		-server=1 \
+		-listen=0 \
+		-txindex=1 \
+		-fallbackfee=0.0002 \
+		-datadir="$BITCOIND_DIR" \
+		-rpcbind=127.0.0.1 \
+		-rpcallowip=127.0.0.1 \
+		-rpcport="$BITCOIND_RPC_PORT" \
+		-printtoconsole \
+		>"$log_path" 2>&1 &
+
+	echo "$!" >"$BITCOIND_PIDFILE"
+	wait_for_file "$BITCOIND_COOKIE" 20
+}
+
+start_lnd() {
+	local node_name="$1"
+	local rpc_addr="$2"
+	local p2p_addr="$3"
+	local pidfile="$4"
+
+	local node_dir="$LND_DIR/$node_name"
+	mkdir -p "$node_dir" "$LOG_DIR" "$PID_DIR"
+
+	local pid=""
+	pid="$(read_pidfile "$pidfile" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		return 0
+	fi
+	rm -f "$pidfile"
+
+	local log_path="$LOG_DIR/lnd-${node_name}.log"
+	: >"$log_path"
+
+	local tls_cert_path="$node_dir/tls.cert"
+
+	echo "starting lnd (${node_name}) (rpc_addr=$rpc_addr p2p_addr=$p2p_addr)"
+	lnd \
+		--lnddir="$node_dir" \
+		--logdir="$node_dir/logs" \
+		--listen="$p2p_addr" \
+		--rpclisten="$rpc_addr" \
+		--norest \
+		--nobootstrap \
+		--no-macaroons \
+		--tlsdisableautofill \
+		--tlsextradomain=localhost \
+		--tlsextraip=127.0.0.1 \
+		--bitcoin.active \
+		--bitcoin.regtest \
+		--bitcoin.node=bitcoind \
+		--bitcoin.defaultchanconfs=1 \
+		--bitcoind.rpchost="$BITCOIND_RPC_ADDR" \
+		--bitcoind.rpccookie="$BITCOIND_COOKIE" \
+		--bitcoind.rpcpolling \
+		--bitcoind.blockpollinginterval=200ms \
+		--bitcoind.txpollinginterval=200ms \
+		--debuglevel="$LND_DEBUGLEVEL" \
+		>"$log_path" 2>&1 &
+
+	echo "$!" >"$pidfile"
+	wait_for_file "$tls_cert_path" 20
+}
+
+stop_by_pidfile() {
+	local name="$1"
+	local pidfile="$2"
+
+	local pid=""
+	pid="$(read_pidfile "$pidfile" || true)"
+	if [[ -z "$pid" ]]; then
+		return 0
+	fi
+	if ! is_pid_running "$pid"; then
+		rm -f "$pidfile"
+		return 0
+	fi
+
+	echo "stopping ${name} (pid=${pid})"
+	kill "$pid" >/dev/null 2>&1 || true
+
+	local start
+	start="$(date +%s)"
+	while is_pid_running "$pid"; do
+		local now
+		now="$(date +%s)"
+		if (( now - start > 5 )); then
+			echo "force killing ${name} (pid=${pid})"
+			kill -9 "$pid" >/dev/null 2>&1 || true
+			break
+		fi
+		sleep 0.2
+	done
+	rm -f "$pidfile"
+}
+
+cmd_up() {
+	ensure_cmd bitcoind
+	ensure_cmd bitcoin-cli
+	ensure_cmd lnd
+	ensure_cmd lncli
+
+	mkdir -p "$DATA_DIR"
+
+	start_bitcoind
+	start_lnd "alice" "$ALICE_RPC_ADDR" "$ALICE_P2P_ADDR" "$LND_ALICE_PIDFILE"
+	start_lnd "bob" "$BOB_RPC_ADDR" "$BOB_P2P_ADDR" "$LND_BOB_PIDFILE"
+
+	cat <<EOF
+
+devnet is up
+  data_dir:          $DATA_DIR
+  bitcoind_rpc_addr: $BITCOIND_RPC_ADDR
+  alice_rpc_addr:    $ALICE_RPC_ADDR
+  alice_p2p_addr:    $ALICE_P2P_ADDR
+  bob_rpc_addr:      $BOB_RPC_ADDR
+  bob_p2p_addr:      $BOB_P2P_ADDR
+
+Next (interactive, first time only):
+  ./scripts/devnet lncli alice create
+  ./scripts/devnet lncli bob create
+
+Useful:
+  ./scripts/devnet status
+  ./scripts/devnet info
+EOF
+}
+
+cmd_down() {
+	stop_by_pidfile "lnd-bob" "$LND_BOB_PIDFILE"
+	stop_by_pidfile "lnd-alice" "$LND_ALICE_PIDFILE"
+	stop_by_pidfile "bitcoind" "$BITCOIND_PIDFILE"
+}
+
+cmd_status() {
+	local pid=""
+	pid="$(read_pidfile "$BITCOIND_PIDFILE" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		echo "bitcoind: running (pid=$pid)"
+	else
+		echo "bitcoind: stopped"
+	fi
+
+	pid="$(read_pidfile "$LND_ALICE_PIDFILE" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		echo "lnd-alice: running (pid=$pid)"
+	else
+		echo "lnd-alice: stopped"
+	fi
+
+	pid="$(read_pidfile "$LND_BOB_PIDFILE" || true)"
+	if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+		echo "lnd-bob: running (pid=$pid)"
+	else
+		echo "lnd-bob: stopped"
+	fi
+}
+
+cmd_info() {
+	cat <<EOF
+data_dir=$DATA_DIR
+bitcoind_rpc_addr=$BITCOIND_RPC_ADDR
+
+alice_rpc_addr=$ALICE_RPC_ADDR
+alice_p2p_addr=$ALICE_P2P_ADDR
+alice_tls_cert_path=$LND_DIR/alice/tls.cert
+
+bob_rpc_addr=$BOB_RPC_ADDR
+bob_p2p_addr=$BOB_P2P_ADDR
+bob_tls_cert_path=$LND_DIR/bob/tls.cert
+EOF
+}
+
+cmd_paths() {
+	local node="${1:-}"
+	if [[ -z "$node" ]]; then
+		die "paths: node name required (alice|bob)"
+	fi
+	case "$node" in
+	alice)
+		echo "node_name=alice"
+		echo "rpc_addr=$ALICE_RPC_ADDR"
+		echo "p2p_addr=$ALICE_P2P_ADDR"
+		echo "lnd_dir=$LND_DIR/alice"
+		echo "tls_cert_path=$LND_DIR/alice/tls.cert"
+		echo "admin_macaroon_path=$LND_DIR/alice/data/chain/bitcoin/regtest/admin.macaroon"
+		;;
+	bob)
+		echo "node_name=bob"
+		echo "rpc_addr=$BOB_RPC_ADDR"
+		echo "p2p_addr=$BOB_P2P_ADDR"
+		echo "lnd_dir=$LND_DIR/bob"
+		echo "tls_cert_path=$LND_DIR/bob/tls.cert"
+		echo "admin_macaroon_path=$LND_DIR/bob/data/chain/bitcoin/regtest/admin.macaroon"
+		;;
+	*)
+		die "unknown node: $node (expected alice|bob)"
+		;;
+	esac
+}
+
+cmd_bitcoin_cli() {
+	ensure_cmd bitcoin-cli
+
+	bitcoin-cli \
+		-regtest \
+		-datadir="$BITCOIND_DIR" \
+		-rpcport="$BITCOIND_RPC_PORT" \
+		"$@"
+}
+
+cmd_lncli() {
+	local node="${1:-}"
+	shift || true
+	if [[ -z "$node" ]]; then
+		die "lncli: node name required (alice|bob)"
+	fi
+
+	local rpc_addr=""
+	local node_dir=""
+	local tls_cert_path=""
+
+	case "$node" in
+	alice)
+		rpc_addr="$ALICE_RPC_ADDR"
+		node_dir="$LND_DIR/alice"
+		tls_cert_path="$LND_DIR/alice/tls.cert"
+		;;
+	bob)
+		rpc_addr="$BOB_RPC_ADDR"
+		node_dir="$LND_DIR/bob"
+		tls_cert_path="$LND_DIR/bob/tls.cert"
+		;;
+	*)
+		die "unknown node: $node (expected alice|bob)"
+		;;
+	esac
+
+	ensure_cmd lncli
+
+	lncli \
+		--rpcserver="$rpc_addr" \
+		--lnddir="$node_dir" \
+		--tlscertpath="$tls_cert_path" \
+		--no-macaroons \
+		"$@"
+}
+
+main() {
+	local cmd="${1:-}"
+	shift || true
+
+	case "$cmd" in
+	"" | "-h" | "--help" | "help")
+		usage
+		;;
+	up)
+		cmd_up
+		;;
+	down)
+		cmd_down
+		;;
+	status)
+		cmd_status
+		;;
+	info)
+		cmd_info
+		;;
+	paths)
+		cmd_paths "$@"
+		;;
+	lncli)
+		cmd_lncli "$@"
+		;;
+	bitcoin-cli | bitcoin_cli)
+		cmd_bitcoin_cli "$@"
+		;;
+	*)
+		die "unknown command: $cmd (try --help)"
+		;;
+	esac
+}
+
+main "$@"

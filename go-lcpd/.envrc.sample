@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# direnv config for go-lcpd.
+#
+# - use the go-lcpd flake via `nix develop`
+# - run `direnv allow` once to enable auto-loading
+
+use flake .
+
+# Optional: enable regtest integration tests (heavy).
+# export LCP_ITEST_REGTEST=1
+
+# Optional: keep regtest data dir even on success.
+# export LCP_ITEST_KEEP_DATA=1
+
+# Optional: daemon settings.
+# export LCPD_LOG_LEVEL=debug
+# export LCPD_BACKEND=openai
+# export LCPD_LLM_MAX_OUTPUT_TOKENS=256
+#
+# export LCPD_OPENAI_API_KEY="..."
+# export LCPD_OPENAI_BASE_URL="https://api.openai.com"
+#
+# export LCPD_LND_RPC_ADDR="localhost:10009"
+# export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
+# export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
+# export LCPD_LND_MANIFEST_RESEND_INTERVAL="10s"

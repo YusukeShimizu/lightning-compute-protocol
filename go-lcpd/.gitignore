@@ -1,0 +1,9 @@
+.envrc
+lcpd.env
+.tools/
+bin/
+tmp/
+.data/
+*.test
+*.out
+proto/_deps/

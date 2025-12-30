@@ -1,0 +1,31 @@
+node_modules
+
+# Build artifacts
+bin/
+dist/
+coverage.*
+*.out
+*.test
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Environment / direnv
+.direnv/
+.env
+.env.*
+logs/
+*.db
+slack-go-llm.pid
+.codex/sessions/
+.codex/auth.json
+.codex/history.jsonl
+.codex/version.json
+.gocache/
+.golangci-lint-cache/
+
+# nix / local devnet state
+.data/
+result

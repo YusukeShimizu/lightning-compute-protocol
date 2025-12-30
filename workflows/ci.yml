@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+
+jobs:
+  go-lcpd:
+    name: go-lcpd (lint + test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v9
+
+      # Speeds up Nix builds by caching store paths in GitHub Actions cache (no secrets required).
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+        with:
+          # Disable telemetry/diagnostics. Remove this line if you want to help improve the action.
+          diagnostic-endpoint: ""
+          # Prefer the GitHub Actions cache (works on PRs/forks); don't use FlakeHub Cache.
+          use-gha-cache: true
+          use-flakehub: false
+
+      - name: Lint and test
+        run: nix develop ./go-lcpd -c make -C go-lcpd lint test

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LND_VERSION="${1:-v0.19.3-beta}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$ROOT_DIR"
+
+say() { printf "%s\n" "$*"; }
+die() { say "[update-lnd-stubs][error] $*" >&2; exit 1; }
+
+command -v go >/dev/null 2>&1 || die "missing 'go' in PATH"
+
+say "[update-lnd-stubs] downloading github.com/lightningnetwork/lnd@${LND_VERSION}"
+go mod download "github.com/lightningnetwork/lnd@${LND_VERSION}"
+
+MOD_DIR="$(go env GOPATH)/pkg/mod/github.com/lightningnetwork/lnd@${LND_VERSION}"
+SRC_LNRPC="${MOD_DIR}/lnrpc"
+
+[ -d "$SRC_LNRPC" ] || die "lnrpc dir not found: $SRC_LNRPC"
+
+DST_LNRPC="${ROOT_DIR}/internal/lnd/lnrpc"
+DST_ROUTER="${ROOT_DIR}/internal/lnd/routerrpc"
+
+mkdir -p "$DST_LNRPC" "$DST_ROUTER"
+
+say "[update-lnd-stubs] copying lnrpc stubs"
+cp "$SRC_LNRPC/lightning.pb.go" "$DST_LNRPC/"
+cp "$SRC_LNRPC/lightning_grpc.pb.go" "$DST_LNRPC/"
+cp "$SRC_LNRPC/walletunlocker.pb.go" "$DST_LNRPC/"
+cp "$SRC_LNRPC/walletunlocker_grpc.pb.go" "$DST_LNRPC/"
+
+say "[update-lnd-stubs] copying routerrpc stubs"
+cp "$SRC_LNRPC/routerrpc/router.pb.go" "$DST_ROUTER/"
+cp "$SRC_LNRPC/routerrpc/router_grpc.pb.go" "$DST_ROUTER/"
+
+# Files copied from the module cache can be read-only.
+chmod -R u+w "$DST_LNRPC" "$DST_ROUTER"
+
+# Make routerrpc import our vendored lnrpc package.
+say "[update-lnd-stubs] patching routerrpc imports"
+perl -pi -e 's|github.com/lightningnetwork/lnd/lnrpc|github.com/bruwbird/lcp/go-lcpd/internal/lnd/lnrpc|g' \
+  "$DST_ROUTER/router.pb.go" \
+  "$DST_ROUTER/router_grpc.pb.go"
+
+say "[update-lnd-stubs] done"
