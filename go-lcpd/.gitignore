@@ -7,3 +7,4 @@ tmp/
 *.test
 *.out
 proto/_deps/
+config.yaml

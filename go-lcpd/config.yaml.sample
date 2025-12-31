@@ -18,7 +18,7 @@
 #           cached_input_msat_per_mtok: 175000
 #           output_msat_per_mtok: 14000000
 #
-enabled: true
+enabled: false
 quote_ttl_seconds: 300
 
 llm:
@@ -28,9 +28,9 @@ llm:
       # backend_model defaults to the profile name when omitted.
       # backend_model: gpt-5.2
       price:
-        input_msat_per_mtok: 1750000
-        cached_input_msat_per_mtok: 175000
-        output_msat_per_mtok: 14000000
+        input_msat_per_mtok: 17500000
+        cached_input_msat_per_mtok: 1750000
+        output_msat_per_mtok: 140000000
       # Optional OpenAI-compatible parameters (Provider-side defaults).
       # openai:
       #   temperature: 0.7
