@@ -1,0 +1,26 @@
+name: docs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mintlify:
+    name: mintlify (broken-links)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check internal links
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: npx --yes mintlify@4.2.255 broken-links

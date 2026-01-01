@@ -11,6 +11,24 @@ If you are new to Lightning, Go, or protocol work, open an issue or a draft PR a
 - Reference implementation (daemon): `go-lcpd/`
 - go-lcpd developer docs: `go-lcpd/docs/`
 
+## Docs (Mintlify)
+
+This repo’s docs site is managed with Mintlify (`docs.json`).
+
+Local preview:
+
+```sh
+npx mintlify dev --no-open
+```
+
+Check internal links:
+
+```sh
+npx mintlify broken-links
+```
+
+Note: Prefer repo-root-relative links (e.g., `go-lcpd/docs/regtest.md`) so the link checker resolves paths consistently.
+
 ## What you can help with
 
 - Fix bugs, improve error handling, or simplify code
@@ -113,6 +131,7 @@ Before you hit "Ready for review", it helps if:
 - code is formatted (`make fmt` if relevant)
 - tests added/updated for behavior changes
 - `make test` and `make lint` are green (for `go-lcpd` changes)
+- `npx mintlify broken-links` is green (for docs changes)
 - docs updated if behavior or flags changed
 
 ## Security
