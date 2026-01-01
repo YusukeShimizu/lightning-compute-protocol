@@ -70,6 +70,59 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
+## CLI ツールから使う
+
+`openai-serve` は OpenAI **Chat Completions** API（非ストリーミング）互換です。
+多くの OpenAI 互換 CLI ツールは、`base_url` と API key を設定することで `openai-serve` を利用できます。
+
+### Codex CLI
+
+Codex CLI を `openai-serve` に向けるには、カスタムの model provider を定義します（wire format は Chat Completions）。
+
+1) `~/.codex/config.toml` に追記:
+
+```toml
+[model_providers.openai_serve]
+name = "openai-serve"
+base_url = "http://127.0.0.1:8080/v1"
+env_key = "OPENAI_SERVE_API_KEY"
+wire_api = "chat"
+
+[profiles.lcp]
+model = "gpt-5.2"
+model_provider = "openai_serve"
+```
+
+2) 実行（API key は `openai-serve` 側の設定と一致させてください）:
+
+```sh
+export OPENAI_SERVE_API_KEY="devkey1"
+codex --profile lcp "Say hello in Japanese."
+```
+
+注意: `openai-serve` は Chat Completions のサブセットのみ対応です。クライアントが `tools` / `response_format` /
+ストリーミング関連フィールドを送ると、リクエストは拒否されます。
+
+### LLM（`llm`）
+
+`llm` は OpenAI 互換 base URL に向けて実行できます。`llm` の user directory に `extra-openai-models.yaml` を作成し、
+以下を追加してください:
+
+```yaml
+- model_id: lcp-gpt-5.2
+  model_name: gpt-5.2
+  api_base: http://127.0.0.1:8080/v1
+  can_stream: false
+  api_key_name: openai-serve
+```
+
+その後:
+
+```sh
+llm keys set openai-serve
+llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
+```
+
 ## リクエスト/レスポンスの挙動
 
 - JSON は strict に decode します（`DisallowUnknownFields`）: 未知フィールドがあると `400` になります。
@@ -88,4 +141,3 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 - `X-Lcp-Job-Id`: job id（hex）
 - `X-Lcp-Price-Msat`: 受諾した quote の価格
 - `X-Lcp-Terms-Hash`: 受諾した quote の terms hash（hex）
-
