@@ -53,6 +53,23 @@ This project is unaudited. Running it against real funds and real peers can lead
 - Protocol spec (LCP v0.1): [protocol/protocol.md](protocol/protocol.md)
 - One-shot client (demo): [go-lcpd/tools/lcpd-oneshot](go-lcpd/tools/lcpd-oneshot)
 
+## Docs site (Mintlify)
+
+This repository’s docs site is managed with Mintlify (`docs.json`).
+Most pages live under `go-lcpd/docs/` and `protocol/`.
+
+Local preview:
+
+```sh
+npx mintlify dev --no-open
+```
+
+Check internal links:
+
+```sh
+npx mintlify broken-links
+```
+
 ## Repository layout (high level)
 
 - `protocol/`: the LCP wire protocol spec (BOLT-style TLV + state machine)

@@ -83,10 +83,10 @@ Details: `docs/devnet.md`
 
 To run LCP against a real `lnd`, see:
 
-- Quickstart (mainnet): [docs/quickstart-mainnet.md](docs/quickstart-mainnet.md)
-- Configuration: [docs/configuration.md](docs/configuration.md)
-- Background run + logging: [docs/background.md](docs/background.md)
-- regtest (safer): [docs/regtest.md](docs/regtest.md)
+- Quickstart (mainnet): [go-lcpd/docs/quickstart-mainnet.md](go-lcpd/docs/quickstart-mainnet.md)
+- Configuration: [go-lcpd/docs/configuration.md](go-lcpd/docs/configuration.md)
+- Background run + logging: [go-lcpd/docs/background.md](go-lcpd/docs/background.md)
+- regtest (safer): [go-lcpd/docs/regtest.md](go-lcpd/docs/regtest.md)
 
 ## CLI (development)
 
