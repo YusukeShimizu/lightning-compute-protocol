@@ -7,10 +7,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   mintlify:
-    name: mintlify (broken-links)
+    name: mintlify (docs checks)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,6 +26,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Validate docs.json navigation
+        run: node scripts/check-docs-json.mjs
+
+      - name: Accessibility checks
+        run: npx --yes mintlify@4.2.255 a11y
 
       - name: Check internal links
         env:

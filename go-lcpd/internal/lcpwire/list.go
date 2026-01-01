@@ -16,7 +16,7 @@ const (
 	maxBytesListTotalBytes = 1 << 20 // 1MiB
 )
 
-// EncodeBytesList encodes a `bytes_list` as defined in `protocol/protocol.md`.
+// EncodeBytesList encodes a `bytes_list` as defined in `docs/protocol/protocol.md`.
 //
 // data: bigsize(count) + count*(bigsize(len_i) + len_i bytes)
 func EncodeBytesList(items [][]byte) ([]byte, error) {
@@ -41,7 +41,7 @@ func EncodeBytesList(items [][]byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeBytesList decodes a `bytes_list` as defined in `protocol/protocol.md`.
+// DecodeBytesList decodes a `bytes_list` as defined in `docs/protocol/protocol.md`.
 func DecodeBytesList(b []byte) ([][]byte, error) {
 	var (
 		r       = bytes.NewReader(b)
