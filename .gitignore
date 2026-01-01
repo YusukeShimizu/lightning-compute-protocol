@@ -1,5 +1,8 @@
 node_modules
 
+# Mintlify local dev output
+.mintlify/
+
 # Build artifacts
 bin/
 dist/
