@@ -1,0 +1,62 @@
+---
+title: openai-serve configuration
+description: Environment variables, routing rules, model validation, and safety limits for the OpenAI-compatible gateway.
+---
+
+`openai-serve` is configured via environment variables.
+
+You can use `apps/openai-serve/.envrc.sample` (direnv) for local development.
+
+## Environment variables
+
+| Name | Default | Notes |
+| --- | --- | --- |
+| `OPENAI_SERVE_HTTP_ADDR` | `127.0.0.1:8080` | HTTP listen `host:port` |
+| `OPENAI_SERVE_LCPD_GRPC_ADDR` | `127.0.0.1:50051` | `lcpd-grpcd` gRPC address |
+| `OPENAI_SERVE_API_KEYS` | (empty) | If set, require `Authorization: Bearer ...` |
+| `OPENAI_SERVE_DEFAULT_PEER_ID` | (empty) | Default LCP peer id (66 hex chars) |
+| `OPENAI_SERVE_MODEL_MAP` | (empty) | `model=peer_id;model2=peer_id` |
+| `OPENAI_SERVE_MODEL_ALLOWLIST` | (empty) | Comma-separated model IDs |
+| `OPENAI_SERVE_ALLOW_UNLISTED_MODELS` | `false` | If `true`, skip model validation |
+| `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | If >0, reject quotes exceeding this |
+| `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
+| `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
+| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
+| `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+
+## Routing and peer selection
+
+For a given `model`, the Provider peer is selected in this order:
+
+1. `OPENAI_SERVE_MODEL_MAP` (if the mapped peer is connected/LCP-ready)
+2. `OPENAI_SERVE_DEFAULT_PEER_ID` (if set and connected/LCP-ready)
+3. A peer that advertises the model in its manifest `supported_tasks` (if any)
+4. Fallback to the first connected peer
+
+If there are no connected LCP peers, the request fails.
+
+## Model validation
+
+Model validation is designed to prevent accidental misrouting or unexpected charges.
+
+- If `OPENAI_SERVE_MODEL_ALLOWLIST` is set: `model` must be in the allowlist unless
+  `OPENAI_SERVE_ALLOW_UNLISTED_MODELS=true`.
+- Otherwise: if any connected peers advertise `supported_tasks`, the model must be advertised by at least one peer.
+  If **no** peers advertise `supported_tasks`, validation is skipped to keep the gateway usable.
+
+## Safety limits
+
+- `OPENAI_SERVE_MAX_PRICE_MSAT`: upper-bound quote prices (rejects quotes above this value)
+- `OPENAI_SERVE_MAX_PROMPT_BYTES`: rejects prompts that exceed a size cap (helps stay below BOLT #1 custom message limits)
+- `OPENAI_SERVE_TIMEOUT_QUOTE` / `OPENAI_SERVE_TIMEOUT_EXECUTE`: bounds quote/execution duration
+
+## Authentication
+
+If `OPENAI_SERVE_API_KEYS` is set (comma-separated keys), all `/v1/*` endpoints require:
+
+```text
+Authorization: Bearer <key>
+```
+
+`/healthz` is intentionally not protected (useful for local probes); protect it at the reverse-proxy layer if needed.
+
