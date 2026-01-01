@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="LCP">
-  <rect width="64" height="64" rx="12" fill="#0B1220" />
-  <path d="M36 6 18 34h12l-2 24 18-28H34l2-24Z" fill="#2563EB" />
+  <rect width="64" height="64" rx="12" fill="#2563EB" />
+  <g fill="#fff">
+    <polygon points="6.4,5.1 32,5.1 32,17.9 24.3,32 6.4,32" />
+    <polygon points="37.1,33.3 58.9,33.3 58.9,58.9 33.3,58.9 33.3,44.8" />
+  </g>
 </svg>
