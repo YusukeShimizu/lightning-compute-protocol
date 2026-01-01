@@ -29,7 +29,7 @@ It serves as a reference implementation demonstrating how to use the protocol.
 These are design ideas. They are not implemented in this repo:
 - Large payload delivery: chunking or optional encrypted out-of-band transport.
 - Privacy improvements: BOLT 12 offers and blinded paths to reduce direct peering requirements.
-- Integration layers: OpenAI-compatible middleware and Lightning Service Provider (LSP) integration.
+- Integration layers: Lightning Service Provider (LSP) integration (an OpenAI-compatible gateway lives in `apps/openai-serve/`).
 
 ## Safety / use at your own risk
 
@@ -78,6 +78,24 @@ npx --yes mintlify@4.2.255 broken-links
 
 - `protocol/`: the LCP wire protocol spec (BOLT-style TLV + state machine)
 - `go-lcpd/`: reference implementation (Lightning Compute Protocol Daemon)
+- `apps/openai-serve/`: OpenAI-compatible HTTP gateway (forwards to `lcpd-grpcd` over gRPC)
+
+## Go workspace (go.work.sum)
+
+This repo is a multi-module Go repository (each subproject has its own `go.mod`).
+
+If you use Go workspaces locally (`go work`), Go will generate:
+
+- `go.work` (the workspace definition)
+- `go.work.sum` (workspace checksums, similar to `go.sum`)
+
+In this repo, these workspace files are treated as local dev artifacts and are ignored by git.
+If you see a `go.work.sum` appear locally, it is safe to delete; it will be regenerated as needed.
+
+Note: a single workspace that includes both `go-lcpd/` and `apps/openai-serve/` can hit an
+`ambiguous import: google.golang.org/genproto...` error because `protoc-gen-cobra` pulls the legacy
+`google.golang.org/genproto` module while gRPC uses the split `google.golang.org/genproto/googleapis/...` modules.
+If you run into this, prefer running Go commands from each module directory without a workspace.
 
 ## Development (go-lcpd)
 

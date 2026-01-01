@@ -29,6 +29,10 @@ slack-go-llm.pid
 .gocache/
 .golangci-lint-cache/
 
+# Go workspace (local dev)
+go.work
+go.work.sum
+
 # nix / local devnet state
 .data/
 result

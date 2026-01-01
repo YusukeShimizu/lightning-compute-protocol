@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+# direnv config for openai-serve.
+#
+# Usage:
+# - cp .envrc.sample .envrc
+# - direnv allow
+
+export OPENAI_SERVE_HTTP_ADDR="127.0.0.1:8080"
+export OPENAI_SERVE_LCPD_GRPC_ADDR="127.0.0.1:50051"
+
+# Optional: auth (comma-separated). If empty, auth is disabled.
+# export OPENAI_SERVE_API_KEYS="devkey1"
+
+# Optional: routing.
+# export OPENAI_SERVE_DEFAULT_PEER_ID="02ab...66hex..."
+# export OPENAI_SERVE_MODEL_MAP="gpt-5.2=02ab...;gpt-4.1-mini=03cd..."
+
+# Optional: model validation.
+# export OPENAI_SERVE_MODEL_ALLOWLIST="gpt-5.2,gpt-4.1-mini"
+# export OPENAI_SERVE_ALLOW_UNLISTED_MODELS="false"
+
+# Optional: safety limits.
+# export OPENAI_SERVE_MAX_PRICE_MSAT="50000"
+# export OPENAI_SERVE_MAX_PROMPT_BYTES="60000"
+
+# Optional: timeouts.
+# export OPENAI_SERVE_TIMEOUT_QUOTE="5s"
+# export OPENAI_SERVE_TIMEOUT_EXECUTE="120s"
+
+# Optional: logging.
+# export OPENAI_SERVE_LOG_LEVEL="info"
+
