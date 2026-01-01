@@ -45,6 +45,8 @@ const (
 	defaultShutdownTimeout = 3 * time.Second
 
 	defaultMaxPayloadBytes = uint32(16384)
+	defaultMaxStreamBytes  = uint64(4_194_304)
+	defaultMaxJobBytes     = uint64(8_388_608)
 )
 
 type grpcListener struct{ net.Listener }
@@ -606,10 +608,11 @@ func resolveQuoteTTL(ttl *uint64) uint64 {
 }
 
 func localManifestForProvider(providerCfg provider.Config) *lcpwire.Manifest {
-	maxPayloadBytes := defaultMaxPayloadBytes
 	manifest := &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-		MaxPayloadBytes: &maxPayloadBytes,
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: defaultMaxPayloadBytes,
+		MaxStreamBytes:  defaultMaxStreamBytes,
+		MaxJobBytes:     defaultMaxJobBytes,
 	}
 
 	if !providerCfg.Enabled || len(providerCfg.LLMChatProfiles) == 0 {

@@ -133,7 +133,7 @@ If YAML is not provided, a built-in price table is used (msat per 1M tokens):
 2. Apply ExecutionPolicy (`max_output_tokens`) to the `computebackend.Task`.
 3. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
 4. Compute price in msat via `QuotePrice(profile, estimate, cached=0, price_table)` and embed it into TermsHash / invoice binding.
-5. After payment settles, map `profile -> backend_model`, execute the planned task in the backend, and return the result via `lcp_result`.
+5. After payment settles, map `profile -> backend_model`, execute the planned task in the backend, stream the result (`lcp_stream_*`), and finalize with `lcp_result`.
 
 ## Backend notes
 

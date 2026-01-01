@@ -83,7 +83,7 @@ func TestStore_SetQuoteResponse(t *testing.T) {
 
 	quoteResp := lcpwire.QuoteResponse{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          77,

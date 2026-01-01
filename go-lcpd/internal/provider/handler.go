@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,9 @@ const (
 
 	defaultInvoiceExpirySlackSeconds      = uint64(5)
 	defaultMaxEnvelopeExpiryWindowSeconds = uint64(600)
+
+	defaultMaxStreamBytes = uint64(4_194_304)
+	defaultMaxJobBytes    = uint64(8_388_608)
 
 	contentTypeTextPlain = "text/plain; charset=utf-8"
 )
@@ -139,6 +143,12 @@ func (h *Handler) HandleInboundCustomMessage(
 	switch lcpwire.MessageType(msg.MsgType) {
 	case lcpwire.MessageTypeQuoteRequest:
 		h.handleQuoteRequest(ctx, msg)
+	case lcpwire.MessageTypeStreamBegin:
+		h.handleStreamBegin(ctx, msg)
+	case lcpwire.MessageTypeStreamChunk:
+		h.handleStreamChunk(ctx, msg)
+	case lcpwire.MessageTypeStreamEnd:
+		h.handleStreamEnd(ctx, msg)
 	case lcpwire.MessageTypeCancel:
 		h.handleCancel(ctx, msg)
 	case lcpwire.MessageTypeManifest,
@@ -167,7 +177,7 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 	}
 
 	remoteManifest := h.remoteManifestFor(msg.PeerPubKey)
-	remoteMaxPayload := cloneMaxPayloadBytes(remoteManifest)
+	remoteMaxPayload := remoteMaxPayloadBytes(remoteManifest)
 
 	if vErr := h.validator.ValidateQuoteRequest(req, remoteManifest); vErr != nil {
 		h.sendError(ctx, msg.PeerPubKey, req.Envelope, vErr.Code, vErr.Message)
@@ -190,50 +200,373 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 		return
 	}
 
-	quoteTTL := h.quoteTTLSeconds()
-	quoteExpiry := now + quoteTTL
-	price, err := h.quotePrice(req)
-	if err != nil {
-		h.sendError(ctx, msg.PeerPubKey, req.Envelope, quoteErrorCode(err), err.Error())
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: req.Envelope.JobID}
+
+	if h.jobs == nil {
+		h.logger.Warnw("drop lcp_quote_request: job store is not configured")
 		return
 	}
 
-	termsHash, err := h.computeTermsHash(req, quoteExpiry, price.PriceMsat)
+	// Manifest exchange is mandatory in v0.2. If we don't have the peer's
+	// manifest yet, reject with invalid_state.
+	if remoteManifest == nil {
+		h.sendError(ctx, msg.PeerPubKey, req.Envelope, lcpwire.ErrorCodeInvalidState, "manifest not exchanged")
+		return
+	}
+
+	if existing, found := h.jobs.Get(key); found {
+		h.handleExistingQuoteRequest(ctx, msg.PeerPubKey, key, req, now, remoteMaxPayload, existing)
+		return
+	}
+
+	reqCopy := req
+	h.jobs.Upsert(jobstore.Job{
+		PeerPubKey:    msg.PeerPubKey,
+		JobID:         req.Envelope.JobID,
+		State:         jobstore.StateAwaitingInput,
+		QuoteRequest:  &reqCopy,
+		InputStream:   nil,
+		QuoteExpiry:   0,
+		TermsHash:     nil,
+		PaymentHash:   nil,
+		QuoteResponse: nil,
+	})
+}
+
+func (h *Handler) handleExistingQuoteRequest(
+	ctx context.Context,
+	peerPubKey string,
+	key jobstore.Key,
+	req lcpwire.QuoteRequest,
+	now uint64,
+	remoteMaxPayload uint32,
+	existing jobstore.Job,
+) {
+	// If the requester retries the quote_request for the same job_id, we should
+	// be idempotent and return the same quote_response if still valid.
+	if existing.QuoteExpiry != 0 && existing.QuoteExpiry < now {
+		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeQuoteExpired, "quote expired")
+		return
+	}
+
+	if existing.QuoteRequest != nil && !quoteRequestEqual(*existing.QuoteRequest, req) {
+		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodePaymentInvalid, "quote_request mismatch for job")
+		return
+	}
+
+	// Update stored quote_request (first writer wins semantics are fine here;
+	// streams are validated independently).
+	existingReq := req
+	existing.QuoteRequest = &existingReq
+	if existing.State == "" {
+		existing.State = jobstore.StateAwaitingInput
+	}
+	h.jobs.Upsert(existing)
+
+	if existing.QuoteResponse == nil {
+		return
+	}
+
+	h.logger.Debugw(
+		"resend stored lcp_quote_response",
+		"peer_pub_key", peerPubKey,
+		"job_id", req.Envelope.JobID.String(),
+	)
+
+	if !h.sendQuoteResponse(ctx, peerPubKey, *existing.QuoteResponse, remoteMaxPayload) {
+		return
+	}
+	if existing.InputStream == nil || !existing.InputStream.Validated {
+		return
+	}
+	if existing.QuoteRequest == nil {
+		return
+	}
+
+	invoice := invoiceFromJob(existing)
+	h.startJobRunner(
+		ctx,
+		key,
+		*existing.QuoteRequest,
+		*existing.InputStream,
+		*existing.QuoteResponse,
+		invoice,
+		remoteMaxPayload,
+	)
+}
+
+func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+	begin, err := lcpwire.DecodeStreamBegin(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
-			"compute terms_hash failed",
+			"decode lcp_stream_begin failed",
 			"peer_pub_key", msg.PeerPubKey,
 			"err", err,
 		)
+		return
+	}
+
+	// Provider only accepts the input stream.
+	if begin.Kind != lcpwire.StreamKindInput {
+		return
+	}
+
+	if h.rejectQuoteRequestIfProviderUnavailable(ctx, msg.PeerPubKey, begin.Envelope) {
+		return
+	}
+
+	remoteManifest := h.remoteManifestFor(msg.PeerPubKey)
+	if remoteManifest == nil {
+		h.sendError(ctx, msg.PeerPubKey, begin.Envelope, lcpwire.ErrorCodeInvalidState, "manifest not exchanged")
+		return
+	}
+
+	now, ok := h.nowUnix()
+	if !ok {
+		return
+	}
+	if h.dropIfExpired(msg.PeerPubKey, begin.Envelope, now, "drop expired lcp_stream_begin") {
+		return
+	}
+	if !h.checkReplay(msg.PeerPubKey, begin.Envelope, now, "lcp_stream_begin") {
+		return
+	}
+
+	if begin.ContentEncoding != "identity" {
 		h.sendError(
 			ctx,
 			msg.PeerPubKey,
-			req.Envelope,
-			lcpwire.ErrorCodeUnsupportedTask,
-			"failed to compute terms_hash",
+			begin.Envelope,
+			lcpwire.ErrorCodeUnsupportedEncoding,
+			"unsupported content_encoding",
 		)
 		return
 	}
 
-	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: req.Envelope.JobID}
+	if begin.TotalLen == nil || begin.SHA256 == nil {
+		h.sendError(
+			ctx,
+			msg.PeerPubKey,
+			begin.Envelope,
+			lcpwire.ErrorCodeInvalidState,
+			"input stream begin missing total_len/sha256",
+		)
+		return
+	}
 
-	if h.handleExistingQuoteRequest(
-		ctx,
-		msg.PeerPubKey,
-		key,
-		req,
-		now,
-		termsHash,
-		remoteMaxPayload,
-	) {
+	totalLen := *begin.TotalLen
+	if totalLen > defaultMaxStreamBytes || totalLen > defaultMaxJobBytes {
+		h.sendError(
+			ctx,
+			msg.PeerPubKey,
+			begin.Envelope,
+			lcpwire.ErrorCodePayloadTooLarge,
+			"input stream exceeds local limits",
+		)
+		return
+	}
+
+	if h.jobs == nil {
+		return
+	}
+
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: begin.Envelope.JobID}
+	job, ok := h.jobs.Get(key)
+	if !ok || job.QuoteRequest == nil {
+		h.sendError(ctx, msg.PeerPubKey, begin.Envelope, lcpwire.ErrorCodeInvalidState, "no quote_request for job")
+		return
+	}
+
+	if job.State != jobstore.StateAwaitingInput {
+		h.sendError(ctx, msg.PeerPubKey, begin.Envelope, lcpwire.ErrorCodeInvalidState, "job not awaiting input")
+		return
+	}
+
+	sha := *begin.SHA256
+	job.InputStream = &jobstore.InputStreamState{
+		StreamID:        begin.StreamID,
+		ContentType:     begin.ContentType,
+		ContentEncoding: begin.ContentEncoding,
+		ExpectedSeq:     0,
+		Buf:             nil,
+		TotalLen:        totalLen,
+		SHA256:          sha,
+		Validated:       false,
+	}
+
+	h.jobs.Upsert(job)
+}
+
+func (h *Handler) handleStreamChunk(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+	chunk, err := lcpwire.DecodeStreamChunk(msg.Payload)
+	if err != nil {
+		h.logger.Warnw(
+			"decode lcp_stream_chunk failed",
+			"peer_pub_key", msg.PeerPubKey,
+			"err", err,
+		)
+		return
+	}
+
+	if h.jobs == nil {
+		return
+	}
+
+	now, ok := h.nowUnix()
+	if !ok {
+		return
+	}
+	if h.dropIfExpired(msg.PeerPubKey, chunk.Envelope, now, "drop expired lcp_stream_chunk") {
+		return
+	}
+
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: chunk.Envelope.JobID}
+	job, ok := h.jobs.Get(key)
+	if !ok || job.InputStream == nil || job.QuoteRequest == nil {
+		return
+	}
+	if job.State != jobstore.StateAwaitingInput || job.InputStream.Validated {
+		return
+	}
+	if job.InputStream.StreamID != chunk.StreamID {
+		return
+	}
+
+	if chunk.Seq < job.InputStream.ExpectedSeq {
+		// Duplicate chunk.
+		return
+	}
+	if chunk.Seq > job.InputStream.ExpectedSeq {
+		h.sendError(ctx, msg.PeerPubKey, chunk.Envelope, lcpwire.ErrorCodeChunkOutOfOrder, "chunk out of order")
+		return
+	}
+
+	nextLen := uint64(len(job.InputStream.Buf)) + uint64(len(chunk.Data))
+	if nextLen > job.InputStream.TotalLen || nextLen > defaultMaxStreamBytes || nextLen > defaultMaxJobBytes {
+		h.sendError(
+			ctx,
+			msg.PeerPubKey,
+			chunk.Envelope,
+			lcpwire.ErrorCodePayloadTooLarge,
+			"input stream exceeds local limits",
+		)
+		return
+	}
+
+	stream := *job.InputStream
+	stream.Buf = append(stream.Buf, chunk.Data...)
+	stream.ExpectedSeq++
+	job.InputStream = &stream
+	h.jobs.Upsert(job)
+}
+
+func (h *Handler) handleStreamEnd(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+	end, err := lcpwire.DecodeStreamEnd(msg.Payload)
+	if err != nil {
+		h.logger.Warnw(
+			"decode lcp_stream_end failed",
+			"peer_pub_key", msg.PeerPubKey,
+			"err", err,
+		)
+		return
+	}
+
+	if h.jobs == nil {
+		return
+	}
+
+	now, ok := h.nowUnix()
+	if !ok {
+		return
+	}
+	if h.dropIfExpired(msg.PeerPubKey, end.Envelope, now, "drop expired lcp_stream_end") {
+		return
+	}
+	if !h.checkReplay(msg.PeerPubKey, end.Envelope, now, "lcp_stream_end") {
+		return
+	}
+
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: end.Envelope.JobID}
+	job, ok := h.jobs.Get(key)
+	if !ok || job.InputStream == nil || job.QuoteRequest == nil {
+		h.sendError(ctx, msg.PeerPubKey, end.Envelope, lcpwire.ErrorCodeInvalidState, "no input stream for job")
+		return
+	}
+	if job.State != jobstore.StateAwaitingInput || job.InputStream.Validated {
+		return
+	}
+	if job.InputStream.StreamID != end.StreamID {
+		return
+	}
+
+	if end.TotalLen != job.InputStream.TotalLen {
+		h.sendError(ctx, msg.PeerPubKey, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream total_len mismatch")
+		return
+	}
+	if end.SHA256 != job.InputStream.SHA256 {
+		h.sendError(ctx, msg.PeerPubKey, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream sha256 mismatch")
+		return
+	}
+	if uint64(len(job.InputStream.Buf)) != end.TotalLen {
+		h.sendError(ctx, msg.PeerPubKey, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream length mismatch")
+		return
+	}
+
+	sum := sha256.Sum256(job.InputStream.Buf)
+	if lcp.Hash32(sum) != end.SHA256 {
+		h.sendError(ctx, msg.PeerPubKey, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream sha256 mismatch")
+		return
+	}
+
+	stream := *job.InputStream
+	stream.Validated = true
+	job.InputStream = &stream
+
+	h.handleValidatedInputStreamEnd(ctx, msg.PeerPubKey, key, job, stream, now, end.Envelope)
+}
+
+func (h *Handler) handleValidatedInputStreamEnd(
+	ctx context.Context,
+	peerPubKey string,
+	key jobstore.Key,
+	job jobstore.Job,
+	stream jobstore.InputStreamState,
+	now uint64,
+	env lcpwire.JobEnvelope,
+) {
+	if job.QuoteResponse != nil {
+		h.jobs.Upsert(job)
+		return
+	}
+
+	quoteTTL := h.quoteTTLSeconds()
+	quoteExpiry := now + quoteTTL
+
+	price, err := h.quotePrice(*job.QuoteRequest, stream.Buf)
+	if err != nil {
+		h.sendError(ctx, peerPubKey, env, quoteErrorCode(err), err.Error())
+		return
+	}
+
+	termsHash, err := h.computeTermsHash(*job.QuoteRequest, stream, quoteExpiry, price.PriceMsat)
+	if err != nil {
+		h.sendError(ctx, peerPubKey, env, lcpwire.ErrorCodeUnsupportedTask, "failed to compute terms_hash")
+		return
+	}
+
+	remoteManifest := h.remoteManifestFor(peerPubKey)
+	remoteMaxPayload := remoteMaxPayloadBytes(remoteManifest)
+	if remoteManifest == nil {
+		h.sendError(ctx, peerPubKey, env, lcpwire.ErrorCodeInvalidState, "manifest not exchanged")
 		return
 	}
 
 	h.createInvoiceAndStartQuoteJob(
 		ctx,
-		msg.PeerPubKey,
+		peerPubKey,
 		key,
-		req,
+		*job.QuoteRequest,
+		stream,
 		quoteExpiry,
 		quoteTTL,
 		price.PriceMsat,
@@ -244,6 +577,7 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 
 func (h *Handler) computeTermsHash(
 	req lcpwire.QuoteRequest,
+	input jobstore.InputStreamState,
 	quoteExpiry uint64,
 	priceMsat uint64,
 ) (lcp.Hash32, error) {
@@ -260,9 +594,11 @@ func (h *Handler) computeTermsHash(
 	}
 
 	return protocolcompat.ComputeTermsHash(terms, protocolcompat.TermsCommit{
-		TaskKind: req.TaskKind,
-		Input:    req.Input,
-		Params:   paramsBytes,
+		TaskKind:             req.TaskKind,
+		Input:                input.Buf,
+		InputContentType:     input.ContentType,
+		InputContentEncoding: input.ContentEncoding,
+		Params:               paramsBytes,
 	})
 }
 
@@ -271,11 +607,12 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 	peerPubKey string,
 	key jobstore.Key,
 	req lcpwire.QuoteRequest,
+	input jobstore.InputStreamState,
 	quoteExpiry uint64,
 	quoteTTL uint64,
 	priceMsat uint64,
 	termsHash lcp.Hash32,
-	remoteMaxPayload *uint32,
+	remoteMaxPayload uint32,
 ) {
 	invoiceExpirySeconds := quoteTTL
 	defaultSlackSeconds := envconfig.Uint64(
@@ -322,12 +659,35 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 		invoice.PaymentRequest,
 	)
 
-	if !h.sendQuoteResponse(ctx, peerPubKey, quoteResp) {
+	if !h.sendQuoteResponse(ctx, peerPubKey, quoteResp, remoteMaxPayload) {
 		return
 	}
 
-	h.storeQuoteJob(key, quoteExpiry, quoteResp, invoice)
-	h.startJobRunner(ctx, key, req, quoteResp, invoice, remoteMaxPayload)
+	reqCopy := req
+	inputCopy := input
+	if len(inputCopy.Buf) > 0 {
+		inputCopy.Buf = append([]byte(nil), inputCopy.Buf...)
+	}
+
+	quoteRespCopy := quoteResp
+	termsCopy := quoteResp.TermsHash
+	paymentHash := invoice.PaymentHash
+	addIndex := invoice.AddIndex
+
+	h.jobs.Upsert(jobstore.Job{
+		PeerPubKey:      key.PeerPubKey,
+		JobID:           key.JobID,
+		State:           jobstore.StateWaitingPayment,
+		QuoteRequest:    &reqCopy,
+		InputStream:     &inputCopy,
+		QuoteExpiry:     quoteExpiry,
+		TermsHash:       &termsCopy,
+		PaymentHash:     &paymentHash,
+		InvoiceAddIndex: &addIndex,
+		QuoteResponse:   &quoteRespCopy,
+	})
+
+	h.startJobRunner(ctx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
 }
 
 func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
@@ -482,82 +842,6 @@ func (h *Handler) newQuoteResponse(
 	}
 }
 
-func (h *Handler) storeQuoteJob(
-	key jobstore.Key,
-	quoteExpiry uint64,
-	quoteResp lcpwire.QuoteResponse,
-	invoice InvoiceResult,
-) {
-	if h.jobs == nil {
-		return
-	}
-
-	paymentHash := invoice.PaymentHash
-	addIndex := invoice.AddIndex
-
-	h.jobs.Upsert(jobstore.Job{
-		PeerPubKey:      key.PeerPubKey,
-		JobID:           key.JobID,
-		State:           jobstore.StateWaitingPayment,
-		QuoteExpiry:     quoteExpiry,
-		TermsHash:       &quoteResp.TermsHash,
-		PaymentHash:     &paymentHash,
-		InvoiceAddIndex: &addIndex,
-		QuoteResponse:   &quoteResp,
-	})
-}
-
-func (h *Handler) handleExistingQuoteRequest(
-	ctx context.Context,
-	peerPubKey string,
-	key jobstore.Key,
-	req lcpwire.QuoteRequest,
-	now uint64,
-	termsHash lcp.Hash32,
-	remoteMaxPayload *uint32,
-) bool {
-	if h.jobs == nil {
-		return false
-	}
-
-	existing, ok := h.jobs.Get(key)
-	if !ok {
-		return false
-	}
-
-	if existing.QuoteExpiry != 0 && existing.QuoteExpiry < now {
-		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeQuoteExpired, "quote expired")
-		return true
-	}
-
-	if existing.TermsHash != nil && !bytes.Equal(existing.TermsHash[:], termsHash[:]) {
-		h.sendError(
-			ctx,
-			peerPubKey,
-			req.Envelope,
-			lcpwire.ErrorCodePaymentInvalid,
-			"terms_hash mismatch for job",
-		)
-		return true
-	}
-
-	if existing.QuoteResponse == nil {
-		return false
-	}
-
-	h.logger.Debugw(
-		"resend stored lcp_quote_response",
-		"peer_pub_key", peerPubKey,
-		"job_id", req.Envelope.JobID.String(),
-	)
-
-	invoice := invoiceFromJob(existing)
-	if h.sendQuoteResponse(ctx, peerPubKey, *existing.QuoteResponse) {
-		h.startJobRunner(ctx, key, req, *existing.QuoteResponse, invoice, remoteMaxPayload)
-	}
-	return true
-}
-
 func invoiceFromJob(job jobstore.Job) InvoiceResult {
 	invoice := InvoiceResult{
 		PaymentRequest: job.QuoteResponse.PaymentRequest,
@@ -638,6 +922,7 @@ func (h *Handler) sendQuoteResponse(
 	ctx context.Context,
 	peerPubKey string,
 	resp lcpwire.QuoteResponse,
+	remoteMaxPayload uint32,
 ) bool {
 	payload, err := lcpwire.EncodeQuoteResponse(resp)
 	if err != nil {
@@ -645,6 +930,17 @@ func (h *Handler) sendQuoteResponse(
 			"encode lcp_quote_response failed",
 			"peer_pub_key", peerPubKey,
 			"err", err,
+		)
+		return false
+	}
+
+	if remoteMaxPayload != 0 && uint64(len(payload)) > uint64(remoteMaxPayload) {
+		h.sendError(
+			ctx,
+			peerPubKey,
+			resp.Envelope,
+			lcpwire.ErrorCodePayloadTooLarge,
+			"quote_response exceeds remote max_payload_bytes",
 		)
 		return false
 	}
@@ -664,19 +960,24 @@ func (h *Handler) startJobRunner(
 	_ context.Context,
 	key jobstore.Key,
 	req lcpwire.QuoteRequest,
+	input jobstore.InputStreamState,
 	quoteResp lcpwire.QuoteResponse,
 	invoice InvoiceResult,
-	remoteMaxPayload *uint32,
+	remoteMaxPayload uint32,
 ) {
 	if h.invoices == nil || h.messenger == nil {
 		return
 	}
 
 	reqCopy := req
-	reqCopy.Input = append([]byte(nil), req.Input...)
 	if req.ParamsBytes != nil {
 		bytesCopy := append([]byte(nil), (*req.ParamsBytes)...)
 		reqCopy.ParamsBytes = &bytesCopy
+	}
+
+	inputCopy := input
+	if len(input.Buf) > 0 {
+		inputCopy.Buf = append([]byte(nil), input.Buf...)
 	}
 
 	var (
@@ -707,16 +1008,17 @@ func (h *Handler) startJobRunner(
 	h.jobCancels[key] = cancel
 	h.jobMu.Unlock()
 
-	go h.runJob(jobCtx, key, reqCopy, quoteResp, invoice, remoteMaxPayload)
+	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
 }
 
 func (h *Handler) runJob(
 	ctx context.Context,
 	key jobstore.Key,
 	req lcpwire.QuoteRequest,
+	input jobstore.InputStreamState,
 	quoteResp lcpwire.QuoteResponse,
 	invoice InvoiceResult,
-	remoteMaxPayload *uint32,
+	remoteMaxPayload uint32,
 ) {
 	defer h.forgetJob(key)
 
@@ -747,7 +1049,7 @@ func (h *Handler) runJob(
 
 	h.updateState(key, jobstore.StateExecuting)
 
-	result, err := h.execute(ctx, req)
+	result, err := h.execute(ctx, req, input)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -769,8 +1071,9 @@ func (h *Handler) runJob(
 func (h *Handler) execute(
 	ctx context.Context,
 	req lcpwire.QuoteRequest,
+	input jobstore.InputStreamState,
 ) (computebackend.ExecutionResult, error) {
-	planned, _, _, err := h.planTask(req)
+	planned, _, _, err := h.planTask(req, input.Buf)
 	if err != nil {
 		return computebackend.ExecutionResult{}, err
 	}
@@ -790,20 +1093,323 @@ func (h *Handler) sendResult(
 	peerPubKey string,
 	env lcpwire.JobEnvelope,
 	output []byte,
-	remoteMaxPayload *uint32,
+	remoteMaxPayload uint32,
 ) bool {
-	result := lcpwire.Result{
+	if h.messenger == nil {
+		return false
+	}
+
+	remoteManifest, remoteMaxPayload, ok := h.resolveRemoteManifestAndMaxPayload(
+		peerPubKey,
+		env.JobID,
+		remoteMaxPayload,
+	)
+	if !ok {
+		return false
+	}
+
+	totalLen := uint64(len(output))
+	if totalLen > remoteManifest.MaxStreamBytes || totalLen > remoteManifest.MaxJobBytes {
+		msg := "result exceeds remote stream limits"
+		return h.sendTerminalResultStatus(
+			ctx,
+			peerPubKey,
+			env,
+			lcpwire.ResultStatusFailed,
+			&msg,
+			remoteMaxPayload,
+		)
+	}
+
+	streamID, ok := h.newStreamID()
+	if !ok {
+		return false
+	}
+
+	sum := sha256.Sum256(output)
+	resultHash := lcp.Hash32(sum)
+
+	expiry := h.resultExpiry()
+
+	if !h.sendResultStream(ctx, peerPubKey, env, expiry, streamID, output, totalLen, resultHash, remoteMaxPayload) {
+		return false
+	}
+	return h.sendTerminalOKResult(ctx, peerPubKey, env, expiry, streamID, totalLen, resultHash, remoteMaxPayload)
+}
+
+func (h *Handler) resolveRemoteManifestAndMaxPayload(
+	peerPubKey string,
+	jobID lcp.JobID,
+	remoteMaxPayload uint32,
+) (*lcpwire.Manifest, uint32, bool) {
+	remoteManifest := h.remoteManifestFor(peerPubKey)
+	if remoteManifest == nil {
+		h.logger.Warnw(
+			"cannot send result: missing remote manifest",
+			"peer_pub_key", peerPubKey,
+			"job_id", jobID.String(),
+		)
+		return nil, 0, false
+	}
+	if remoteMaxPayload == 0 {
+		remoteMaxPayload = remoteManifest.MaxPayloadBytes
+	}
+	if remoteMaxPayload == 0 {
+		h.logger.Warnw(
+			"cannot send result: remote max_payload_bytes is zero",
+			"peer_pub_key", peerPubKey,
+			"job_id", jobID.String(),
+		)
+		return nil, 0, false
+	}
+	return remoteManifest, remoteMaxPayload, true
+}
+
+func (h *Handler) newStreamID() (lcp.Hash32, bool) {
+	var streamID lcp.Hash32
+	if _, err := rand.Read(streamID[:]); err != nil {
+		h.logger.Warnw("generate stream_id failed", "err", err)
+		return lcp.Hash32{}, false
+	}
+	return streamID, true
+}
+
+func (h *Handler) sendResultStream(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	output []byte,
+	totalLen uint64,
+	resultHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) bool {
+	if !h.sendResultStreamBegin(ctx, peerPubKey, env, expiry, streamID, totalLen, resultHash, remoteMaxPayload) {
+		return false
+	}
+	if !h.sendResultStreamChunks(ctx, peerPubKey, env, expiry, streamID, output, remoteMaxPayload) {
+		return false
+	}
+	return h.sendResultStreamEnd(ctx, peerPubKey, env, expiry, streamID, totalLen, resultHash, remoteMaxPayload)
+}
+
+func (h *Handler) sendResultStreamBegin(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	totalLen uint64,
+	resultHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) bool {
+	begin := lcpwire.StreamBegin{
 		Envelope: lcpwire.JobEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
 			JobID:           env.JobID,
 			MsgID:           h.mustNewMsgID(),
-			Expiry:          h.resultExpiry(),
+			Expiry:          expiry,
 		},
-		Result: output,
+		StreamID:        streamID,
+		Kind:            lcpwire.StreamKindResult,
+		TotalLen:        &totalLen,
+		SHA256:          &resultHash,
+		ContentType:     contentTypeTextPlain,
+		ContentEncoding: "identity",
 	}
-	result.ContentType = ptrString(contentTypeTextPlain)
+	beginPayload, err := lcpwire.EncodeStreamBegin(begin)
+	if err != nil {
+		h.logger.Warnw(
+			"encode lcp_stream_begin failed",
+			"peer_pub_key", peerPubKey,
+			"err", err,
+		)
+		return false
+	}
+	if uint64(len(beginPayload)) > uint64(remoteMaxPayload) {
+		h.logger.Warnw(
+			"lcp_stream_begin exceeds remote max_payload_bytes",
+			"peer_pub_key", peerPubKey,
+			"payload_len", len(beginPayload),
+			"max_payload_bytes", remoteMaxPayload,
+		)
+		return false
+	}
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamBegin, beginPayload); sendErr != nil {
+		h.logger.Warnw(
+			"send lcp_stream_begin failed",
+			"peer_pub_key", peerPubKey,
+			"err", sendErr,
+		)
+		return false
+	}
+	return true
+}
 
-	payload, err := lcpwire.EncodeResult(result)
+func (h *Handler) sendResultStreamChunks(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	output []byte,
+	remoteMaxPayload uint32,
+) bool {
+	seq := uint32(0)
+	for offset := 0; offset < len(output); {
+		chunkPayload, chunkLen, err := encodeFittingResultStreamChunk(
+			env,
+			expiry,
+			streamID,
+			seq,
+			output[offset:],
+			remoteMaxPayload,
+		)
+		if err != nil {
+			h.logger.Warnw(
+				"encode lcp_stream_chunk failed",
+				"peer_pub_key", peerPubKey,
+				"seq", seq,
+				"err", err,
+			)
+			return false
+		}
+
+		if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamChunk, chunkPayload); sendErr != nil {
+			h.logger.Warnw(
+				"send lcp_stream_chunk failed",
+				"peer_pub_key", peerPubKey,
+				"seq", seq,
+				"err", sendErr,
+			)
+			return false
+		}
+
+		offset += chunkLen
+		seq++
+	}
+
+	return true
+}
+
+func encodeFittingResultStreamChunk(
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	seq uint32,
+	data []byte,
+	remoteMaxPayload uint32,
+) ([]byte, int, error) {
+	chunkLen := len(data)
+	if maxPayload := int(remoteMaxPayload); chunkLen > maxPayload {
+		chunkLen = maxPayload
+	}
+
+	for {
+		chunk := lcpwire.StreamChunk{
+			Envelope: lcpwire.JobEnvelope{
+				ProtocolVersion: env.ProtocolVersion,
+				JobID:           env.JobID,
+				Expiry:          expiry,
+			},
+			StreamID: streamID,
+			Seq:      seq,
+			Data:     data[:chunkLen],
+		}
+		payload, _, encErr := lcpwire.EncodeStreamChunk(chunk)
+		if encErr != nil {
+			return nil, 0, encErr
+		}
+
+		if uint64(len(payload)) <= uint64(remoteMaxPayload) {
+			return payload, chunkLen, nil
+		}
+
+		if chunkLen <= 1 {
+			return nil, 0, errors.New("cannot fit lcp_stream_chunk under remote max_payload_bytes")
+		}
+		chunkLen /= 2
+	}
+}
+
+func (h *Handler) sendResultStreamEnd(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	totalLen uint64,
+	resultHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) bool {
+	end := lcpwire.StreamEnd{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: env.ProtocolVersion,
+			JobID:           env.JobID,
+			MsgID:           h.mustNewMsgID(),
+			Expiry:          expiry,
+		},
+		StreamID: streamID,
+		TotalLen: totalLen,
+		SHA256:   resultHash,
+	}
+	endPayload, err := lcpwire.EncodeStreamEnd(end)
+	if err != nil {
+		h.logger.Warnw(
+			"encode lcp_stream_end failed",
+			"peer_pub_key", peerPubKey,
+			"err", err,
+		)
+		return false
+	}
+	if uint64(len(endPayload)) > uint64(remoteMaxPayload) {
+		h.logger.Warnw(
+			"lcp_stream_end exceeds remote max_payload_bytes",
+			"peer_pub_key", peerPubKey,
+			"payload_len", len(endPayload),
+			"max_payload_bytes", remoteMaxPayload,
+		)
+		return false
+	}
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamEnd, endPayload); sendErr != nil {
+		h.logger.Warnw(
+			"send lcp_stream_end failed",
+			"peer_pub_key", peerPubKey,
+			"err", sendErr,
+		)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) sendTerminalOKResult(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	totalLen uint64,
+	resultHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) bool {
+	terminal := lcpwire.Result{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: env.ProtocolVersion,
+			JobID:           env.JobID,
+			MsgID:           h.mustNewMsgID(),
+			Expiry:          expiry,
+		},
+		Status: lcpwire.ResultStatusOK,
+		OK: &lcpwire.ResultOK{
+			ResultStreamID:        streamID,
+			ResultHash:            resultHash,
+			ResultLen:             totalLen,
+			ResultContentType:     contentTypeTextPlain,
+			ResultContentEncoding: "identity",
+		},
+	}
+	terminalPayload, err := lcpwire.EncodeResult(terminal)
 	if err != nil {
 		h.logger.Warnw(
 			"encode lcp_result failed",
@@ -812,14 +1418,64 @@ func (h *Handler) sendResult(
 		)
 		return false
 	}
+	if uint64(len(terminalPayload)) > uint64(remoteMaxPayload) {
+		h.logger.Warnw(
+			"lcp_result exceeds remote max_payload_bytes",
+			"peer_pub_key", peerPubKey,
+			"payload_len", len(terminalPayload),
+			"max_payload_bytes", remoteMaxPayload,
+		)
+		return false
+	}
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeResult, terminalPayload); sendErr != nil {
+		h.logger.Warnw(
+			"send lcp_result failed",
+			"peer_pub_key", peerPubKey,
+			"err", sendErr,
+		)
+		return false
+	}
+	return true
+}
 
-	if remoteMaxPayload != nil && uint64(len(payload)) > uint64(*remoteMaxPayload) {
-		h.sendError(
-			ctx,
-			peerPubKey,
-			env,
-			lcpwire.ErrorCodePayloadTooLarge,
-			"result payload exceeds remote max_payload_bytes",
+func (h *Handler) sendTerminalResultStatus(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	status lcpwire.ResultStatus,
+	message *string,
+	remoteMaxPayload uint32,
+) bool {
+	if h.messenger == nil {
+		return false
+	}
+
+	res := lcpwire.Result{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: env.ProtocolVersion,
+			JobID:           env.JobID,
+			MsgID:           h.mustNewMsgID(),
+			Expiry:          h.resultExpiry(),
+		},
+		Status:  status,
+		Message: message,
+	}
+
+	payload, err := lcpwire.EncodeResult(res)
+	if err != nil {
+		h.logger.Warnw(
+			"encode lcp_result failed",
+			"peer_pub_key", peerPubKey,
+			"err", err,
+		)
+		return false
+	}
+	if remoteMaxPayload != 0 && uint64(len(payload)) > uint64(remoteMaxPayload) {
+		h.logger.Warnw(
+			"lcp_result exceeds remote max_payload_bytes",
+			"peer_pub_key", peerPubKey,
+			"payload_len", len(payload),
+			"max_payload_bytes", remoteMaxPayload,
 		)
 		return false
 	}
@@ -938,16 +1594,25 @@ func newMsgID() (lcpwire.MsgID, error) {
 	return id, nil
 }
 
-func ptrString(s string) *string {
-	return &s
+func remoteMaxPayloadBytes(manifest *lcpwire.Manifest) uint32 {
+	if manifest == nil {
+		return 0
+	}
+	return manifest.MaxPayloadBytes
 }
 
-func cloneMaxPayloadBytes(manifest *lcpwire.Manifest) *uint32 {
-	if manifest == nil || manifest.MaxPayloadBytes == nil {
-		return nil
+func quoteRequestEqual(a lcpwire.QuoteRequest, b lcpwire.QuoteRequest) bool {
+	if a.TaskKind != b.TaskKind {
+		return false
 	}
-	val := *manifest.MaxPayloadBytes
-	return &val
+
+	if a.ParamsBytes == nil && b.ParamsBytes == nil {
+		return true
+	}
+	if a.ParamsBytes == nil || b.ParamsBytes == nil {
+		return false
+	}
+	return bytes.Equal(*a.ParamsBytes, *b.ParamsBytes)
 }
 
 func modelFromRequest(req lcpwire.QuoteRequest) string {
@@ -1018,6 +1683,7 @@ func (h *Handler) maxOutputTokensForProfile(profile string) (uint32, error) {
 
 func (h *Handler) planTask(
 	req lcpwire.QuoteRequest,
+	inputBytes []byte,
 ) (computebackend.Task, llm.ExecutionPolicy, string, error) {
 	profile := modelFromRequest(req)
 	if strings.TrimSpace(profile) == "" {
@@ -1057,7 +1723,7 @@ func (h *Handler) planTask(
 	task := computebackend.Task{
 		TaskKind:   req.TaskKind,
 		Model:      backendModel,
-		InputBytes: append([]byte(nil), req.Input...),
+		InputBytes: append([]byte(nil), inputBytes...),
 	}
 
 	planned, err := policy.Apply(task)
@@ -1110,8 +1776,8 @@ func (h *Handler) priceTable() llm.PriceTable {
 	return table
 }
 
-func (h *Handler) quotePrice(req lcpwire.QuoteRequest) (llm.PriceBreakdown, error) {
-	planned, policy, profile, err := h.planTask(req)
+func (h *Handler) quotePrice(req lcpwire.QuoteRequest, inputBytes []byte) (llm.PriceBreakdown, error) {
+	planned, policy, profile, err := h.planTask(req, inputBytes)
 	if err != nil {
 		return llm.PriceBreakdown{}, err
 	}

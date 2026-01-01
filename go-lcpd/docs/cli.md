@@ -32,7 +32,7 @@ All command examples below use:
 - LCP messaging requires an active Lightning peer connection to the Provider, and the Provider must support LCP (manifest observed).
 - The only supported task type is `llm.chat`.
 - Quote execution is time-bounded by `terms.quoteExpiry`; calls after expiry are expected to fail.
-- LCP peer messaging enforces payload limits (`max_payload_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes.
+- LCP peer messaging enforces payload/stream limits (`max_payload_bytes`, `max_stream_bytes`, `max_job_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes payload, `4 MiB` stream, `8 MiB` job.
 - `job_id` CLI flags are base64 (proto `bytes`), matching protojson encoding.
 - `lcpdctl --timeout` is a dial timeout (not an RPC deadline). Cancel long-running RPCs with Ctrl-C, or use `lcpd-oneshot -timeout ...` for an overall deadline.
 
@@ -190,7 +190,7 @@ Tip:
 
 ## Quickstart (RequestQuote → AcceptAndExecute)
 
-This section shows the full flow using only `lcpdctl lcpd ...` (quote → pay → result).
+This section shows the full flow using only `lcpdctl lcpd ...` (quote → pay → stream(result) → `lcp_result`).
 
 - The examples do not write files (stdout only).
 - No Python is needed (we use `jq` to format JSON).

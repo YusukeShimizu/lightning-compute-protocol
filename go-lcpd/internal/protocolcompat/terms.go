@@ -15,19 +15,24 @@ import (
 )
 
 const (
-	termsTLVTypeProtocolVersion = 1
-	termsTLVTypeJobID           = 2
-	termsTLVTypePriceMsat       = 3
-	termsTLVTypeQuoteExpiry     = 4
-	termsTLVTypeTaskKind        = 20
-	termsTLVTypeInputHash       = 50
-	termsTLVTypeParamsHash      = 51
+	termsTLVTypeProtocolVersion      = 1
+	termsTLVTypeJobID                = 2
+	termsTLVTypePriceMsat            = 3
+	termsTLVTypeQuoteExpiry          = 4
+	termsTLVTypeTaskKind             = 20
+	termsTLVTypeInputHash            = 50
+	termsTLVTypeParamsHash           = 51
+	termsTLVTypeInputLen             = 52
+	termsTLVTypeInputContentType     = 53
+	termsTLVTypeInputContentEncoding = 54
 )
 
 type TermsCommit struct {
-	TaskKind string
-	Input    []byte
-	Params   []byte // nil means "absent" (hash is SHA256(empty))
+	TaskKind             string
+	Input                []byte
+	InputContentType     string
+	InputContentEncoding string
+	Params               []byte // nil means "absent" (hash is SHA256(empty))
 }
 
 func NewJobID() (lcp.JobID, error) {
@@ -46,8 +51,21 @@ func ComputeTermsHash(terms lcp.Terms, commit TermsCommit) (lcp.Hash32, error) {
 	if !utf8.ValidString(commit.TaskKind) {
 		return lcp.Hash32{}, errors.New("task_kind must be valid UTF-8 for terms_hash")
 	}
+	if commit.InputContentType == "" {
+		return lcp.Hash32{}, errors.New("input_content_type is required for terms_hash")
+	}
+	if !utf8.ValidString(commit.InputContentType) {
+		return lcp.Hash32{}, errors.New("input_content_type must be valid UTF-8 for terms_hash")
+	}
+	if commit.InputContentEncoding == "" {
+		return lcp.Hash32{}, errors.New("input_content_encoding is required for terms_hash")
+	}
+	if !utf8.ValidString(commit.InputContentEncoding) {
+		return lcp.Hash32{}, errors.New("input_content_encoding must be valid UTF-8 for terms_hash")
+	}
 
 	inputHash := sha256.Sum256(commit.Input)
+	inputLen := uint64(len(commit.Input))
 
 	paramsCanonical := commit.Params
 	if commit.Params != nil {
@@ -59,7 +77,15 @@ func ComputeTermsHash(terms lcp.Terms, commit TermsCommit) (lcp.Hash32, error) {
 	}
 	paramsHash := sha256.Sum256(paramsCanonical)
 
-	encoded := encodeTermsTLVStream(terms, commit.TaskKind, inputHash, paramsHash)
+	encoded := encodeTermsTLVStream(
+		terms,
+		commit.TaskKind,
+		inputHash,
+		paramsHash,
+		inputLen,
+		commit.InputContentType,
+		commit.InputContentEncoding,
+	)
 	sum := sha256.Sum256(encoded)
 	return lcp.Hash32(sum), nil
 }
@@ -69,6 +95,9 @@ func encodeTermsTLVStream(
 	taskKind string,
 	inputHash [32]byte,
 	paramsHash [32]byte,
+	inputLen uint64,
+	inputContentType string,
+	inputContentEncoding string,
 ) []byte {
 	const u16ByteLen = 2
 
@@ -82,8 +111,11 @@ func encodeTermsTLVStream(
 	t20 := encodeTLV(termsTLVTypeTaskKind, []byte(taskKind))
 	t50 := encodeTLV(termsTLVTypeInputHash, inputHash[:])
 	t51 := encodeTLV(termsTLVTypeParamsHash, paramsHash[:])
+	t52 := encodeTLV(termsTLVTypeInputLen, encodeTU64(inputLen))
+	t53 := encodeTLV(termsTLVTypeInputContentType, []byte(inputContentType))
+	t54 := encodeTLV(termsTLVTypeInputContentEncoding, []byte(inputContentEncoding))
 
-	out := make([]byte, 0, len(t1)+len(t2)+len(t3)+len(t4)+len(t20)+len(t50)+len(t51))
+	out := make([]byte, 0, len(t1)+len(t2)+len(t3)+len(t4)+len(t20)+len(t50)+len(t51)+len(t52)+len(t53)+len(t54))
 	out = append(out, t1...)
 	out = append(out, t2...)
 	out = append(out, t3...)
@@ -91,6 +123,9 @@ func encodeTermsTLVStream(
 	out = append(out, t20...)
 	out = append(out, t50...)
 	out = append(out, t51...)
+	out = append(out, t52...)
+	out = append(out, t53...)
+	out = append(out, t54...)
 	return out
 }
 

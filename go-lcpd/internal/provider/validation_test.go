@@ -138,7 +138,7 @@ func TestQuoteRequestValidator_RejectsUnknownParams(t *testing.T) {
 func defaultValidator() QuoteRequestValidator {
 	return QuoteRequestValidator{
 		SupportedProtocolVersions: map[uint16]struct{}{
-			lcpwire.ProtocolVersionV01: {},
+			lcpwire.ProtocolVersionV02: {},
 		},
 		SupportedTaskKinds: map[string]struct{}{
 			"llm.chat": {},

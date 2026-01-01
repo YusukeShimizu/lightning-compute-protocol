@@ -139,13 +139,41 @@ func TestToWireQuoteRequestTask_LLMChat(t *testing.T) {
 
 	want := lcptasks.QuoteRequestTask{
 		TaskKind:      lcptasks.TaskKindLLMChat,
-		Input:         []byte("hello, world"),
 		ParamsBytes:   wantParamsBytes,
 		LLMChatParams: &wantParams,
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("wire task mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestToWireInputStream_LLMChat(t *testing.T) {
+	t.Parallel()
+
+	task := &lcpdv1.Task{
+		Spec: &lcpdv1.Task_LlmChat{
+			LlmChat: &lcpdv1.LLMChatTaskSpec{
+				Prompt: "hello, world",
+				Params: &lcpdv1.LLMChatParams{
+					Profile: "profile-a",
+				},
+			},
+		},
+	}
+
+	got, err := lcptasks.ToWireInputStream(task)
+	if err != nil {
+		t.Fatalf("ToWireInputStream: %v", err)
+	}
+
+	want := lcptasks.InputStream{
+		DecodedBytes:    []byte("hello, world"),
+		ContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		ContentEncoding: lcptasks.ContentEncodingIdentity,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("input stream mismatch (-want +got):\n%s", diff)
 	}
 }
 

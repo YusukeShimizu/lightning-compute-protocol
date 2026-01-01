@@ -3,6 +3,7 @@ package lcpd
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -100,7 +101,7 @@ func New(p Params) lcpdv1.LCPDServiceServer {
 
 	waiter := p.Waiter
 	if waiter == nil {
-		waiter = requesterwait.New(logger)
+		waiter = requesterwait.New(logger, &localManifest)
 	}
 
 	return &Service{
@@ -201,16 +202,24 @@ func (s *Service) RequestQuote(
 	}
 	remoteManifest := peer.RemoteManifest
 
-	jobID, payload, err := s.buildQuoteRequestPayload(task)
+	jobID, expiry, wireTask, inputStream, payload, err := s.buildQuoteRequestPayload(task)
 	if err != nil {
 		return nil, err
 	}
 
-	if remoteManifest.MaxPayloadBytes != nil &&
-		len(payload) > int(*remoteManifest.MaxPayloadBytes) {
+	if remoteManifest.MaxPayloadBytes != 0 &&
+		len(payload) > int(remoteManifest.MaxPayloadBytes) {
 		return nil, status.Error(
 			codes.ResourceExhausted,
 			"quote_request payload exceeds peer max_payload_bytes",
+		)
+	}
+
+	inputLen := uint64(len(inputStream.DecodedBytes))
+	if inputLen > remoteManifest.MaxStreamBytes || inputLen > remoteManifest.MaxJobBytes {
+		return nil, status.Error(
+			codes.ResourceExhausted,
+			"input stream exceeds peer max_stream_bytes/max_job_bytes",
 		)
 	}
 
@@ -221,6 +230,17 @@ func (s *Service) RequestQuote(
 	sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeQuoteRequest, payload)
 	if sendErr != nil {
 		return nil, grpcStatusFromPeerSendError(ctx, sendErr)
+	}
+
+	if sendStreamErr := s.sendInputStream(
+		ctx,
+		peerID,
+		jobID,
+		expiry,
+		inputStream,
+		remoteManifest,
+	); sendStreamErr != nil {
+		return nil, sendStreamErr
 	}
 
 	outcome, err := s.waiter.WaitQuoteResponse(ctx, peerID, jobID)
@@ -236,7 +256,7 @@ func (s *Service) RequestQuote(
 		return nil, status.Error(codes.Internal, "quote waiter returned empty outcome")
 	}
 
-	terms, err := termsFromQuoteResponse(task, *outcome.QuoteResponse)
+	terms, err := termsFromQuoteResponse(wireTask, inputStream, *outcome.QuoteResponse)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
@@ -262,50 +282,294 @@ func (s *Service) RequestQuote(
 
 func (s *Service) buildQuoteRequestPayload(
 	task *lcpdv1.Task,
-) (lcp.JobID, []byte, error) {
+) (lcp.JobID, uint64, lcptasks.QuoteRequestTask, lcptasks.InputStream, []byte, error) {
 	jobID, err := protocolcompat.NewJobID()
 	if err != nil {
 		s.logger.Errorw("generate job_id failed", "err", err)
-		return lcp.JobID{}, nil, status.Error(codes.Internal, "generate job_id failed")
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.Internal,
+			"generate job_id failed",
+		)
 	}
 
 	msgID, err := newMsgID()
 	if err != nil {
 		s.logger.Errorw("generate msg_id failed", "err", err)
-		return lcp.JobID{}, nil, status.Error(codes.Internal, "generate msg_id failed")
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.Internal,
+			"generate msg_id failed",
+		)
 	}
 
 	expiry, err := s.newEnvelopeExpiry()
 	if err != nil {
 		s.logger.Errorw("generate envelope expiry failed", "err", err)
-		return lcp.JobID{}, nil, status.Error(codes.Internal, "generate envelope expiry failed")
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.Internal,
+			"generate envelope expiry failed",
+		)
 	}
 
 	wireTask, err := lcptasks.ToWireQuoteRequestTask(task)
 	if err != nil {
-		return lcp.JobID{}, nil, status.Error(codes.InvalidArgument, err.Error())
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.InvalidArgument,
+			err.Error(),
+		)
+	}
+
+	inputStream, err := lcptasks.ToWireInputStream(task)
+	if err != nil {
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.InvalidArgument,
+			err.Error(),
+		)
 	}
 
 	paramsBytes := wireTask.ParamsBytes
 	quoteReq := lcpwire.QuoteRequest{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
 		TaskKind:      wireTask.TaskKind,
-		Input:         wireTask.Input,
 		ParamsBytes:   &paramsBytes,
 		LLMChatParams: wireTask.LLMChatParams,
 	}
 
 	payload, err := lcpwire.EncodeQuoteRequest(quoteReq)
 	if err != nil {
-		return lcp.JobID{}, nil, status.Error(codes.InvalidArgument, err.Error())
+		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+			codes.InvalidArgument,
+			err.Error(),
+		)
 	}
 
-	return jobID, payload, nil
+	return jobID, expiry, wireTask, inputStream, payload, nil
+}
+
+func (s *Service) sendInputStream(
+	ctx context.Context,
+	peerID string,
+	jobID lcp.JobID,
+	expiry uint64,
+	inputStream lcptasks.InputStream,
+	remoteManifest lcpwire.Manifest,
+) error {
+	if s.messenger == nil {
+		return status.Error(codes.Unavailable, "peer messaging not configured")
+	}
+
+	remoteMaxPayload := remoteManifest.MaxPayloadBytes
+	if remoteMaxPayload == 0 {
+		return status.Error(codes.FailedPrecondition, "peer max_payload_bytes is zero")
+	}
+
+	inputBytes := inputStream.DecodedBytes
+	totalLen := uint64(len(inputBytes))
+	sum := sha256.Sum256(inputBytes)
+	inputHash := lcp.Hash32(sum)
+
+	var streamID lcp.Hash32
+	if _, err := rand.Read(streamID[:]); err != nil {
+		return status.Error(codes.Internal, "generate stream_id failed")
+	}
+
+	if err := s.sendInputStreamBegin(
+		ctx,
+		peerID,
+		jobID,
+		expiry,
+		inputStream,
+		streamID,
+		totalLen,
+		inputHash,
+		remoteMaxPayload,
+	); err != nil {
+		return err
+	}
+
+	if err := s.sendInputStreamChunks(
+		ctx,
+		peerID,
+		jobID,
+		expiry,
+		streamID,
+		inputBytes,
+		remoteMaxPayload,
+	); err != nil {
+		return err
+	}
+
+	return s.sendInputStreamEnd(
+		ctx,
+		peerID,
+		jobID,
+		expiry,
+		streamID,
+		totalLen,
+		inputHash,
+		remoteMaxPayload,
+	)
+}
+
+func (s *Service) sendInputStreamBegin(
+	ctx context.Context,
+	peerID string,
+	jobID lcp.JobID,
+	expiry uint64,
+	inputStream lcptasks.InputStream,
+	streamID lcp.Hash32,
+	totalLen uint64,
+	inputHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) error {
+	beginMsgID, err := newMsgID()
+	if err != nil {
+		return status.Error(codes.Internal, "generate msg_id failed")
+	}
+
+	begin := lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			MsgID:           beginMsgID,
+			Expiry:          expiry,
+		},
+		StreamID:        streamID,
+		Kind:            lcpwire.StreamKindInput,
+		TotalLen:        &totalLen,
+		SHA256:          &inputHash,
+		ContentType:     inputStream.ContentType,
+		ContentEncoding: inputStream.ContentEncoding,
+	}
+	beginPayload, err := lcpwire.EncodeStreamBegin(begin)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if uint64(len(beginPayload)) > uint64(remoteMaxPayload) {
+		return status.Error(codes.ResourceExhausted, "input stream_begin exceeds peer max_payload_bytes")
+	}
+	if sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeStreamBegin, beginPayload); sendErr != nil {
+		return grpcStatusFromPeerSendError(ctx, sendErr)
+	}
+	return nil
+}
+
+func (s *Service) sendInputStreamChunks(
+	ctx context.Context,
+	peerID string,
+	jobID lcp.JobID,
+	expiry uint64,
+	streamID lcp.Hash32,
+	data []byte,
+	remoteMaxPayload uint32,
+) error {
+	seq := uint32(0)
+	for offset := 0; offset < len(data); {
+		chunkPayload, chunkLen, chunkErr := encodeFittingInputStreamChunk(
+			jobID,
+			expiry,
+			streamID,
+			seq,
+			data[offset:],
+			remoteMaxPayload,
+		)
+		if chunkErr != nil {
+			return chunkErr
+		}
+
+		if sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeStreamChunk, chunkPayload); sendErr != nil {
+			return grpcStatusFromPeerSendError(ctx, sendErr)
+		}
+
+		offset += chunkLen
+		seq++
+	}
+	return nil
+}
+
+func (s *Service) sendInputStreamEnd(
+	ctx context.Context,
+	peerID string,
+	jobID lcp.JobID,
+	expiry uint64,
+	streamID lcp.Hash32,
+	totalLen uint64,
+	inputHash lcp.Hash32,
+	remoteMaxPayload uint32,
+) error {
+	endMsgID, err := newMsgID()
+	if err != nil {
+		return status.Error(codes.Internal, "generate msg_id failed")
+	}
+
+	end := lcpwire.StreamEnd{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			MsgID:           endMsgID,
+			Expiry:          expiry,
+		},
+		StreamID: streamID,
+		TotalLen: totalLen,
+		SHA256:   inputHash,
+	}
+	endPayload, err := lcpwire.EncodeStreamEnd(end)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if uint64(len(endPayload)) > uint64(remoteMaxPayload) {
+		return status.Error(codes.ResourceExhausted, "input stream_end exceeds peer max_payload_bytes")
+	}
+	if sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeStreamEnd, endPayload); sendErr != nil {
+		return grpcStatusFromPeerSendError(ctx, sendErr)
+	}
+	return nil
+}
+
+func encodeFittingInputStreamChunk(
+	jobID lcp.JobID,
+	expiry uint64,
+	streamID lcp.Hash32,
+	seq uint32,
+	data []byte,
+	remoteMaxPayload uint32,
+) ([]byte, int, error) {
+	chunkLen := len(data)
+	if maxPayload := int(remoteMaxPayload); chunkLen > maxPayload {
+		chunkLen = maxPayload
+	}
+
+	for {
+		chunk := lcpwire.StreamChunk{
+			Envelope: lcpwire.JobEnvelope{
+				ProtocolVersion: lcpwire.ProtocolVersionV02,
+				JobID:           jobID,
+				Expiry:          expiry,
+			},
+			StreamID: streamID,
+			Seq:      seq,
+			Data:     data[:chunkLen],
+		}
+
+		payload, _, encErr := lcpwire.EncodeStreamChunk(chunk)
+		if encErr != nil {
+			return nil, 0, status.Error(codes.InvalidArgument, encErr.Error())
+		}
+		if uint64(len(payload)) <= uint64(remoteMaxPayload) {
+			return payload, chunkLen, nil
+		}
+		if chunkLen <= 1 {
+			return nil, 0, status.Error(
+				codes.ResourceExhausted,
+				"cannot fit input stream_chunk under peer max_payload_bytes",
+			)
+		}
+		chunkLen /= 2
+	}
 }
 
 func (s *Service) AcceptAndExecute(
@@ -340,16 +604,19 @@ func (s *Service) AcceptAndExecute(
 	}
 
 	s.markJobState(peerID, jobID, requesterjobstore.StatePaying)
+	failed := true
+	defer func() {
+		if failed {
+			s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
+		}
+	}()
 
-	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms)
-	if verifyErr != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
+	if verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms); verifyErr != nil {
 		return nil, verifyErr
 	}
 
 	_, payErr := s.lightning.PayInvoice(ctx, terms.GetPaymentRequest())
 	if payErr != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 		return nil, grpcStatusFromLightningError(ctx, payErr)
 	}
 
@@ -357,28 +624,56 @@ func (s *Service) AcceptAndExecute(
 
 	outcome, err := s.waiter.WaitResult(ctx, peerID, jobID)
 	if err != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 		return nil, grpcStatusFromWaiterError(ctx, err)
 	}
 	if outcome.Error != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 		return nil, grpcStatusFromLCPError(*outcome.Error)
 	}
 	if outcome.Result == nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 		return nil, status.Error(codes.Internal, "result waiter returned empty outcome")
 	}
 
-	res := &lcpdv1.Result{
-		Result: outcome.Result.Result,
-	}
-	if outcome.Result.ContentType != nil {
-		res.ContentType = *outcome.Result.ContentType
+	res, err := protoResultFromTerminal(*outcome.Result, outcome.ResultBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	s.markJobState(peerID, jobID, requesterjobstore.StateDone)
+	failed = false
 
 	return &lcpdv1.AcceptAndExecuteResponse{Result: res}, nil
+}
+
+func protoResultFromTerminal(
+	terminal lcpwire.Result,
+	resultBytes []byte,
+) (*lcpdv1.Result, error) {
+	res := &lcpdv1.Result{}
+	switch terminal.Status {
+	case lcpwire.ResultStatusOK:
+		res.Status = lcpdv1.Result_STATUS_OK
+		if terminal.OK == nil {
+			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_result")
+		}
+		res.Result = append([]byte(nil), resultBytes...)
+		res.ResultHash = append([]byte(nil), terminal.OK.ResultHash[:]...)
+		res.ResultLen = terminal.OK.ResultLen
+		res.ContentType = terminal.OK.ResultContentType
+		res.ContentEncoding = terminal.OK.ResultContentEncoding
+	case lcpwire.ResultStatusFailed:
+		res.Status = lcpdv1.Result_STATUS_FAILED
+		if terminal.Message != nil {
+			res.Message = *terminal.Message
+		}
+	case lcpwire.ResultStatusCancelled:
+		res.Status = lcpdv1.Result_STATUS_CANCELLED
+		if terminal.Message != nil {
+			res.Message = *terminal.Message
+		}
+	default:
+		return nil, status.Error(codes.Internal, "unknown lcp_result status")
+	}
+	return res, nil
 }
 
 func (s *Service) CancelJob(
@@ -433,7 +728,7 @@ func (s *Service) CancelJob(
 
 	cancel := lcpwire.Cancel{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          expiry,
@@ -459,9 +754,12 @@ func (s *Service) CancelJob(
 func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 	out := &lcpdv1.LCPManifest{
 		ProtocolVersion: uint32(m.ProtocolVersion),
+		MaxPayloadBytes: m.MaxPayloadBytes,
+		MaxStreamBytes:  m.MaxStreamBytes,
+		MaxJobBytes:     m.MaxJobBytes,
 	}
-	if m.MaxPayloadBytes != nil {
-		out.MaxPayloadBytes = *m.MaxPayloadBytes
+	if m.MaxInflightJobs != nil {
+		out.MaxInflightJobs = uint32(*m.MaxInflightJobs)
 	}
 
 	if len(m.SupportedTasks) == 0 {
@@ -539,7 +837,7 @@ func (s *Service) requireReadyPeer(peerID string) (ReadyPeer, error) {
 		return ReadyPeer{}, status.Error(codes.FailedPrecondition, "peer is not ready for lcp")
 	}
 
-	if peer.RemoteManifest.ProtocolVersion != lcpwire.ProtocolVersionV01 {
+	if peer.RemoteManifest.ProtocolVersion != lcpwire.ProtocolVersionV02 {
 		return ReadyPeer{}, status.Error(codes.FailedPrecondition, "peer protocol_version mismatch")
 	}
 
@@ -569,21 +867,22 @@ func (s *Service) markJobState(peerID string, jobID lcp.JobID, state requesterjo
 	_ = s.jobs.MarkState(peerID, jobID, state)
 }
 
-func termsFromQuoteResponse(task *lcpdv1.Task, resp lcpwire.QuoteResponse) (*lcpdv1.Terms, error) {
-	wireTask, err := lcptasks.ToWireQuoteRequestTask(task)
-	if err != nil {
-		return nil, err
-	}
-
+func termsFromQuoteResponse(
+	wireTask lcptasks.QuoteRequestTask,
+	inputStream lcptasks.InputStream,
+	resp lcpwire.QuoteResponse,
+) (*lcpdv1.Terms, error) {
 	wantHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: resp.Envelope.ProtocolVersion,
 		JobID:           resp.Envelope.JobID,
 		PriceMsat:       resp.PriceMsat,
 		QuoteExpiry:     resp.QuoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind: wireTask.TaskKind,
-		Input:    wireTask.Input,
-		Params:   wireTask.ParamsBytes,
+		TaskKind:             wireTask.TaskKind,
+		Input:                inputStream.DecodedBytes,
+		InputContentType:     inputStream.ContentType,
+		InputContentEncoding: inputStream.ContentEncoding,
+		Params:               wireTask.ParamsBytes,
 	})
 	if err != nil {
 		return nil, err
@@ -726,6 +1025,10 @@ func grpcCodeFromLCPErrorCode(code lcpwire.ErrorCode) codes.Code {
 	case lcpwire.ErrorCodeUnsupportedVersion,
 		lcpwire.ErrorCodeUnsupportedTask,
 		lcpwire.ErrorCodeUnsupportedParams,
+		lcpwire.ErrorCodeUnsupportedEncoding,
+		lcpwire.ErrorCodeInvalidState,
+		lcpwire.ErrorCodeChunkOutOfOrder,
+		lcpwire.ErrorCodeChecksumMismatch,
 		lcpwire.ErrorCodeQuoteExpired,
 		lcpwire.ErrorCodePaymentRequired,
 		lcpwire.ErrorCodePaymentInvalid:
@@ -806,14 +1109,17 @@ func timestampFromUnixSeconds(sec uint64) (*timestamppb.Timestamp, error) {
 const (
 	maxInt64                       = int64(^uint64(0) >> 1)
 	defaultMaxPayloadBytes         = uint32(16384)
+	defaultMaxStreamBytes          = uint64(4_194_304)
+	defaultMaxJobBytes             = uint64(8_388_608)
 	defaultEnvelopeTTLSeconds      = uint64(300)
 	defaultAllowedClockSkewSeconds = int64(5)
 )
 
 func defaultLocalManifest() lcpwire.Manifest {
-	maxPayloadBytes := defaultMaxPayloadBytes
 	return lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-		MaxPayloadBytes: &maxPayloadBytes,
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: defaultMaxPayloadBytes,
+		MaxStreamBytes:  defaultMaxStreamBytes,
+		MaxJobBytes:     defaultMaxJobBytes,
 	}
 }

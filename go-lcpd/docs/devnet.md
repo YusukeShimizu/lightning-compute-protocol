@@ -9,7 +9,7 @@ It stores all state/logs under `./.data/devnet/` (gitignored).
 If a step fails, check logs/state under `./.data/devnet/`.
 Re-run with `LCPD_LOG_LEVEL=debug`.
 
-This doc runs a minimal Quote → Pay → Result flow with two roles:
+This doc runs a minimal Quote → Pay → Stream flow with two roles:
 
 - Alice: Provider. Configure Provider mode only on Alice. Use `LCPD_BACKEND=deterministic` to avoid external APIs.
 - Bob: Requester.
@@ -125,13 +125,13 @@ PAY_REQ="$(./scripts/devnet lncli alice addinvoice --amt 1000 | jq -r .payment_r
 ./scripts/devnet lncli bob payinvoice "$PAY_REQ"
 ```
 
-## Try go-lcpd (custom messages / Quote → Pay → Result)
+## Try go-lcpd (custom messages / Quote → Pay → Stream)
 
 Once the two `lnd` nodes are connected as peers, start `go-lcpd` on both sides.
 This triggers `lcp_manifest` exchange over BOLT #1 custom messages.
 You can observe it via `ListLCPPeers`.
 
-In this walkthrough, Alice runs as a Provider and returns `lcp_result` without external dependencies.
+In this walkthrough, Alice runs as a Provider, streams the result, and sends `lcp_result` without external dependencies.
 It uses `LCPD_BACKEND=deterministic`.
 
 Provider configuration is YAML-first (`LCPD_PROVIDER_CONFIG_PATH`).
@@ -195,7 +195,7 @@ cd go-lcpd
 
 If you can see `gpt-5.2` under `peers[0].remoteManifest.supportedTasks[].llmChat.profile`, it means the Provider successfully advertised the profile.
 
-### 4) Send one job from Bob to Alice (Quote → Pay → Result)
+### 4) Send one job from Bob to Alice (Quote → Pay → Stream)
 
 ```sh
 cd go-lcpd

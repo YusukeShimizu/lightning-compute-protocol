@@ -8,7 +8,7 @@
 
 ## Goal
 
-Run your own `lnd`, connect to the Provider below, and complete Quote → Pay → Result:
+Run your own `lnd`, connect to the Provider below, and complete Quote → Pay → Stream:
 
 - Provider node: `03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db983@54.214.32.132:20309`
 
@@ -115,7 +115,7 @@ Notes:
 - `supportedTasks` is an optional field in `lcp_manifest`. If the Provider does not configure `llm.chat_profiles` (or Provider mode is disabled), it will not advertise `supported_tasks`.
 - `-o prettyjson` omits empty fields, so it may not show `supportedTasks` even if the field is absent by design.
 
-## 7) Run one job (Quote → Pay → Result)
+## 7) Run one job (Quote → Pay → Stream)
 
 In another terminal:
 

@@ -109,12 +109,11 @@ func TestPeerMessaging_HandleCustomMessage_DispatchesJobMessages(t *testing.T) {
 		localCopy = append([]byte(nil), msg.Payload...)
 	})
 
-	localManifest := &lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01}
 	pm, err := NewStandalone(
 		dir,
 		fake,
 		newDiscardLogger(),
-		localManifest,
+		nil,
 		WithInboundHandler(handler),
 	)
 	if err != nil {
@@ -154,9 +153,7 @@ func TestPeerMessaging_start_NoConfig_DisablesWithoutError(t *testing.T) {
 	fake := &fakeLightningClient{}
 	dir := peerdirectory.New()
 
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-	})
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
@@ -178,9 +175,7 @@ func TestPeerMessaging_start_MissingRPCAddr_DisablesWithoutError(t *testing.T) {
 	fake := &fakeLightningClient{}
 	dir := peerdirectory.New()
 
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-	})
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
@@ -203,8 +198,7 @@ func TestPeerMessaging_HandleCustomMessage_UnknownEvenDisconnects(t *testing.T) 
 	fake := &fakeLightningClient{}
 	dir := peerdirectory.New()
 
-	localManifest := &lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01}
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), localManifest)
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
@@ -233,23 +227,18 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestMarksReadyAndRepliesOnce(t
 	fake := &fakeLightningClient{}
 	dir := peerdirectory.New()
 
-	localMaxPayloadBytes := uint32(999)
-	localManifest := &lcpwire.Manifest{
-		ProtocolVersion: 9,
-		MaxPayloadBytes: &localMaxPayloadBytes,
-	}
-
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), localManifest)
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
 
 	peerBytes, peerPubKey := newPeerPubKey()
 
-	remoteMaxPayloadBytes := uint32(123)
 	remoteManifestPayload, err := lcpwire.EncodeManifest(lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-		MaxPayloadBytes: &remoteMaxPayloadBytes,
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: 123,
+		MaxStreamBytes:  1024,
+		MaxJobBytes:     2048,
 	})
 	if err != nil {
 		t.Fatalf("encode remote manifest: %v", err)
@@ -271,18 +260,18 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestMarksReadyAndRepliesOnce(t
 	if got, want := peers[0].PeerID, peerPubKey; got != want {
 		t.Fatalf("peer_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := peers[0].RemoteManifest.ProtocolVersion, lcpwire.ProtocolVersionV01; got != want {
+	if got, want := peers[0].RemoteManifest.ProtocolVersion, lcpwire.ProtocolVersionV02; got != want {
 		t.Fatalf("remote_manifest.protocol_version mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if got, want := len(fake.sendReqs), 0; got != want {
+	if got, want := len(fake.sendReqs), 1; got != want {
 		t.Fatalf("SendCustomMessage calls mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 }
 
-func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesEvenIfAlreadySentOnOnline(t *testing.T) {
+func TestPeerMessaging_HandleCustomMessage_LCPManifestDoesNotReplyIfAlreadySentOnOnline(t *testing.T) {
 	t.Parallel()
 
 	peerBytes, peerPubKey := newPeerPubKey()
@@ -296,14 +285,18 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesEvenIfAlreadySentOn
 	}
 	dir := peerdirectory.New()
 
-	localManifest := &lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01}
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), localManifest)
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
 
 	remoteManifestPayload, err := lcpwire.EncodeManifest(
-		lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01},
+		lcpwire.Manifest{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			MaxPayloadBytes: 123,
+			MaxStreamBytes:  1024,
+			MaxJobBytes:     2048,
+		},
 	)
 	if err != nil {
 		t.Fatalf("encode remote manifest: %v", err)
@@ -335,15 +328,19 @@ func TestPeerMessaging_HandlePeerEvent_OfflineResetsState(t *testing.T) {
 	fake := &fakeLightningClient{}
 	dir := peerdirectory.New()
 
-	localManifest := &lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01}
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), localManifest)
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}
 
 	peerBytes, peerPubKey := newPeerPubKey()
 	remoteManifestPayload, err := lcpwire.EncodeManifest(
-		lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01},
+		lcpwire.Manifest{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			MaxPayloadBytes: 123,
+			MaxStreamBytes:  1024,
+			MaxJobBytes:     2048,
+		},
 	)
 	if err != nil {
 		t.Fatalf("encode remote manifest: %v", err)
@@ -369,7 +366,7 @@ func TestPeerMessaging_HandlePeerEvent_OfflineResetsState(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if got, want := len(fake.sendReqs), 0; got != want {
+	if got, want := len(fake.sendReqs), 2; got != want {
 		t.Fatalf(
 			"SendCustomMessage calls mismatch after offline reset (-want +got):\n%s",
 			cmp.Diff(want, got),
@@ -391,8 +388,7 @@ func TestPeerMessaging_HandlePeerEvent_OnlineSendsManifestOnce(t *testing.T) {
 	}
 	dir := peerdirectory.New()
 
-	localManifest := &lcpwire.Manifest{ProtocolVersion: lcpwire.ProtocolVersionV01}
-	pm, err := NewStandalone(dir, fake, newDiscardLogger(), localManifest)
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewStandalone: %v", err)
 	}

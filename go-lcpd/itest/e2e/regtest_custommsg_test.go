@@ -112,7 +112,7 @@ func TestE2E_Regtest_LNDCustomMessages_LCPManifest(t *testing.T) {
 	if peersAlice[0].GetRemoteManifest() == nil {
 		t.Fatalf("alice remote_manifest is nil")
 	}
-	if got, want := peersAlice[0].GetRemoteManifest().GetProtocolVersion(), uint32(lcpwire.ProtocolVersionV01); got != want {
+	if got, want := peersAlice[0].GetRemoteManifest().GetProtocolVersion(), uint32(lcpwire.ProtocolVersionV02); got != want {
 		t.Fatalf(
 			"alice remote_manifest.protocol_version mismatch (-want +got):\n%s",
 			cmp.Diff(want, got),
@@ -131,7 +131,7 @@ func TestE2E_Regtest_LNDCustomMessages_LCPManifest(t *testing.T) {
 	if peersBob[0].GetRemoteManifest() == nil {
 		t.Fatalf("bob remote_manifest is nil")
 	}
-	if got, want := peersBob[0].GetRemoteManifest().GetProtocolVersion(), uint32(lcpwire.ProtocolVersionV01); got != want {
+	if got, want := peersBob[0].GetRemoteManifest().GetProtocolVersion(), uint32(lcpwire.ProtocolVersionV02); got != want {
 		t.Fatalf(
 			"bob remote_manifest.protocol_version mismatch (-want +got):\n%s",
 			cmp.Diff(want, got),

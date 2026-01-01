@@ -4,6 +4,7 @@ package provider
 import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
 )
 
 func newLLMChatQuoteRequest(
@@ -26,13 +27,12 @@ func newLLMChatQuoteRequest(
 
 	req := lcpwire.QuoteRequest{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          1234,
 		},
 		TaskKind:      "llm.chat",
-		Input:         []byte("prompt"),
 		ParamsBytes:   &encoded,
 		LLMChatParams: &params,
 	}
@@ -78,7 +78,10 @@ func withLLMChatUnknownParam(typ uint64, value []byte) func(*lcpwire.QuoteReques
 
 func manifestWithTemplates(templates ...lcpwire.TaskTemplate) *lcpwire.Manifest {
 	m := &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: 65535,
+		MaxStreamBytes:  4_194_304,
+		MaxJobBytes:     8_388_608,
 		SupportedTasks:  templates,
 	}
 	return m
@@ -95,4 +98,15 @@ func mustEncodeLLMChatParams(p lcpwire.LLMChatParams) []byte {
 
 func ptrUint32(v uint32) *uint32 {
 	return &v
+}
+
+func manifestPeerDirectory(peerPubKey string) *peerdirectory.Directory {
+	peers := peerdirectory.New()
+	peers.MarkLCPReady(peerPubKey, lcpwire.Manifest{
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: 65535,
+		MaxStreamBytes:  4_194_304,
+		MaxJobBytes:     8_388_608,
+	})
+	return peers
 }

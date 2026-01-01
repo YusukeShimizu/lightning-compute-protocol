@@ -27,13 +27,23 @@ var (
 
 type QuoteRequestTask struct {
 	TaskKind string
-	Input    []byte
 
 	ParamsBytes   []byte
 	LLMChatParams *lcpwire.LLMChatParams
 }
 
-// ValidateTask ensures the proto Task adheres to the strict LCP v0.1 rules.
+type InputStream struct {
+	DecodedBytes    []byte
+	ContentType     string
+	ContentEncoding string
+}
+
+const (
+	ContentTypeTextPlainUTF8 = "text/plain; charset=utf-8"
+	ContentEncodingIdentity  = "identity"
+)
+
+// ValidateTask ensures the proto Task adheres to the strict LCP v0.2 rules.
 func ValidateTask(task *lcpdv1.Task) error {
 	if task == nil {
 		return ErrTaskRequired
@@ -50,7 +60,7 @@ func ValidateTask(task *lcpdv1.Task) error {
 }
 
 // ToWireQuoteRequestTask converts a proto Task into the wire representation used
-// by lcp_quote_request (task_kind/input/params_bytes).
+// by lcp_quote_request (task_kind/params_bytes).
 func ToWireQuoteRequestTask(task *lcpdv1.Task) (QuoteRequestTask, error) {
 	if err := ValidateTask(task); err != nil {
 		return QuoteRequestTask{}, err
@@ -74,13 +84,26 @@ func ToWireQuoteRequestTask(task *lcpdv1.Task) (QuoteRequestTask, error) {
 		return QuoteRequestTask{}, fmt.Errorf("encode llm_chat params: %w", err)
 	}
 
-	input := []byte(llmChat.GetPrompt())
-
 	return QuoteRequestTask{
 		TaskKind:      TaskKindLLMChat,
-		Input:         input,
 		ParamsBytes:   paramsBytes,
 		LLMChatParams: &llmParams,
+	}, nil
+}
+
+// ToWireInputStream converts a proto Task into the input stream (decoded bytes
+// plus metadata) as defined in `protocol/protocol.md` (LCP v0.2).
+func ToWireInputStream(task *lcpdv1.Task) (InputStream, error) {
+	if err := ValidateTask(task); err != nil {
+		return InputStream{}, err
+	}
+
+	llmChat := task.GetLlmChat()
+
+	return InputStream{
+		DecodedBytes:    []byte(llmChat.GetPrompt()),
+		ContentType:     ContentTypeTextPlainUTF8,
+		ContentEncoding: ContentEncodingIdentity,
 	}, nil
 }
 

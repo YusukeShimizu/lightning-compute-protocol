@@ -190,6 +190,10 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToWireQuoteRequestTask: %v", err)
 	}
+	inputStream, err := lcptasks.ToWireInputStream(quoteReq.GetTask())
+	if err != nil {
+		t.Fatalf("ToWireInputStream: %v", err)
+	}
 
 	wantTermsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: uint16(terms.GetProtocolVersion()),
@@ -197,9 +201,11 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 		PriceMsat:       terms.GetPriceMsat(),
 		QuoteExpiry:     uint64(terms.GetQuoteExpiry().GetSeconds()),
 	}, protocolcompat.TermsCommit{
-		TaskKind: wireTask.TaskKind,
-		Input:    wireTask.Input,
-		Params:   wireTask.ParamsBytes,
+		TaskKind:             wireTask.TaskKind,
+		Input:                inputStream.DecodedBytes,
+		InputContentType:     inputStream.ContentType,
+		InputContentEncoding: inputStream.ContentEncoding,
+		Params:               wireTask.ParamsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)

@@ -11,7 +11,7 @@ syntax = "proto3";
 // uses BOLT #1 custom messages carrying TLV streams to negotiate and execute
 // compute jobs (quote → payment → execution → result delivery).
 //
-// This API is designed to be compatible with the LCP v0.1 wire protocol
+// This API is designed to be compatible with the LCP v0.2 wire protocol
 // described in `protocol/protocol.md`.
 
 package lcpd.v1;
@@ -191,8 +191,8 @@ message LLMChatParams {
 
 // Terms represents the commitment returned by the Provider in `lcp_quote_response`.
 message Terms {
-  // LCP protocol version (v0.1 = 1; encoding: major*100 + minor).
-  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 1];
+  // LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 2];
 
   // Job ID (32 bytes).
   bytes job_id = 2 [(buf.validate.field).bytes.len = 32];
@@ -221,12 +221,29 @@ message Terms {
 
 // Result represents the output from `lcp_result`.
 message Result {
-  // The raw result bytes.
-  // For "llm.chat", the client should interpret this as a UTF-8 string.
-  bytes result = 40 [(buf.validate.field).bytes.min_len = 1];
+  // Status represents the job completion state.
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK = 1;
+    STATUS_FAILED = 2;
+    STATUS_CANCELLED = 3;
+  }
 
-  // Content type of the result (e.g., "text/plain; charset=utf-8").
-  string content_type = 41;
+  // Completion status for the job.
+  Status status = 1 [(buf.validate.field).required = true];
+
+  // If status=OK, the decoded result bytes reconstructed from the result stream.
+  // For "llm.chat", the client should interpret this as a UTF-8 string.
+  bytes result = 2;
+
+  // If status=OK, these fields reflect the validated result stream metadata.
+  bytes result_hash = 3 [(buf.validate.field).bytes.max_len = 32];
+  uint64 result_len = 4;
+  string content_type = 5;
+  string content_encoding = 6;
+
+  // If status!=OK, optional human-readable message.
+  string message = 7;
 }
 
 // LCPPeer represents a connected peer node.
@@ -249,14 +266,24 @@ message LCPPeer {
 
 // LCPManifest represents the capabilities declared by a peer via `lcp_manifest`.
 message LCPManifest {
-  // LCP protocol version (v0.1 = 1; encoding: major*100 + minor).
-  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 1];
+  // LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 2];
 
   // Maximum supported BOLT #1 custom message payload size in bytes.
   uint32 max_payload_bytes = 11 [
     (buf.validate.field).uint32.gt = 0,
     (buf.validate.field).uint32.lte = 65535
   ];
+
+  // Maximum total decoded bytes supported for a single stream.
+  uint64 max_stream_bytes = 14 [(buf.validate.field).uint64.gt = 0];
+
+  // Maximum total decoded bytes supported across all streams in a job.
+  uint64 max_job_bytes = 15 [(buf.validate.field).uint64.gt = 0];
+
+  // Optional maximum concurrent in-flight jobs supported per connection.
+  // 0 means "unspecified".
+  uint32 max_inflight_jobs = 16 [(buf.validate.field).uint32.lte = 65535];
 
   // Task templates supported by this peer.
   repeated LCPTaskTemplate supported_tasks = 12;

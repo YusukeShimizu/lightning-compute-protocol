@@ -22,7 +22,7 @@ func TestPutQuoteAndGetTerms(t *testing.T) {
 
 	jobID := newJobID(0x01)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       10,
 		QuoteExpiry:     timestamppb.New(now.Add(5 * time.Minute)),
@@ -71,7 +71,7 @@ func TestGetTerms_Expired(t *testing.T) {
 
 	jobID := newJobID(0x02)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       20,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
@@ -122,7 +122,7 @@ func TestMarkState(t *testing.T) {
 
 	jobID := newJobID(0x03)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       30,
 		QuoteExpiry:     timestamppb.New(now.Add(10 * time.Minute)),
@@ -166,14 +166,14 @@ func TestGC_ExpiresQuotedJobsOnly(t *testing.T) {
 
 	jobQuoted := newJobID(0x04)
 	quotedTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobQuoted[:],
 		PriceMsat:       40,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
 	}
 	jobDone := newJobID(0x05)
 	doneTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobDone[:],
 		PriceMsat:       50,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Hour)),
@@ -219,7 +219,7 @@ func TestPeerIsolation(t *testing.T) {
 
 	jobID := newJobID(0x06)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       60,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
@@ -265,7 +265,7 @@ func TestPutQuote_Validation(t *testing.T) {
 
 	jobID := newJobID(0x07)
 	validTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       70,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
@@ -312,7 +312,7 @@ func TestPutQuote_Validation(t *testing.T) {
 			peerID: "peer",
 			task:   task,
 			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 				JobId:           []byte{0x01, 0x02},
 				QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 			},
@@ -323,7 +323,7 @@ func TestPutQuote_Validation(t *testing.T) {
 			peerID: "peer",
 			task:   task,
 			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 				JobId:           jobID[:],
 			},
 			wantErr: requesterjobstore.ErrQuoteExpiryRequired,

@@ -1,6 +1,6 @@
 # Try on regtest (safer / free)
 
-Before mainnet, use `regtest` to try the Quote → Pay → Result flow.
+Before mainnet, use `regtest` to try the Quote → Pay → Stream flow.
 
 There are two routes:
 

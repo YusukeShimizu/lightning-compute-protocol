@@ -231,7 +231,7 @@ func (f *fakeClient) RequestQuote(
 	f.requestQuoteReq = req
 
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           bytes.Repeat([]byte{0x01}, 32),
 		PriceMsat:       1500,
 		TermsHash:       bytes.Repeat([]byte{0x02}, 32),

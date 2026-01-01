@@ -17,7 +17,7 @@ type QuoteRequestValidator struct {
 func DefaultValidator() QuoteRequestValidator {
 	return QuoteRequestValidator{
 		SupportedProtocolVersions: map[uint16]struct{}{
-			lcpwire.ProtocolVersionV01: {},
+			lcpwire.ProtocolVersionV02: {},
 		},
 		SupportedTaskKinds: map[string]struct{}{
 			taskKindLLMChat: {},
@@ -73,7 +73,7 @@ func (v QuoteRequestValidator) ValidateQuoteRequest(
 
 func (v QuoteRequestValidator) protocolSupported(protocolVersion uint16) bool {
 	if len(v.SupportedProtocolVersions) == 0 {
-		return protocolVersion == lcpwire.ProtocolVersionV01
+		return protocolVersion == lcpwire.ProtocolVersionV02
 	}
 	_, ok := v.SupportedProtocolVersions[protocolVersion]
 	return ok

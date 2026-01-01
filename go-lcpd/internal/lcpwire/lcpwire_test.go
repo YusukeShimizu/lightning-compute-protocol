@@ -16,6 +16,8 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 
 	var (
 		maxPayload uint32 = 16384
+		maxStream  uint64 = 4_194_304
+		maxJob     uint64 = 8_388_608
 		tempMilli  uint32 = 700
 		maxTokens  uint32 = 256
 	)
@@ -33,8 +35,10 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 	customParams := []byte{0x01, 0x02, 0x03}
 
 	want := lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV01,
-		MaxPayloadBytes: &maxPayload,
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes: maxPayload,
+		MaxStreamBytes:  maxStream,
+		MaxJobBytes:     maxJob,
 		SupportedTasks: []lcpwire.TaskTemplate{
 			{
 				TaskKind:      "llm.chat",
@@ -95,13 +99,12 @@ func TestEncodeDecode_QuoteRequest_LLMChat_RoundTrip(t *testing.T) {
 
 	want := lcpwire.QuoteRequest{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
 		TaskKind:      "llm.chat",
-		Input:         []byte("hello"),
 		ParamsBytes:   &llmParamsBytes,
 		LLMChatParams: &llmParams,
 	}
@@ -124,7 +127,7 @@ func TestEncodeDecode_QuoteRequest_LLMChat_RoundTrip(t *testing.T) {
 func TestDecodeManifest_RejectsJobEnvelopeTLVs(t *testing.T) {
 	t.Parallel()
 
-	pv := lcpwire.ProtocolVersionV01
+	pv := lcpwire.ProtocolVersionV02
 	var jobID [32]byte
 	for i := range jobID {
 		jobID[i] = 0x11
@@ -168,7 +171,7 @@ func TestDecodeManifest_ErrStreamNotCanonical(t *testing.T) {
 	if err := tlv.WriteVarInt(&buf, 2, &scratch); err != nil {
 		t.Fatalf("write len 2: %v", err)
 	}
-	if _, err := buf.Write([]byte{0x00, byte(lcpwire.ProtocolVersionV01)}); err != nil {
+	if _, err := buf.Write([]byte{0x00, byte(lcpwire.ProtocolVersionV02)}); err != nil {
 		t.Fatalf("write protocol_version: %v", err)
 	}
 
@@ -187,7 +190,7 @@ func TestDecodeManifest_ErrStreamNotCanonical(t *testing.T) {
 func TestDecodeQuoteRequest_LLMChat_MissingParams(t *testing.T) {
 	t.Parallel()
 
-	pv := lcpwire.ProtocolVersionV01
+	pv := lcpwire.ProtocolVersionV02
 	var jobID [32]byte
 	var msgID [32]byte
 	for i := range jobID {
@@ -201,7 +204,6 @@ func TestDecodeQuoteRequest_LLMChat_MissingParams(t *testing.T) {
 	sizeExpiry := func() uint64 { return tlv.SizeTUint64(expiry) }
 
 	taskKindBytes := []byte("llm.chat")
-	inputBytes := []byte("hi")
 
 	stream := tlv.MustNewStream(
 		tlv.MakePrimitiveRecord(1, &pv),
@@ -209,7 +211,6 @@ func TestDecodeQuoteRequest_LLMChat_MissingParams(t *testing.T) {
 		tlv.MakePrimitiveRecord(3, &msgID),
 		tlv.MakeDynamicRecord(4, &expiry, sizeExpiry, tlv.ETUint64, tlv.DTUint64),
 		tlv.MakePrimitiveRecord(20, &taskKindBytes),
-		tlv.MakePrimitiveRecord(21, &inputBytes),
 	)
 
 	var b bytes.Buffer
