@@ -1,0 +1,109 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "linden",
+  "name": "LCP (Lightning Compute Protocol)",
+  "description": "Pay for small compute jobs over Lightning (Quote → Pay → Result) / Lightning上で小さな計算ジョブを支払うためのアプリケーション層プロトコル。",
+  "colors": {
+    "primary": "#111111"
+  },
+  "logo": {
+    "light": "/logo-dark.svg",
+    "dark": "/logo.svg"
+  },
+  "favicon": {
+    "light": "/favicon-light.svg",
+    "dark": "/favicon.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/YusukeShimizu/lightning-compute-protocol"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/YusukeShimizu/lightning-compute-protocol"
+    }
+  },
+  "search": {
+    "prompt": "Search docs / ドキュメント検索"
+  },
+  "seo": {
+    "indexing": "navigable"
+  },
+  "navigation": {
+    "languages": [
+      {
+        "language": "en",
+        "default": true,
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "index",
+              "go-lcpd/docs/regtest",
+              "go-lcpd/docs/quickstart-mainnet"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "go-lcpd/docs/configuration",
+              "go-lcpd/docs/cli",
+              "go-lcpd/docs/background",
+              "go-lcpd/docs/devnet",
+              "go-lcpd/docs/regtest-integration"
+            ]
+          },
+          {
+            "group": "Protocol",
+            "pages": [
+              "protocol/protocol"
+            ]
+          },
+          {
+            "group": "Implementation",
+            "pages": [
+              "go-lcpd/spec"
+            ]
+          }
+        ]
+      },
+      {
+        "language": "ja",
+        "groups": [
+          {
+            "group": "はじめに",
+            "pages": [
+              "index-ja",
+              "go-lcpd/docs/regtest-ja",
+              "go-lcpd/docs/quickstart-mainnet-ja"
+            ]
+          },
+          {
+            "group": "ガイド",
+            "pages": [
+              "go-lcpd/docs/configuration-ja",
+              "go-lcpd/docs/cli-ja",
+              "go-lcpd/docs/background-ja",
+              "go-lcpd/docs/devnet-ja",
+              "go-lcpd/docs/regtest-integration-ja"
+            ]
+          },
+          {
+            "group": "プロトコル",
+            "pages": [
+              "protocol/protocol-ja"
+            ]
+          },
+          {
+            "group": "実装",
+            "pages": [
+              "go-lcpd/spec-ja"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
