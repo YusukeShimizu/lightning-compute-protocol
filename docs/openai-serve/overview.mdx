@@ -1,0 +1,142 @@
+---
+title: openai-serve (OpenAI-compatible gateway)
+description: An OpenAI-compatible HTTP server that forwards requests to lcpd-grpcd (Requester) over gRPC.
+---
+
+`openai-serve` is a small HTTP gateway that implements a subset of the OpenAI API and forwards requests to a local
+`lcpd-grpcd` (Requester) over gRPC. The Requester handles Lightning connectivity, quote/payment, and result retrieval.
+
+This lets existing OpenAI-compatible clients (SDKs, LangChain, curl, etc.) send requests over LCP by mostly changing the
+`base_url`.
+
+## Architecture
+
+```text
+OpenAI SDK / curl
+   |
+   |  HTTP (OpenAI-compatible)
+   v
+openai-serve
+   |
+   |  gRPC (LCPDService)
+   v
+lcpd-grpcd (Requester)  --- Lightning --- Provider peer (lcpd-grpcd Provider)
+```
+
+Notes:
+
+- `openai-serve` is intentionally stateless and does **not** connect to Lightning directly.
+- The Requester (`lcpd-grpcd`) is the component that can spend sats.
+
+## Supported endpoints (MVP)
+
+- `POST /v1/chat/completions` (non-streaming only)
+- `GET /v1/models`
+- `GET /healthz`
+
+## Quickstart
+
+Prerequisite: run `lcpd-grpcd` separately (Requester mode) and ensure it can reach your Lightning node and LCP peers.
+
+Build:
+
+```sh
+cd apps/openai-serve
+go install ./cmd/openai-serve
+```
+
+Run:
+
+```sh
+export OPENAI_SERVE_HTTP_ADDR="127.0.0.1:8080"
+export OPENAI_SERVE_LCPD_GRPC_ADDR="127.0.0.1:50051"
+
+# Optional auth (comma-separated)
+export OPENAI_SERVE_API_KEYS="devkey1"
+
+openai-serve
+```
+
+Test:
+
+```sh
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{
+    "model": "gpt-5.2",
+    "messages": [{"role":"user","content":"Say hello in Japanese."}]
+  }'
+```
+
+## Using from CLI tools
+
+`openai-serve` speaks the OpenAI **Chat Completions** API (non-streaming). Many OpenAI-compatible CLI tools can be
+pointed at it by configuring a custom `base_url` and API key.
+
+### Codex CLI
+
+Configure Codex CLI to use `openai-serve` as a custom model provider (Chat Completions wire format):
+
+1) Add this to `~/.codex/config.toml`:
+
+```toml
+[model_providers.openai_serve]
+name = "openai-serve"
+base_url = "http://127.0.0.1:8080/v1"
+env_key = "OPENAI_SERVE_API_KEY"
+wire_api = "chat"
+
+[profiles.lcp]
+model = "gpt-5.2"
+model_provider = "openai_serve"
+```
+
+2) Run (API key must match what `openai-serve` expects):
+
+```sh
+export OPENAI_SERVE_API_KEY="devkey1"
+codex --profile lcp "Say hello in Japanese."
+```
+
+Note: `openai-serve` currently supports a strict subset of Chat Completions. If your client sends `tools`,
+`response_format`, or streaming-related fields, the request will be rejected.
+
+### LLM (`llm`)
+
+`llm` can use an OpenAI-compatible base URL by defining an extra model. Create an `extra-openai-models.yaml` file in the
+`llm` user directory and add:
+
+```yaml
+- model_id: lcp-gpt-5.2
+  model_name: gpt-5.2
+  api_base: http://127.0.0.1:8080/v1
+  can_stream: false
+  api_key_name: openai-serve
+```
+
+Then:
+
+```sh
+llm keys set openai-serve
+llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
+```
+
+## Request/response behavior
+
+- JSON decoding is strict (`DisallowUnknownFields`): unknown request fields are rejected with `400`.
+- Request body size is limited to 1 MiB.
+- Provider result bytes must be UTF-8 (non-UTF-8 results return `502`).
+- Token usage in responses is approximate (bytes/4 heuristic).
+
+For configuration, routing rules, and safety knobs (max price, timeouts, model allowlists), see
+[Configuration](/openai-serve/configuration).
+
+## LCP metadata headers
+
+`POST /v1/chat/completions` responses include:
+
+- `X-Lcp-Peer-Id`: chosen Provider peer id
+- `X-Lcp-Job-Id`: job id (hex)
+- `X-Lcp-Price-Msat`: accepted quote price
+- `X-Lcp-Terms-Hash`: accepted quote terms hash (hex)

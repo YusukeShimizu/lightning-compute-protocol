@@ -56,6 +56,13 @@
             ]
           },
           {
+            "group": "Integrations",
+            "pages": [
+              "openai-serve/overview",
+              "openai-serve/configuration"
+            ]
+          },
+          {
             "group": "Protocol",
             "pages": [
               "protocol/protocol"
@@ -88,6 +95,13 @@
               "go-lcpd/docs/background-ja",
               "go-lcpd/docs/devnet-ja",
               "go-lcpd/docs/regtest-integration-ja"
+            ]
+          },
+          {
+            "group": "連携",
+            "pages": [
+              "openai-serve/overview-ja",
+              "openai-serve/configuration-ja"
             ]
           },
           {

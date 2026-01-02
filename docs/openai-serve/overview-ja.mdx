@@ -1,0 +1,143 @@
+---
+title: openai-serve（OpenAI互換ゲートウェイ）
+description: OpenAI互換のHTTPサーバ。lcpd-grpcd（Requester）へgRPCで転送します。
+---
+
+`openai-serve` は、OpenAI API の一部を実装する小さな HTTP ゲートウェイです。
+受け取ったリクエストをローカルの `lcpd-grpcd`（Requester）へ gRPC で転送します。
+Requester は Lightning 接続、見積もり（quote）/支払い、結果取得を担います。
+
+これにより、既存の OpenAI 互換クライアント（SDK / LangChain / curl など）は、主に `base_url` を切り替えるだけで
+LCP 上の Provider にリクエストを投げられます。
+
+## アーキテクチャ
+
+```text
+OpenAI SDK / curl
+   |
+   |  HTTP（OpenAI互換）
+   v
+openai-serve
+   |
+   |  gRPC（LCPDService）
+   v
+lcpd-grpcd（Requester）  --- Lightning --- Provider peer（lcpd-grpcd Provider）
+```
+
+ポイント:
+
+- `openai-serve` は意図的にステートレスで、Lightning へ直接接続しません。
+- sats を支払う権限を持つのは Requester（`lcpd-grpcd`）です。
+
+## 対応エンドポイント（MVP）
+
+- `POST /v1/chat/completions`（非ストリーミングのみ）
+- `GET /v1/models`
+- `GET /healthz`
+
+## クイックスタート
+
+前提: `lcpd-grpcd` は別プロセスで起動（Requester モード）し、Lightning node と LCP peers に到達できる状態にします。
+
+ビルド:
+
+```sh
+cd apps/openai-serve
+go install ./cmd/openai-serve
+```
+
+起動:
+
+```sh
+export OPENAI_SERVE_HTTP_ADDR="127.0.0.1:8080"
+export OPENAI_SERVE_LCPD_GRPC_ADDR="127.0.0.1:50051"
+
+# 任意: 認証（カンマ区切り）
+export OPENAI_SERVE_API_KEYS="devkey1"
+
+openai-serve
+```
+
+動作確認:
+
+```sh
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{
+    "model": "gpt-5.2",
+    "messages": [{"role":"user","content":"Say hello in Japanese."}]
+  }'
+```
+
+## CLI ツールから使う
+
+`openai-serve` は OpenAI **Chat Completions** API（非ストリーミング）互換です。
+多くの OpenAI 互換 CLI ツールは、`base_url` と API key を設定することで `openai-serve` を利用できます。
+
+### Codex CLI
+
+Codex CLI を `openai-serve` に向けるには、カスタムの model provider を定義します（wire format は Chat Completions）。
+
+1) `~/.codex/config.toml` に追記:
+
+```toml
+[model_providers.openai_serve]
+name = "openai-serve"
+base_url = "http://127.0.0.1:8080/v1"
+env_key = "OPENAI_SERVE_API_KEY"
+wire_api = "chat"
+
+[profiles.lcp]
+model = "gpt-5.2"
+model_provider = "openai_serve"
+```
+
+2) 実行（API key は `openai-serve` 側の設定と一致させてください）:
+
+```sh
+export OPENAI_SERVE_API_KEY="devkey1"
+codex --profile lcp "Say hello in Japanese."
+```
+
+注意: `openai-serve` は Chat Completions のサブセットのみ対応です。クライアントが `tools` / `response_format` /
+ストリーミング関連フィールドを送ると、リクエストは拒否されます。
+
+### LLM（`llm`）
+
+`llm` は OpenAI 互換 base URL に向けて実行できます。`llm` の user directory に `extra-openai-models.yaml` を作成し、
+以下を追加してください:
+
+```yaml
+- model_id: lcp-gpt-5.2
+  model_name: gpt-5.2
+  api_base: http://127.0.0.1:8080/v1
+  can_stream: false
+  api_key_name: openai-serve
+```
+
+その後:
+
+```sh
+llm keys set openai-serve
+llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
+```
+
+## リクエスト/レスポンスの挙動
+
+- JSON は strict に decode します（`DisallowUnknownFields`）: 未知フィールドがあると `400` になります。
+- リクエストボディは 1 MiB までです。
+- Provider の結果 bytes は UTF-8 必須です（UTF-8 でない場合は `502`）。
+- レスポンスの token usage は概算です（bytes/4 の簡易ヒューリスティック）。
+
+設定、ルーティング、Safety knobs（最大価格、タイムアウト、モデル allowlist）は
+[設定](/openai-serve/configuration-ja) を参照してください。
+
+## LCP メタデータヘッダ
+
+`POST /v1/chat/completions` のレスポンスには以下が含まれます:
+
+- `X-Lcp-Peer-Id`: 選択された Provider の peer id
+- `X-Lcp-Job-Id`: job id（hex）
+- `X-Lcp-Price-Msat`: 受諾した quote の価格
+- `X-Lcp-Terms-Hash`: 受諾した quote の terms hash（hex）
