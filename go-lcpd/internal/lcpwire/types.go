@@ -9,7 +9,7 @@ type MessageType uint16
 
 const (
 	// ProtocolVersionV02 is the protocol_version for LCP v0.2 as defined in
-	// `protocol/protocol.md`.
+	// `docs/protocol/protocol.md`.
 	// v0.2 encodes to 2 (major*100 + minor).
 	ProtocolVersionV02 = uint16(2)
 

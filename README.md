@@ -38,7 +38,7 @@ This project is unaudited. Running it against real funds and real peers can lead
 
 - Sending funds / opening channels / paying invoices on mainnet can lead to loss of funds.
 - Never leak secrets such as seed phrases, wallet passwords, macaroons, or API keys.
-- Start with [go-lcpd/docs/regtest.md](go-lcpd/docs/regtest.md) first (free and safer), then try mainnet with small amounts.
+- Start with [docs/go-lcpd/docs/regtest.md](docs/go-lcpd/docs/regtest.md) first (free and safer), then try mainnet with small amounts.
 - `go-lcpd` integrates with `lnd` (gRPC) for peer messaging and payments. Other Lightning implementations are not supported by this repo.
   This repository does not ship an `lnd/` folder or binaries — bring your own `lnd`.
 - LCP runs over direct Lightning peer connections (BOLT #1 custom messages). You must be peered with the Provider, and you may need a channel/route to pay.
@@ -47,12 +47,33 @@ This project is unaudited. Running it against real funds and real peers can lead
 
 - Overview: this README
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Quickstart (mainnet): [go-lcpd/docs/quickstart-mainnet.md](go-lcpd/docs/quickstart-mainnet.md)
-- Configuration: [go-lcpd/docs/configuration.md](go-lcpd/docs/configuration.md)
-- Background run + logging: [go-lcpd/docs/background.md](go-lcpd/docs/background.md)
-- regtest walkthrough: [go-lcpd/docs/regtest.md](go-lcpd/docs/regtest.md)
-- Protocol spec (LCP v0.2): [protocol/protocol.md](protocol/protocol.md)
+- Quickstart (mainnet): [docs/go-lcpd/docs/quickstart-mainnet.md](docs/go-lcpd/docs/quickstart-mainnet.md)
+- Configuration: [docs/go-lcpd/docs/configuration.md](docs/go-lcpd/docs/configuration.md)
+- Background run + logging: [docs/go-lcpd/docs/background.md](docs/go-lcpd/docs/background.md)
+- regtest walkthrough: [docs/go-lcpd/docs/regtest.md](docs/go-lcpd/docs/regtest.md)
+- Protocol spec (LCP v0.2): [docs/protocol/protocol.md](docs/protocol/protocol.md)
 - One-shot client (demo): [go-lcpd/tools/lcpd-oneshot](go-lcpd/tools/lcpd-oneshot)
+
+## Docs site (Mintlify)
+
+This repository’s docs site is managed with Mintlify (`docs/docs.json`).
+All Mintlify pages and assets live under `docs/` (Japanese pages are colocated with English and use a `-ja` suffix).
+
+Local preview:
+
+```sh
+cd docs
+npx --yes mintlify@4.2.255 dev --no-open
+```
+
+Validate navigation + check docs quality:
+
+```sh
+cd docs
+node scripts/check-docs-json.mjs
+npx --yes mintlify@4.2.255 a11y
+npx --yes mintlify@4.2.255 broken-links
+```
 
 ## Repository layout (high level)
 

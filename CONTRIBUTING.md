@@ -7,9 +7,36 @@ If you are new to Lightning, Go, or protocol work, open an issue or a draft PR a
 
 ## Quick links
 
-- Protocol draft (LCP v0.2): `protocol/protocol.md`
+- Protocol draft (LCP v0.2): `docs/protocol/protocol.md`
 - Reference implementation (daemon): `go-lcpd/`
-- go-lcpd developer docs: `go-lcpd/docs/`
+- go-lcpd developer docs: `docs/go-lcpd/docs/`
+
+## Docs (Mintlify)
+
+This repo’s docs site is managed with Mintlify (`docs/docs.json`).
+All Mintlify pages and assets live under `docs/` (Japanese pages are colocated with English and use a `-ja` suffix).
+
+Local preview:
+
+```sh
+cd docs
+npx --yes mintlify@4.2.255 dev --no-open
+```
+
+Validate navigation + check docs quality:
+
+```sh
+cd docs
+node scripts/check-docs-json.mjs
+npx --yes mintlify@4.2.255 a11y
+npx --yes mintlify@4.2.255 broken-links
+```
+
+Language notes:
+- A Japanese page usually mirrors its English page in the same directory, using a `-ja` suffix (example: `docs/go-lcpd/docs/regtest.md` ↔ `docs/go-lcpd/docs/regtest-ja.md`).
+- For deep specs, the English docs are the SSOT; Japanese pages may be summaries.
+
+Note: Prefer repo-root-relative links (for example `docs/go-lcpd/docs/regtest.md`, `docs/go-lcpd/docs/regtest-ja.md`) so the link checker resolves paths consistently.
 
 ## What you can help with
 
@@ -96,7 +123,7 @@ make test
 
 ## Protocol spec contributions
 
-Edits under `protocol/` should:
+Edits under `docs/protocol/` should:
 - avoid requiring changes to core BOLT/LN behavior
 - use TLV streams for extensibility
 - keep the document format close to BOLT-style specs (tables, "MUST/SHOULD", clear message definitions)
@@ -113,6 +140,7 @@ Before you hit "Ready for review", it helps if:
 - code is formatted (`make fmt` if relevant)
 - tests added/updated for behavior changes
 - `make test` and `make lint` are green (for `go-lcpd` changes)
+- `(cd docs && npx --yes mintlify@4.2.255 broken-links)` is green (for docs changes)
 - docs updated if behavior or flags changed
 
 ## Security
