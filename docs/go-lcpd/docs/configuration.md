@@ -64,6 +64,14 @@ Sample with explicit defaults: `../config.yaml`
 enabled: true
 quote_ttl_seconds: 600
 
+pricing:
+  # Optional: load-based surge pricing, applied at quote-time only.
+  # Multiplier = 1.0 + per_job_bps/10_000 * max(0, in_flight_jobs - threshold)
+  in_flight_surge:
+    threshold: 2
+    per_job_bps: 500 # +5% per job above threshold
+    max_multiplier_bps: 30000 # 3.0x cap
+
 llm:
   max_output_tokens: 4096
   chat_profiles:
@@ -115,6 +123,10 @@ llm:
 
 - `enabled`: Enables Provider mode. If `false`, rejects quote/cancel and does not create invoices.
 - `quote_ttl_seconds`: Quote and invoice TTL in seconds. Default is 300s.
+- `pricing.in_flight_surge`: Optional load-based surge pricing, computed from the current in-flight job count at quote time.
+  - `threshold`: Number of in-flight jobs before surge applies.
+  - `per_job_bps`: Additive multiplier per job above `threshold` (basis points; 10,000 = 1.0x). If `0`, surge is disabled.
+  - `max_multiplier_bps`: Caps the total multiplier in basis points. If `0`, a safe default cap is used.
 - `llm.max_output_tokens`: Provider-wide default for execution policy (`ExecutionPolicy`). Applied both to quote-time estimation and backend execution. Default is 4096.
 - `llm.chat_profiles`: Map of allowed/advertised `llm.chat` profiles. If empty, accepts any profile but does not advertise them in the manifest.
   - `backend_model`: Upstream model ID passed to the backend. Defaults to the profile name.
@@ -132,7 +144,7 @@ If YAML is not provided, a built-in price table is used (msat per 1M tokens):
 1. Validate the QuoteRequest and check the profile is allowed.
 2. Apply ExecutionPolicy (`max_output_tokens`) to the `computebackend.Task`.
 3. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
-4. Compute price in msat via `QuotePrice(profile, estimate, cached=0, price_table)` and embed it into TermsHash / invoice binding.
+4. Compute price in msat via `QuotePrice(profile, estimate, cached=0, price_table)` and apply optional `pricing.in_flight_surge`, then embed it into TermsHash / invoice binding.
 5. After payment settles, map `profile -> backend_model`, execute the planned task in the backend, and return the result via `lcp_result`.
 
 ## Backend notes

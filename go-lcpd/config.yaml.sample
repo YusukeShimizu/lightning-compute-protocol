@@ -21,6 +21,13 @@
 enabled: false
 quote_ttl_seconds: 300
 
+# Optional: load-based surge pricing at quote-time.
+# pricing:
+#   in_flight_surge:
+#     threshold: 2
+#     per_job_bps: 500 # +5% per job above threshold
+#     max_multiplier_bps: 30000 # 3.0x cap
+
 llm:
   max_output_tokens: 4096
   chat_profiles:

@@ -1121,10 +1121,39 @@ func (h *Handler) quotePrice(req lcpwire.QuoteRequest) (llm.PriceBreakdown, erro
 		return llm.PriceBreakdown{}, err
 	}
 
-	return llm.QuotePrice(
+	base, err := llm.QuotePrice(
 		profile,
 		estimation.Usage,
 		0, // cachedInputTokens
 		h.priceTable(),
 	)
+	if err != nil {
+		return llm.PriceBreakdown{}, err
+	}
+
+	inFlight := h.inFlightJobs()
+	multiplierBps := inFlightMultiplierBps(h.cfg.Pricing.InFlightSurge, inFlight)
+	priceMsat, err := applyMultiplierCeil(base.PriceMsat, multiplierBps)
+	if err != nil {
+		return llm.PriceBreakdown{}, err
+	}
+	if priceMsat != base.PriceMsat && h.logger != nil {
+		h.logger.Debugw(
+			"applied surge pricing",
+			"strategy", "in_flight_jobs",
+			"in_flight_jobs", inFlight,
+			"multiplier_bps", multiplierBps,
+			"base_price_msat", base.PriceMsat,
+			"price_msat", priceMsat,
+		)
+	}
+
+	base.PriceMsat = priceMsat
+	return base, nil
+}
+
+func (h *Handler) inFlightJobs() int {
+	h.jobMu.Lock()
+	defer h.jobMu.Unlock()
+	return len(h.jobCancels)
 }
