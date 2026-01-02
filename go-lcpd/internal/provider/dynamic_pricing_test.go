@@ -1,3 +1,4 @@
+//nolint:testpackage // White-box tests need access to unexported helpers.
 package provider
 
 import (
@@ -56,11 +57,12 @@ func TestHandler_quotePrice_AppliesInFlightSurge(t *testing.T) {
 
 	// Simulate existing in-flight jobs.
 	handler.jobMu.Lock()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		var jobID lcp.JobID
 		jobID[0] = byte(i + 1)
 		handler.jobCancels[jobstore.Key{PeerPubKey: "peer", JobID: jobID}] = func() {}
 	}
+	handler.inFlight = 5
 	handler.jobMu.Unlock()
 
 	req := newLLMChatQuoteRequest("gpt-5.2")

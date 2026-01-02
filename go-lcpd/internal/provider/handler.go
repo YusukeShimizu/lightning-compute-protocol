@@ -86,6 +86,7 @@ type Handler struct {
 
 	jobMu      sync.Mutex
 	jobCancels map[jobstore.Key]context.CancelFunc
+	inFlight   uint64
 }
 
 func NewHandler(
@@ -705,6 +706,7 @@ func (h *Handler) startJobRunner(
 		return
 	}
 	h.jobCancels[key] = cancel
+	h.inFlight++
 	h.jobMu.Unlock()
 
 	go h.runJob(jobCtx, key, reqCopy, quoteResp, invoice, remoteMaxPayload)
@@ -908,6 +910,9 @@ func (h *Handler) cancelJob(key jobstore.Key) bool {
 	cancel, ok := h.jobCancels[key]
 	if ok {
 		delete(h.jobCancels, key)
+		if h.inFlight > 0 {
+			h.inFlight--
+		}
 	}
 	h.jobMu.Unlock()
 
@@ -919,7 +924,12 @@ func (h *Handler) cancelJob(key jobstore.Key) bool {
 
 func (h *Handler) forgetJob(key jobstore.Key) {
 	h.jobMu.Lock()
-	delete(h.jobCancels, key)
+	if _, ok := h.jobCancels[key]; ok {
+		delete(h.jobCancels, key)
+		if h.inFlight > 0 {
+			h.inFlight--
+		}
+	}
 	h.jobMu.Unlock()
 }
 
@@ -1152,8 +1162,8 @@ func (h *Handler) quotePrice(req lcpwire.QuoteRequest) (llm.PriceBreakdown, erro
 	return base, nil
 }
 
-func (h *Handler) inFlightJobs() int {
+func (h *Handler) inFlightJobs() uint64 {
 	h.jobMu.Lock()
 	defer h.jobMu.Unlock()
-	return len(h.jobCancels)
+	return h.inFlight
 }
