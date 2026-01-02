@@ -14,21 +14,20 @@ const (
 	defaultMaxInFlightSurgeMultiplierBps = uint32(30_000) // 3.0x
 )
 
-func inFlightMultiplierBps(cfg InFlightSurgeConfig, inFlightJobs int) uint64 {
+func inFlightMultiplierBps(cfg InFlightSurgeConfig, inFlightJobs uint64) uint64 {
 	if cfg.PerJobBps == 0 {
 		return multiplierBpsOne
 	}
-	if inFlightJobs < 0 {
-		inFlightJobs = 0
+
+	inFlight := inFlightJobs
+
+	threshold := uint64(cfg.Threshold)
+	over := uint64(0)
+	if inFlight > threshold {
+		over = inFlight - threshold
 	}
 
-	threshold := int(cfg.Threshold)
-	over := 0
-	if inFlightJobs > threshold {
-		over = inFlightJobs - threshold
-	}
-
-	bps := multiplierBpsOne + uint64(cfg.PerJobBps)*uint64(over)
+	bps := multiplierBpsOne + uint64(cfg.PerJobBps)*over
 
 	maxBps := cfg.MaxMultiplierBps
 	if maxBps == 0 {
