@@ -36,6 +36,16 @@ export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
 ```
 
+### Logging (privacy)
+
+`lcpd-grpcd` logs are intentionally designed to be diagnosable **without** persisting raw user content.
+
+- `LCPD_LOG_LEVEL` controls verbosity (`debug`, `info`, `warn`, `error`; default is `info`).
+- Logs MUST NOT contain raw prompts, raw model outputs, API keys, macaroons, or BOLT11 invoices.
+- Even with content redaction, logs still contain metadata (peer ids, job ids, prices, timings).
+
+Details: [Logging & privacy](/go-lcpd/docs/logging).
+
 ### Provider (YAML)
 
 | Variable                    |              Required | Purpose                                                                                        |

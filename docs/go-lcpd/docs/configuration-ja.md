@@ -36,6 +36,16 @@ export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
 ```
 
+### ログ（プライバシー）
+
+`lcpd-grpcd` のログは、生のユーザー入力を永続化しなくても診断できるように設計しています。
+
+- `LCPD_LOG_LEVEL` で詳細度を制御します（`debug` / `info` / `warn` / `error`。デフォルトは `info`）。
+- ログには、生のプロンプト / 生のモデル出力 / API key / macaroon / BOLT11 invoice を残してはいけません。
+- 生データを残さなくても、ログにはメタデータ（peer id / job id / 価格 / 時間など）が残ります。
+
+詳細: [ログとプライバシー](/go-lcpd/docs/logging-ja)。
+
 ### Provider（YAML）
 
 | 変数                        |        必須 | 目的                                                                                                   |

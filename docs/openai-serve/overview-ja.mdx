@@ -29,6 +29,14 @@ lcpd-grpcd（Requester）  --- Lightning --- Provider peer（lcpd-grpcd Provider
 - `openai-serve` は意図的にステートレスで、Lightning へ直接接続しません。
 - sats を支払う権限を持つのは Requester（`lcpd-grpcd`）です。
 
+## ログとプライバシー
+
+ログはセンシティブとして扱います。`openai-serve` は、生のユーザー入力を永続化しなくても診断できるように設計しています。
+
+- ログには、生のプロンプト（`messages[].content`）や生のモデル出力を残してはいけません。
+- ログは運用メタデータ（model/peer/job id、価格、時間、byte/token カウント）のみに寄せます。
+- `OPENAI_SERVE_LOG_LEVEL=debug` はリクエストログがより詳細になります。運用では（必要になるまで）デフォルトの `info` を推奨します。
+
 ## 対応エンドポイント（MVP）
 
 - `POST /v1/chat/completions`（非ストリーミングのみ）

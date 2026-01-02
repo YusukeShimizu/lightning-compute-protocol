@@ -28,6 +28,14 @@ Notes:
 - `openai-serve` is intentionally stateless and does **not** connect to Lightning directly.
 - The Requester (`lcpd-grpcd`) is the component that can spend sats.
 
+## Logging and privacy
+
+Logs are treated as sensitive. `openai-serve` is designed to be diagnosable without persisting raw user content.
+
+- Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
+- Logs include only operational metadata (model/peer/job ids, price, timings, and byte/token counts).
+- `OPENAI_SERVE_LOG_LEVEL=debug` enables more verbose request logging; keep `info` (default) for production unless needed.
+
 ## Supported endpoints (MVP)
 
 - `POST /v1/chat/completions` (non-streaming only)

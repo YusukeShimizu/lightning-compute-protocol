@@ -5,6 +5,9 @@ This doc describes practical ways to:
 - run `lcpd-grpcd` in the background
 - keep logs on disk (with basic rotation)
 
+Note: logs are sensitive. `lcpd-grpcd` is designed to avoid logging raw prompts/outputs, but logs still contain metadata
+(peer ids, job ids, prices, timings). See [Logging & privacy](/go-lcpd/docs/logging).
+
 For long-running infrastructure, use a service manager (systemd/launchd).
 For "keep running after I close my terminal", the repo script is usually enough.
 

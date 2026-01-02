@@ -24,6 +24,14 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 | `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | プロンプト上限（0 で無効） |
 | `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
+## ログ（プライバシー）
+
+`openai-serve` のログは、生のユーザー入力を永続化しなくても運用できるように設計しています。
+
+- ログには、生のプロンプト（`messages[].content`）や生のモデル出力を残してはいけません。
+- `info` は、運用メタデータ（model/peer/job id、価格、時間、byte/token カウント）を記録します。
+- `debug` は HTTP リクエストログがより詳細になり（`client_ip` を含むことがあります）、よりセンシティブとして扱ってください。
+
 ## ルーティング（peer の選び方）
 
 `model` ごとに Provider peer は以下の順で決定されます:
@@ -60,4 +68,3 @@ Authorization: Bearer <key>
 
 `/healthz` は意図的に保護しません（ローカルのヘルスチェック用途）。
 必要に応じてリバースプロキシ側で保護してください。
-

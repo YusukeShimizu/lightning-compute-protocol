@@ -36,6 +36,9 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	started := time.Now()
+	ctx := c.Request.Context()
+
 	req, ok := decodeAndValidateChatRequest(c)
 	if !ok {
 		return
@@ -45,6 +48,8 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	if !ok {
 		return
 	}
+	promptBytes := len([]byte(prompt))
+	promptTokens := openai.ApproxTokensFromBytes(promptBytes)
 
 	model := strings.TrimSpace(req.Model)
 
@@ -58,17 +63,21 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	quoteStart := time.Now()
 	quote, ok := s.requestQuoteAndValidatePrice(c, peerID, task)
 	if !ok {
 		return
 	}
+	quoteLatency := time.Since(quoteStart)
 
 	jobID := copyBytes(quote.GetTerms().GetJobId())
 
+	execStart := time.Now()
 	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, jobID)
 	if !ok {
 		return
 	}
+	execLatency := time.Since(execStart)
 
 	resp, ok := s.buildChatCompletionResponse(c, model, prompt, execResp)
 	if !ok {
@@ -76,6 +85,30 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 
 	price := quote.GetTerms().GetPriceMsat()
+	totalLatency := time.Since(started)
+
+	resultBytes := execResp.GetResult().GetResult()
+	completionBytes := len(resultBytes)
+	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
+	totalTokens := promptTokens + completionTokens
+
+	s.log.InfoContext(
+		ctx,
+		"chat completion",
+		"model", model,
+		"peer_id", peerID,
+		"job_id", hex.EncodeToString(jobID),
+		"price_msat", price,
+		"terms_hash", hex.EncodeToString(quote.GetTerms().GetTermsHash()),
+		"prompt_bytes", promptBytes,
+		"completion_bytes", completionBytes,
+		"prompt_tokens_approx", promptTokens,
+		"completion_tokens_approx", completionTokens,
+		"total_tokens_approx", totalTokens,
+		"quote_ms", quoteLatency.Milliseconds(),
+		"execute_ms", execLatency.Milliseconds(),
+		"total_ms", totalLatency.Milliseconds(),
+	)
 	c.Header("X-Lcp-Peer-Id", peerID)
 	c.Header("X-Lcp-Job-Id", hex.EncodeToString(jobID))
 	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))

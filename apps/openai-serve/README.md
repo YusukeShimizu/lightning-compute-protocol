@@ -62,6 +62,7 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
 | `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
+| `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## How it works
 
@@ -145,6 +146,14 @@ If there are no connected peers, the request fails.
 - `OPENAI_SERVE_MAX_PRICE_MSAT`: reject quotes above a maximum price (helps prevent accidental overspend).
 - `OPENAI_SERVE_TIMEOUT_QUOTE` / `OPENAI_SERVE_TIMEOUT_EXECUTE`: bound quote/execution time.
 - `OPENAI_SERVE_API_KEYS`: simple API-key auth for the HTTP gateway.
+
+## Logging and privacy
+
+This service treats logs as sensitive.
+
+- Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
+- Logs include only operational metadata (e.g., peer id, job id, price, durations, and byte/token counts).
+- `OPENAI_SERVE_LOG_LEVEL=debug` enables more verbose request logging; keep `info` (default) for production unless needed.
 
 ## Response metadata headers
 

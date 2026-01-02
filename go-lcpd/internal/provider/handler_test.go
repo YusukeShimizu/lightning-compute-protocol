@@ -18,6 +18,9 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/replaystore"
 	"github.com/google/go-cmp/cmp"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestHandler_HandleQuoteRequest_SendsQuoteResponse(t *testing.T) {
@@ -442,6 +445,119 @@ func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
 		job, ok := jobs.Get(key)
 		return ok && job.State == jobstore.StateDone
 	})
+}
+
+func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
+	t.Parallel()
+
+	const (
+		promptText      = "SENSITIVE_PROMPT_DO_NOT_LOG"
+		outputText      = "SENSITIVE_OUTPUT_DO_NOT_LOG"
+		paymentRequest  = "lnbcrt1settle"
+		contentTypeText = contentTypeTextPlain
+	)
+
+	core, observed := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core).Sugar()
+
+	clock := &fakeClock{now: time.Unix(2000, 0)}
+	messenger := &fakeMessenger{}
+	invoices := newFakeInvoiceCreator()
+	invoices.result = InvoiceResult{
+		PaymentRequest: paymentRequest,
+		PaymentHash:    mustHash32(0xCC),
+		AddIndex:       12,
+	}
+	jobs := jobstore.New()
+	backend := &fakeBackend{
+		result: computebackend.ExecutionResult{
+			OutputBytes: []byte(outputText),
+		},
+	}
+	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
+	estimator := llm.NewApproxUsageEstimator()
+
+	handler := NewHandler(
+		Config{Enabled: true, QuoteTTLSeconds: 300},
+		DefaultValidator(),
+		messenger,
+		invoices,
+		backend,
+		policy,
+		estimator,
+		jobs,
+		replaystore.New(0),
+		nil,
+		logger,
+	)
+	handler.clock = clock
+	handler.replay = nil
+
+	req := newLLMChatQuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
+		r.Input = []byte(promptText)
+	})
+	payload, err := lcpwire.EncodeQuoteRequest(req)
+	if err != nil {
+		t.Fatalf("encode quote_request: %v", err)
+	}
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
+		Payload:    payload,
+	})
+	key := jobstore.Key{PeerPubKey: "peer1", JobID: req.Envelope.JobID}
+
+	if invoices.createCalls() == 0 {
+		t.Fatalf("expected invoice to be created")
+	}
+
+	// Release settlement to allow runJob to proceed.
+	invoices.Settle()
+
+	waitFor(t, time.Second, func() bool {
+		job, ok := jobs.Get(key)
+		return ok && job.State == jobstore.StateDone
+	})
+
+	messages := messenger.messages()
+	if len(messages) < 2 {
+		t.Fatalf("expected quote_response + result, got %d messages", len(messages))
+	}
+	gotResult, decodeErr := lcpwire.DecodeResult(messages[len(messages)-1].payload)
+	if decodeErr != nil {
+		t.Fatalf("decode result: %v", decodeErr)
+	}
+	if gotResult.ContentType == nil || *gotResult.ContentType != contentTypeText {
+		t.Fatalf("content_type mismatch: %v", gotResult.ContentType)
+	}
+
+	entries := observed.All()
+	if len(entries) == 0 {
+		t.Fatalf("expected logs to be emitted")
+	}
+
+	sensitive := []string{promptText, outputText, paymentRequest}
+	for _, entry := range entries {
+		assertNotContainsAny(t, entry.Message, sensitive...)
+		for _, v := range entry.ContextMap() {
+			s, ok := v.(string)
+			if !ok {
+				continue
+			}
+			assertNotContainsAny(t, s, sensitive...)
+		}
+	}
+}
+
+func assertNotContainsAny(t *testing.T, haystack string, needles ...string) {
+	t.Helper()
+	for _, needle := range needles {
+		if strings.Contains(haystack, needle) {
+			t.Fatalf("unexpected sensitive content %q in %q", needle, haystack)
+		}
+	}
 }
 
 type fakeClock struct {
