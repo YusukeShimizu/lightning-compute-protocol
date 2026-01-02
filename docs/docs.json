@@ -51,6 +51,7 @@
               "go-lcpd/docs/configuration",
               "go-lcpd/docs/cli",
               "go-lcpd/docs/background",
+              "go-lcpd/docs/logging",
               "go-lcpd/docs/devnet",
               "go-lcpd/docs/regtest-integration"
             ]
@@ -93,6 +94,7 @@
               "go-lcpd/docs/configuration-ja",
               "go-lcpd/docs/cli-ja",
               "go-lcpd/docs/background-ja",
+              "go-lcpd/docs/logging-ja",
               "go-lcpd/docs/devnet-ja",
               "go-lcpd/docs/regtest-integration-ja"
             ]

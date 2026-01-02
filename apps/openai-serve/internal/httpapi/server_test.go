@@ -110,11 +110,18 @@ func (c *recordingLCPDClient) CancelJob(
 	return &lcpdv1.CancelJobResponse{Success: true}, nil
 }
 
-func newTestHandler(t *testing.T, cfg config.Config, lcpdClient lcpdv1.LCPDServiceClient) http.Handler {
+func newTestHandler(
+	t *testing.T,
+	cfg config.Config,
+	lcpdClient lcpdv1.LCPDServiceClient,
+	logger *slog.Logger,
+) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	s, err := httpapi.New(cfg, lcpdClient, logger)
 	if err != nil {
 		t.Fatalf("httpapi.New() error: %v", err)
@@ -188,7 +195,7 @@ func TestChatCompletions_Success(t *testing.T) {
 		TimeoutQuote:   requestTimeout,
 		TimeoutExecute: requestTimeout,
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	reqBody := mustJSON(t, map[string]any{
 		"model": model,
@@ -272,7 +279,7 @@ func TestChatCompletions_StrictJSONUnknownField(t *testing.T) {
 		TimeoutQuote:   requestTimeout,
 		TimeoutExecute: requestTimeout,
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	reqBody := mustJSON(t, map[string]any{
 		"model": "gpt-5.2",
@@ -302,7 +309,7 @@ func TestChatCompletions_RequestBodyTooLarge(t *testing.T) {
 		TimeoutQuote:   requestTimeout,
 		TimeoutExecute: requestTimeout,
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	largeContent := strings.Repeat("a", maxRequestBodyBytes+len("x"))
 	body := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"` + largeContent + `"}]}`)
@@ -330,7 +337,7 @@ func TestAuthMiddleware_ProtectsV1RoutesOnly(t *testing.T) {
 		TimeoutExecute: requestTimeout,
 		ModelAllowlist: map[string]struct{}{"gpt-5.2": {}},
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	t.Run("healthz is not protected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -387,7 +394,7 @@ func TestChatCompletions_RejectsQuotePriceOverLimit(t *testing.T) {
 		AllowUnlistedModels: true,
 		MaxPriceMsat:        priceMsatLimit,
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	reqBody := mustJSON(t, map[string]any{
 		"model": model,
@@ -440,7 +447,7 @@ func TestChatCompletions_CancelsJobOnCanceledExecute(t *testing.T) {
 		TimeoutExecute:      requestTimeout,
 		AllowUnlistedModels: true,
 	}
-	h := newTestHandler(t, cfg, client)
+	h := newTestHandler(t, cfg, client, nil)
 
 	reqBody := mustJSON(t, map[string]any{
 		"model": model,
@@ -466,5 +473,69 @@ func TestChatCompletions_CancelsJobOnCanceledExecute(t *testing.T) {
 		mustDiff(t, []byte(jobID), cancelReq.GetJobId())
 	case <-time.After(cancelWaitTimeout):
 		t.Fatalf("expected CancelJob to be called")
+	}
+}
+
+func TestChatCompletions_DoesNotLogPromptOrCompletion(t *testing.T) {
+	const (
+		model      = "gpt-5.2"
+		peerID     = "021111111111111111111111111111111111111111111111111111111111111111"
+		jobIDStr   = "job-123"
+		termsStr   = "terms-hash-123"
+		promptText = "SENSITIVE_PROMPT_DO_NOT_LOG"
+		outputText = "SENSITIVE_OUTPUT_DO_NOT_LOG"
+	)
+
+	client := &recordingLCPDClient{
+		listPeersResp: &lcpdv1.ListLCPPeersResponse{
+			Peers: []*lcpdv1.LCPPeer{{PeerId: peerID}},
+		},
+		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
+			PeerId: peerID,
+			Terms: &lcpdv1.Terms{
+				JobId:     []byte(jobIDStr),
+				PriceMsat: priceMsat123,
+				TermsHash: []byte(termsStr),
+			},
+		},
+		acceptResp: &lcpdv1.AcceptAndExecuteResponse{
+			Result: &lcpdv1.Result{Result: []byte(outputText)},
+		},
+	}
+
+	cfg := config.Config{
+		TimeoutQuote:        requestTimeout,
+		TimeoutExecute:      requestTimeout,
+		AllowUnlistedModels: true,
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	h := newTestHandler(t, cfg, client, logger)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{"role": "user", "content": promptText},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusOK, rec.Code)
+
+	logs := buf.String()
+	if strings.Contains(logs, promptText) {
+		t.Fatalf("expected logs not to contain prompt text, got: %q", logs)
+	}
+	if strings.Contains(logs, outputText) {
+		t.Fatalf("expected logs not to contain output text, got: %q", logs)
+	}
+
+	if wantJobIDHex := hex.EncodeToString([]byte(jobIDStr)); !strings.Contains(logs, wantJobIDHex) {
+		t.Fatalf("expected logs to include job id hex %q, got: %q", wantJobIDHex, logs)
 	}
 }

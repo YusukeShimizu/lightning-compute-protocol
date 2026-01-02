@@ -195,16 +195,21 @@ func (s *Service) RequestQuote(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	started := time.Now()
+
 	peer, err := s.requireReadyPeer(peerID)
 	if err != nil {
 		return nil, err
 	}
 	remoteManifest := peer.RemoteManifest
 
+	summary := summarizeTask(task)
+
 	jobID, payload, err := s.buildQuoteRequestPayload(task)
 	if err != nil {
 		return nil, err
 	}
+	payloadBytes := len(payload)
 
 	if remoteManifest.MaxPayloadBytes != nil &&
 		len(payload) > int(*remoteManifest.MaxPayloadBytes) {
@@ -225,12 +230,11 @@ func (s *Service) RequestQuote(
 
 	outcome, err := s.waiter.WaitQuoteResponse(ctx, peerID, jobID)
 	if err != nil {
-		return nil, grpcStatusFromWaiterError(ctx, err)
+		return nil, s.requestQuoteWaiterError(ctx, peerID, jobID, summary, err)
 	}
 
 	if outcome.Error != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
-		return nil, grpcStatusFromLCPError(*outcome.Error)
+		return nil, s.requestQuoteLCPError(peerID, jobID, summary, outcome.Error)
 	}
 	if outcome.QuoteResponse == nil {
 		return nil, status.Error(codes.Internal, "quote waiter returned empty outcome")
@@ -253,6 +257,8 @@ func (s *Service) RequestQuote(
 		)
 		return nil, status.Error(codes.Internal, "put quote failed")
 	}
+
+	s.logQuoteReceived(peerID, jobID, summary, payloadBytes, terms, started)
 
 	return &lcpdv1.RequestQuoteResponse{
 		PeerId: peerID,
@@ -334,35 +340,39 @@ func (s *Service) AcceptAndExecute(
 		return nil, status.Error(codes.Unavailable, "lightning rpc not configured")
 	}
 
+	started := time.Now()
+
 	terms, err := s.jobs.GetTerms(peerID, jobID)
 	if err != nil {
 		return nil, grpcStatusFromJobStoreError(err)
 	}
 
+	summary := s.summarizeStoredTask(peerID, jobID)
+
 	s.markJobState(peerID, jobID, requesterjobstore.StatePaying)
 
 	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms)
 	if verifyErr != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
-		return nil, verifyErr
+		return nil, s.acceptAndExecuteVerifyError(peerID, jobID, summary, verifyErr)
 	}
 
+	payStart := time.Now()
 	_, payErr := s.lightning.PayInvoice(ctx, terms.GetPaymentRequest())
 	if payErr != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
-		return nil, grpcStatusFromLightningError(ctx, payErr)
+		return nil, s.acceptAndExecuteLightningError(ctx, peerID, jobID, summary, payErr)
 	}
+	payDuration := time.Since(payStart)
 
 	s.markJobState(peerID, jobID, requesterjobstore.StateAwaitingResult)
 
+	waitStart := time.Now()
 	outcome, err := s.waiter.WaitResult(ctx, peerID, jobID)
 	if err != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
-		return nil, grpcStatusFromWaiterError(ctx, err)
+		return nil, s.acceptAndExecuteWaiterError(ctx, peerID, jobID, summary, err)
 	}
+	waitDuration := time.Since(waitStart)
 	if outcome.Error != nil {
-		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
-		return nil, grpcStatusFromLCPError(*outcome.Error)
+		return nil, s.acceptAndExecuteLCPError(peerID, jobID, summary, outcome.Error)
 	}
 	if outcome.Result == nil {
 		s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
@@ -377,6 +387,8 @@ func (s *Service) AcceptAndExecute(
 	}
 
 	s.markJobState(peerID, jobID, requesterjobstore.StateDone)
+
+	s.logResultReceived(peerID, jobID, summary, terms, payDuration, waitDuration, res, started)
 
 	return &lcpdv1.AcceptAndExecuteResponse{Result: res}, nil
 }
@@ -471,7 +483,7 @@ func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 	out.SupportedTasks = make([]*lcpdv1.LCPTaskTemplate, 0, len(m.SupportedTasks))
 	for _, tmpl := range m.SupportedTasks {
 		switch tmpl.TaskKind {
-		case "llm.chat":
+		case taskKindLLMChat:
 			if tmpl.LLMChatParams == nil {
 				continue
 			}

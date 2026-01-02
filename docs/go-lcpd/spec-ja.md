@@ -21,6 +21,7 @@ Lightning の BOLT #1 カスタムメッセージを `lnd` のピア接続上で
 - セキュリティ:
   - 支払い前に invoice の `description_hash == terms_hash` 等を検証
   - quote expiry / envelope expiry の制限と重複排除で replay/DoS を軽減
+  - ログには生のプロンプト/出力や秘密情報（API key / macaroon / invoice 文字列など）を残さない
 - テスト:
   - Lightning 統合テストは regtest を opt-in で実行（`go test ./...` に外部プロセスを要求しない）
 
@@ -28,4 +29,3 @@ Lightning の BOLT #1 カスタムメッセージを `lnd` のピア接続上で
 
 - go-lcpd 英語仕様（SSOT）: `go-lcpd/spec.md`
 - LCP 英語 wire 仕様（SSOT）: `protocol/protocol.md`
-
