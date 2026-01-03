@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/go-lcpd/itest/harness/lcpd"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

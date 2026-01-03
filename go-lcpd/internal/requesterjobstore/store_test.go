@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterjobstore"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"

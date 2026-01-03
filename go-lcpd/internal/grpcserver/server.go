@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 
-	lcpdv1 "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
