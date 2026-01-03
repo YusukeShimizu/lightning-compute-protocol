@@ -19,6 +19,9 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/replaystore"
 	"github.com/google/go-cmp/cmp"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
@@ -756,6 +759,162 @@ func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t
 		job, ok := jobs.Get(key)
 		return ok && job.State == jobstore.StateDone
 	})
+}
+
+func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
+	t.Parallel()
+
+	const (
+		promptText     = "SENSITIVE_PROMPT_DO_NOT_LOG"
+		outputText     = "SENSITIVE_OUTPUT_DO_NOT_LOG"
+		paymentRequest = "lnbcrt1settle"
+	)
+
+	core, observed := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core).Sugar()
+
+	clock := &fakeClock{now: time.Unix(2000, 0)}
+	messenger := &fakeMessenger{}
+	invoices := newFakeInvoiceCreator()
+	invoices.result = InvoiceResult{
+		PaymentRequest: paymentRequest,
+		PaymentHash:    mustHash32(0xCC),
+		AddIndex:       12,
+	}
+	jobs := jobstore.New()
+	backend := &fakeBackend{
+		result: computebackend.ExecutionResult{
+			OutputBytes: []byte(outputText),
+		},
+	}
+	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
+	estimator := llm.NewApproxUsageEstimator()
+
+	handler := NewHandler(
+		Config{Enabled: true, QuoteTTLSeconds: 300},
+		DefaultValidator(),
+		messenger,
+		invoices,
+		backend,
+		policy,
+		estimator,
+		jobs,
+		replaystore.New(0),
+		manifestPeerDirectory(),
+		logger,
+	)
+	handler.clock = clock
+	handler.replay = nil
+
+	req := newLLMChatQuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
+	})
+	inputBytes := []byte(promptText)
+	payload := mustEncodeQuoteRequest(t, req)
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
+		Payload:    payload,
+	})
+	key := jobstore.Key{PeerPubKey: "peer1", JobID: req.Envelope.JobID}
+	t.Cleanup(func() { handler.cancelJob(key) })
+
+	inputStreamID := mustHash32(0x11)
+	inputTotalLen := uint64(len(inputBytes))
+	inputSum := sha256.Sum256(inputBytes)
+	inputHash := lcp.Hash32(inputSum)
+
+	beginPayload := mustEncodeStreamBegin(t, lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			MsgID:           fixedMsgID(0x04),
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID:        inputStreamID,
+		Kind:            lcpwire.StreamKindInput,
+		TotalLen:        &inputTotalLen,
+		SHA256:          &inputHash,
+		ContentType:     contentTypeTextPlain,
+		ContentEncoding: "identity",
+	})
+
+	chunkPayload := mustEncodeStreamChunk(t, lcpwire.StreamChunk{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID: inputStreamID,
+		Seq:      0,
+		Data:     inputBytes,
+	})
+
+	endPayload := mustEncodeStreamEnd(t, lcpwire.StreamEnd{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			MsgID:           fixedMsgID(0x05),
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID: inputStreamID,
+		TotalLen: inputTotalLen,
+		SHA256:   inputHash,
+	})
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
+		Payload:    beginPayload,
+	})
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
+		Payload:    chunkPayload,
+	})
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
+		Payload:    endPayload,
+	})
+
+	if invoices.createCalls() == 0 {
+		t.Fatalf("expected invoice to be created")
+	}
+
+	invoices.Settle()
+
+	waitFor(t, time.Second, func() bool {
+		job, ok := jobs.Get(key)
+		return ok && job.State == jobstore.StateDone
+	})
+
+	entries := observed.All()
+	if len(entries) == 0 {
+		t.Fatalf("expected logs to be emitted")
+	}
+
+	sensitive := []string{promptText, outputText, paymentRequest}
+	for _, entry := range entries {
+		assertNotContainsAny(t, entry.Message, sensitive...)
+		for _, v := range entry.ContextMap() {
+			s, ok := v.(string)
+			if !ok {
+				continue
+			}
+			assertNotContainsAny(t, s, sensitive...)
+		}
+	}
+}
+
+func assertNotContainsAny(t *testing.T, haystack string, needles ...string) {
+	t.Helper()
+	for _, needle := range needles {
+		if strings.Contains(haystack, needle) {
+			t.Fatalf("unexpected sensitive content %q in %q", needle, haystack)
+		}
+	}
 }
 
 func TestHandler_HandleStreamBegin_OpenAIChatCompletionsV1_RejectsWrongContentType(t *testing.T) {

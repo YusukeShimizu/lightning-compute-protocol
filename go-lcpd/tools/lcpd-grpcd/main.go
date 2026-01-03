@@ -258,6 +258,13 @@ func providerRuntime(
 	providerCfg := provider.Config{
 		Enabled:         resolveProviderEnabled(providerYAML.Enabled),
 		QuoteTTLSeconds: resolveQuoteTTL(providerYAML.QuoteTTLSeconds),
+		Pricing: provider.PricingConfig{
+			InFlightSurge: provider.InFlightSurgeConfig{
+				Threshold:        providerYAML.Pricing.InFlightSurge.Threshold,
+				PerJobBps:        providerYAML.Pricing.InFlightSurge.PerJobBps,
+				MaxMultiplierBps: providerYAML.Pricing.InFlightSurge.MaxMultiplierBps,
+			},
+		},
 		LLMChatProfiles: chatProfiles,
 	}
 	if cfgErr := validateProviderConfig(logger, providerCfg, backend, lndCfg); cfgErr != nil {
@@ -285,6 +292,14 @@ func validateProviderConfig(
 	if _, ok := backend.(*computebackend.Disabled); ok {
 		return errors.New(
 			"provider enabled but compute backend is disabled (set LCPD_BACKEND or disable provider via LCPD_PROVIDER_ENABLED=0)",
+		)
+	}
+	if providerCfg.Pricing.InFlightSurge.PerJobBps > 0 &&
+		providerCfg.Pricing.InFlightSurge.MaxMultiplierBps != 0 &&
+		providerCfg.Pricing.InFlightSurge.MaxMultiplierBps < 10_000 {
+		return fmt.Errorf(
+			"pricing.in_flight_surge.max_multiplier_bps must be >= 10000, got %d",
+			providerCfg.Pricing.InFlightSurge.MaxMultiplierBps,
 		)
 	}
 	if len(providerCfg.LLMChatProfiles) == 0 {
@@ -346,10 +361,21 @@ func startAndWait(
 }
 
 type providerYAMLConfig struct {
-	Enabled                  *bool         `yaml:"enabled"`
-	QuoteTTLSeconds          *uint64       `yaml:"quote_ttl_seconds"`
-	SupportedLLMChatProfiles []string      `yaml:"supported_llm_chat_profiles"` // deprecated (use llm.chat_profiles)
-	LLM                      llmYAMLConfig `yaml:"llm"`
+	Enabled                  *bool             `yaml:"enabled"`
+	QuoteTTLSeconds          *uint64           `yaml:"quote_ttl_seconds"`
+	SupportedLLMChatProfiles []string          `yaml:"supported_llm_chat_profiles"` // deprecated (use llm.chat_profiles)
+	Pricing                  pricingYAMLConfig `yaml:"pricing"`
+	LLM                      llmYAMLConfig     `yaml:"llm"`
+}
+
+type pricingYAMLConfig struct {
+	InFlightSurge inFlightSurgeYAMLConfig `yaml:"in_flight_surge"`
+}
+
+type inFlightSurgeYAMLConfig struct {
+	Threshold        uint32 `yaml:"threshold"`
+	PerJobBps        uint32 `yaml:"per_job_bps"`
+	MaxMultiplierBps uint32 `yaml:"max_multiplier_bps"`
 }
 
 type llmYAMLConfig struct {

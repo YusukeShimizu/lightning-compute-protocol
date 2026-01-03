@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
+	"github.com/bruwbird/lcp/apps/openai-serve/internal/openai"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,11 +29,22 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	reqBytes, model, ok := decodeAndValidateChatCompletionsRequest(c)
+	started := time.Now()
+	ctx := c.Request.Context()
+
+	reqBytes, req, ok := decodeAndValidateChatRequest(c)
 	if !ok {
 		return
 	}
 
+	prompt, ok := s.buildPrompt(c, req.Messages)
+	if !ok {
+		return
+	}
+	promptBytes := len(prompt)
+	promptTokens := openai.ApproxTokensFromBytes(promptBytes)
+
+	model := strings.TrimSpace(req.Model)
 	peerID, ok := s.resolvePeerForModel(c, model)
 	if !ok {
 		return
@@ -43,17 +55,21 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	quoteStart := time.Now()
 	quote, ok := s.requestQuoteAndValidatePrice(c, peerID, task)
 	if !ok {
 		return
 	}
+	quoteLatency := time.Since(quoteStart)
 
 	jobID := copyBytes(quote.GetTerms().GetJobId())
 
+	execStart := time.Now()
 	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, jobID)
 	if !ok {
 		return
 	}
+	execLatency := time.Since(execStart)
 
 	result := execResp.GetResult()
 	if result == nil {
@@ -70,6 +86,30 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 
 	price := quote.GetTerms().GetPriceMsat()
+	totalLatency := time.Since(started)
+
+	resultBytes := execResp.GetResult().GetResult()
+	completionBytes := len(resultBytes)
+	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
+	totalTokens := promptTokens + completionTokens
+
+	s.log.InfoContext(
+		ctx,
+		"chat completion",
+		"model", model,
+		"peer_id", peerID,
+		"job_id", hex.EncodeToString(jobID),
+		"price_msat", price,
+		"terms_hash", hex.EncodeToString(quote.GetTerms().GetTermsHash()),
+		"prompt_bytes", promptBytes,
+		"completion_bytes", completionBytes,
+		"prompt_tokens_approx", promptTokens,
+		"completion_tokens_approx", completionTokens,
+		"total_tokens_approx", totalTokens,
+		"quote_ms", quoteLatency.Milliseconds(),
+		"execute_ms", execLatency.Milliseconds(),
+		"total_ms", totalLatency.Milliseconds(),
+	)
 	c.Header("X-Lcp-Peer-Id", peerID)
 	c.Header("X-Lcp-Job-Id", hex.EncodeToString(jobID))
 	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
@@ -86,33 +126,29 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	c.Data(http.StatusOK, contentType, result.GetResult())
 }
 
-func decodeAndValidateChatCompletionsRequest(c *gin.Context) ([]byte, string, bool) {
+func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
 	body, readErr := readRequestBodyBytes(c)
 	if readErr != nil {
 		if isRequestBodyTooLarge(readErr) {
 			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", readErr.Error())
-			return nil, "", false
+			return nil, openai.ChatCompletionsRequest{}, false
 		}
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", readErr.Error())
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 
-	var parsed struct {
-		Model    string            `json:"model"`
-		Messages []json.RawMessage `json:"messages"`
-		Stream   *bool             `json:"stream,omitempty"`
-	}
+	var parsed openai.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		msg := strings.TrimPrefix(err.Error(), "json: ")
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", msg)
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 
 	model := parsed.Model
 	trimmedModel := strings.TrimSpace(model)
 	if trimmedModel == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 	if trimmedModel != model {
 		writeOpenAIError(
@@ -121,18 +157,40 @@ func decodeAndValidateChatCompletionsRequest(c *gin.Context) ([]byte, string, bo
 			"invalid_request_error",
 			"model must not have leading/trailing whitespace",
 		)
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 	if len(parsed.Messages) == 0 {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 	if parsed.Stream != nil && *parsed.Stream {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "stream=true is not supported")
-		return nil, "", false
+		return nil, openai.ChatCompletionsRequest{}, false
 	}
 
-	return body, model, true
+	return body, parsed, true
+}
+
+func (s *Server) buildPrompt(c *gin.Context, messages []openai.ChatMessage) (string, bool) {
+	prompt, err := openai.BuildPrompt(messages)
+	if err != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return "", false
+	}
+	if s.cfg.MaxPromptBytes > 0 && len(prompt) > s.cfg.MaxPromptBytes {
+		writeOpenAIError(
+			c,
+			http.StatusBadRequest,
+			"invalid_request_error",
+			fmt.Sprintf(
+				"prompt exceeds max bytes: prompt_bytes=%d max_prompt_bytes=%d",
+				len(prompt),
+				s.cfg.MaxPromptBytes,
+			),
+		)
+		return "", false
+	}
+	return prompt, true
 }
 
 func (s *Server) resolvePeerForModel(

@@ -77,7 +77,8 @@ npx --yes mintlify@4.2.255 broken-links
 
 ## Repository layout (high level)
 
-- `protocol/`: the LCP wire protocol spec (BOLT-style TLV + state machine)
+- `docs/protocol/`: the LCP wire protocol spec (BOLT-style TLV + state machine)
+- `proto-go/`: shared Go protobuf/gRPC types for the LCPD API
 - `go-lcpd/`: reference implementation (Lightning Compute Protocol Daemon)
 - `apps/openai-serve/`: OpenAI-compatible HTTP gateway (forwards to `lcpd-grpcd` over gRPC)
 

@@ -1,0 +1,17 @@
+name-template: "go-lcpd v$RESOLVED_VERSION"
+tag-template: "go-lcpd/v$RESOLVED_VERSION"
+
+include-labels:
+  - "area/go-lcpd"
+  - "area/proto"
+
+exclude-labels:
+  - "skip-changelog"
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+
+template: |
+  ## Changes
+
+  $CHANGES
+

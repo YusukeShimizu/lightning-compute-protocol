@@ -1,0 +1,17 @@
+name-template: "openai-serve v$RESOLVED_VERSION"
+tag-template: "apps/openai-serve/v$RESOLVED_VERSION"
+
+include-labels:
+  - "area/openai-serve"
+  - "area/proto"
+
+exclude-labels:
+  - "skip-changelog"
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+
+template: |
+  ## Changes
+
+  $CHANGES
+

@@ -5,6 +5,8 @@
 - `lcpd-grpcd` をバックグラウンドで動かす
 - ログをディスクに残す（簡易ローテーション付き）
 
+注意: ログはセンシティブです。`lcpd-grpcd` は生のプロンプト/出力をログに残さない設計ですが、ログにはメタデータ（peer id / job id / 価格 / 時間など）が残ります。詳細は [ログとプライバシー](/go-lcpd/docs/logging-ja) を参照してください。
+
 長期運用のインフラでは service manager（systemd/launchd）を使ってください。
 「ターミナルを閉じても動き続けてほしい」程度なら、このリポジトリのスクリプトで十分な場合が多いです。
 
@@ -201,4 +203,3 @@ launchctl print "gui/$UID/com.bruwbird.lcpd-grpcd"
 
 - plist では `source ./lcpd.env` を使うことで、認証情報を plist に埋め込まずに済みます。
 - macOS はこれらのログファイルを自動ローテーションしません。`newsyslog` を使うか、定期的にアーカイブ/削除してください。
-

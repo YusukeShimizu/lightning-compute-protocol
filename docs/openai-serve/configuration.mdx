@@ -24,6 +24,14 @@ You can use `apps/openai-serve/.envrc.sample` (direnv) for local development.
 | `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
 | `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
+## Logging (privacy)
+
+`openai-serve` logs are intentionally designed to avoid persisting raw user content.
+
+- Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
+- `info` logs include request/job metadata (model, peer/job ids, price, timings, byte/token counts).
+- `debug` may include HTTP request logs (including `client_ip`); treat debug logs as more sensitive.
+
 ## Routing and peer selection
 
 For a given `model`, the Provider peer is selected in this order:
@@ -59,4 +67,3 @@ Authorization: Bearer <key>
 ```
 
 `/healthz` is intentionally not protected (useful for local probes); protect it at the reverse-proxy layer if needed.
-

@@ -67,7 +67,7 @@ These constraints are system invariants.
 - Do not implicitly require external processes: `go test ./...` MUST NOT require `bitcoind` or `lnd`. Lightning integration tests MUST be opt-in. Rationale: developer experience and safety.
 - Integration tests MUST NOT depend on external networks: CI/dev MUST not require external APIs. Keep smoke tests opt-in. Rationale: reproducibility.
 
-- Do not log secrets: By default, logs MUST NOT contain API keys, access tokens, raw prompts, or raw model outputs. Rationale: logs leak.
+- Do not log secrets: Logs MUST NOT contain API keys, access tokens, macaroons, BOLT11 invoices (`payment_request`), raw prompts, or raw model outputs at any log level. Rationale: logs leak.
 - Primary interface is gRPC: go-lcpd MUST be operable via gRPC. Do not make CLI the primary interface. Rationale: stabilize an API shape for integrations.
 - Do not provide `cmd/`: go-lcpd MUST NOT provide CLI entry points under `go-lcpd/cmd/*`. Rationale: keep operations centered on gRPC.
 - Manage protobuf with buf: API protobufs MUST be generated via `buf`. Rationale: change detection, compatibility, reproducible generation.

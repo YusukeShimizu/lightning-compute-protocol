@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 )
 
 func (s *Server) discoverModels(ctx context.Context) (map[string]struct{}, error) {

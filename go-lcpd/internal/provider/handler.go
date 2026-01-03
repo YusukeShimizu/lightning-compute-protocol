@@ -92,6 +92,7 @@ type Handler struct {
 
 	jobMu      sync.Mutex
 	jobCancels map[jobstore.Key]context.CancelFunc
+	inFlight   uint64
 }
 
 func NewHandler(
@@ -702,6 +703,7 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 		h.logger.Warnw(
 			"create invoice failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", req.Envelope.JobID.String(),
 			"err", err,
 		)
 		h.sendError(
@@ -992,6 +994,7 @@ func (h *Handler) sendQuoteResponse(
 		h.logger.Warnw(
 			"encode lcp_quote_response failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", resp.Envelope.JobID.String(),
 			"err", err,
 		)
 		return false
@@ -1012,6 +1015,7 @@ func (h *Handler) sendQuoteResponse(
 		h.logger.Warnw(
 			"send lcp_quote_response failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", resp.Envelope.JobID.String(),
 			"err", sendErr,
 		)
 		return false
@@ -1069,6 +1073,7 @@ func (h *Handler) startJobRunner(
 		return
 	}
 	h.jobCancels[key] = cancel
+	h.inFlight++
 	h.jobMu.Unlock()
 
 	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
@@ -1085,24 +1090,41 @@ func (h *Handler) runJob(
 ) {
 	defer h.forgetJob(key)
 
+	jobID := quoteResp.Envelope.JobID.String()
+	profile := modelFromRequest(req)
+	backendModel := h.backendModelForProfile(profile)
+	inputBytes := len(input.Buf)
+	meta := jobLogMeta{
+		peerPubKey:   key.PeerPubKey,
+		jobID:        jobID,
+		taskKind:     req.TaskKind,
+		profile:      profile,
+		backendModel: backendModel,
+		inputBytes:   inputBytes,
+		priceMsat:    quoteResp.PriceMsat,
+		termsHash:    quoteResp.TermsHash.String(),
+	}
+
+	settleStart := time.Now()
 	if err := h.invoices.WaitForSettlement(ctx, invoice.PaymentHash, invoice.AddIndex); err != nil {
 		if errors.Is(err, context.Canceled) {
 			h.logger.Debugw(
 				"job canceled before settlement",
 				"peer_pub_key", key.PeerPubKey,
-				"job_id", quoteResp.Envelope.JobID.String(),
+				"job_id", jobID,
 			)
 			return
 		}
 		h.logger.Warnw(
 			"wait invoice settlement failed",
 			"peer_pub_key", key.PeerPubKey,
-			"job_id", quoteResp.Envelope.JobID.String(),
+			"job_id", jobID,
 			"err", err,
 		)
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
+	settleDuration := time.Since(settleStart)
 
 	h.updateState(key, jobstore.StatePaid)
 
@@ -1112,21 +1134,29 @@ func (h *Handler) runJob(
 
 	h.updateState(key, jobstore.StateExecuting)
 
+	execStart := time.Now()
 	result, err := h.execute(ctx, req, input)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
 		code := computeErrorCode(err)
+		execDuration := time.Since(execStart)
+		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, err)
 		h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, err.Error())
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
+	execDuration := time.Since(execStart)
+	outputBytes := len(result.OutputBytes)
+	totalDuration := time.Since(settleStart)
 
 	if ok := h.sendResult(ctx, key.PeerPubKey, quoteResp.Envelope, req.TaskKind, result.OutputBytes, remoteMaxPayload); !ok {
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
+
+	h.logJobCompleted(meta, settleDuration, execDuration, totalDuration, outputBytes, result.Usage)
 
 	h.updateState(key, jobstore.StateDone)
 }
@@ -1530,6 +1560,7 @@ func (h *Handler) sendTerminalOKResult(
 		h.logger.Warnw(
 			"encode lcp_result failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", env.JobID.String(),
 			"err", err,
 		)
 		return false
@@ -1600,6 +1631,7 @@ func (h *Handler) sendTerminalResultStatus(
 		h.logger.Warnw(
 			"send lcp_result failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", env.JobID.String(),
 			"err", sendErr,
 		)
 		return false
@@ -1637,6 +1669,7 @@ func (h *Handler) sendError(
 		h.logger.Warnw(
 			"encode lcp_error failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", env.JobID.String(),
 			"code", code,
 			"err", err,
 		)
@@ -1646,6 +1679,7 @@ func (h *Handler) sendError(
 		h.logger.Warnw(
 			"send lcp_error failed",
 			"peer_pub_key", peerPubKey,
+			"job_id", env.JobID.String(),
 			"code", code,
 			"err", sendErr,
 		)
@@ -1680,6 +1714,9 @@ func (h *Handler) cancelJob(key jobstore.Key) bool {
 	cancel, ok := h.jobCancels[key]
 	if ok {
 		delete(h.jobCancels, key)
+		if h.inFlight > 0 {
+			h.inFlight--
+		}
 	}
 	h.jobMu.Unlock()
 
@@ -1691,7 +1728,12 @@ func (h *Handler) cancelJob(key jobstore.Key) bool {
 
 func (h *Handler) forgetJob(key jobstore.Key) {
 	h.jobMu.Lock()
-	delete(h.jobCancels, key)
+	if _, ok := h.jobCancels[key]; ok {
+		delete(h.jobCancels, key)
+		if h.inFlight > 0 {
+			h.inFlight--
+		}
+	}
 	h.jobMu.Unlock()
 }
 
@@ -1900,6 +1942,104 @@ func quoteErrorCode(err error) lcpwire.ErrorCode {
 	default:
 		return computeErrorCode(err)
 	}
+}
+
+func errorKind(err error) string {
+	switch {
+	case errors.Is(err, computebackend.ErrUnsupportedTaskKind):
+		return "unsupported_task_kind"
+	case errors.Is(err, computebackend.ErrInvalidTask):
+		return "invalid_task"
+	case errors.Is(err, computebackend.ErrUnauthenticated):
+		return "unauthenticated"
+	case errors.Is(err, computebackend.ErrBackendUnavailable):
+		return "backend_unavailable"
+	default:
+		return "unknown"
+	}
+}
+
+func safeErrMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	msg = strings.ReplaceAll(msg, "\n", "\\n")
+	msg = strings.ReplaceAll(msg, "\r", "\\r")
+	const maxLen = 200
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "...(truncated)"
+	}
+	return msg
+}
+
+type jobLogMeta struct {
+	peerPubKey   string
+	jobID        string
+	taskKind     string
+	profile      string
+	backendModel string
+	inputBytes   int
+	priceMsat    uint64
+	termsHash    string
+}
+
+func (h *Handler) logJobExecutionFailed(
+	meta jobLogMeta,
+	settleDuration time.Duration,
+	execDuration time.Duration,
+	code lcpwire.ErrorCode,
+	err error,
+) {
+	h.logger.Warnw(
+		"job execution failed",
+		"peer_pub_key", meta.peerPubKey,
+		"job_id", meta.jobID,
+		"task_kind", meta.taskKind,
+		"profile", meta.profile,
+		"backend_model", meta.backendModel,
+		"input_bytes", meta.inputBytes,
+		"price_msat", meta.priceMsat,
+		"terms_hash", meta.termsHash,
+		"settle_ms", settleDuration.Milliseconds(),
+		"execute_ms", execDuration.Milliseconds(),
+		"error_code", code,
+		"err_kind", errorKind(err),
+	)
+	h.logger.Debugw(
+		"job execution failed details",
+		"peer_pub_key", meta.peerPubKey,
+		"job_id", meta.jobID,
+		"err", safeErrMessage(err),
+	)
+}
+
+func (h *Handler) logJobCompleted(
+	meta jobLogMeta,
+	settleDuration time.Duration,
+	execDuration time.Duration,
+	totalDuration time.Duration,
+	outputBytes int,
+	usage computebackend.Usage,
+) {
+	h.logger.Infow(
+		"job completed",
+		"peer_pub_key", meta.peerPubKey,
+		"job_id", meta.jobID,
+		"task_kind", meta.taskKind,
+		"profile", meta.profile,
+		"backend_model", meta.backendModel,
+		"input_bytes", meta.inputBytes,
+		"output_bytes", outputBytes,
+		"price_msat", meta.priceMsat,
+		"terms_hash", meta.termsHash,
+		"settle_ms", settleDuration.Milliseconds(),
+		"execute_ms", execDuration.Milliseconds(),
+		"total_ms", totalDuration.Milliseconds(),
+		"usage_input_units", usage.InputUnits,
+		"usage_output_units", usage.OutputUnits,
+		"usage_total_units", usage.TotalUnits,
+	)
 }
 
 func (h *Handler) backendModelForProfile(profile string) string {
@@ -2150,10 +2290,39 @@ func (h *Handler) quotePrice(
 		return llm.PriceBreakdown{}, err
 	}
 
-	return llm.QuotePrice(
+	base, err := llm.QuotePrice(
 		profile,
 		estimation.Usage,
 		0, // cachedInputTokens
 		h.priceTable(),
 	)
+	if err != nil {
+		return llm.PriceBreakdown{}, err
+	}
+
+	inFlight := h.inFlightJobs()
+	multiplierBps := inFlightMultiplierBps(h.cfg.Pricing.InFlightSurge, inFlight)
+	priceMsat, err := applyMultiplierCeil(base.PriceMsat, multiplierBps)
+	if err != nil {
+		return llm.PriceBreakdown{}, err
+	}
+	if priceMsat != base.PriceMsat && h.logger != nil {
+		h.logger.Debugw(
+			"applied surge pricing",
+			"strategy", "in_flight_jobs",
+			"in_flight_jobs", inFlight,
+			"multiplier_bps", multiplierBps,
+			"base_price_msat", base.PriceMsat,
+			"price_msat", priceMsat,
+		)
+	}
+
+	base.PriceMsat = priceMsat
+	return base, nil
+}
+
+func (h *Handler) inFlightJobs() uint64 {
+	h.jobMu.Lock()
+	defer h.jobMu.Unlock()
+	return h.inFlight
 }

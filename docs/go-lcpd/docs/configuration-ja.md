@@ -36,6 +36,16 @@ export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
 ```
 
+### ログ（プライバシー）
+
+`lcpd-grpcd` のログは、生のユーザー入力を永続化しなくても診断できるように設計しています。
+
+- `LCPD_LOG_LEVEL` で詳細度を制御します（`debug` / `info` / `warn` / `error`。デフォルトは `info`）。
+- ログには、生のプロンプト / 生のモデル出力 / API key / macaroon / BOLT11 invoice を残してはいけません。
+- 生データを残さなくても、ログにはメタデータ（peer id / job id / 価格 / 時間など）が残ります。
+
+詳細: [ログとプライバシー](/go-lcpd/docs/logging-ja)。
+
 ### Provider（YAML）
 
 | 変数                        |        必須 | 目的                                                                                                   |
@@ -63,6 +73,14 @@ Provider YAML の詳細と例は下の「Provider 設定（YAML）」で説明�
 ```yaml
 enabled: true
 quote_ttl_seconds: 600
+
+pricing:
+  # 任意: 負荷（in-flight job 数）に応じた surge pricing（quote 時点でのみ適用）
+  # multiplier = 1.0 + per_job_bps/10_000 * max(0, in_flight_jobs - threshold)
+  in_flight_surge:
+    threshold: 2
+    per_job_bps: 500 # threshold を超えた 1 job あたり +5%
+    max_multiplier_bps: 30000 # 3.0x 上限
 
 llm:
   max_output_tokens: 4096
@@ -115,6 +133,10 @@ llm:
 
 - `enabled`: Provider モードを有効化します。`false` の場合、quote/cancel を拒否し、invoice を作りません。
 - `quote_ttl_seconds`: Quote と invoice の TTL（秒）。デフォルト 300s。
+- `pricing.in_flight_surge`: 任意の surge pricing。quote 時点の in-flight job 数に応じて価格を倍率調整します。
+  - `threshold`: surge を開始する in-flight job 数の閾値。
+  - `per_job_bps`: `threshold` を超えた 1 job あたりの加算倍率（bps。10,000 = 1.0x）。`0` の場合は無効。
+  - `max_multiplier_bps`: 総倍率の上限（bps）。`0` の場合は安全なデフォルト上限が使われます。
 - `llm.max_output_tokens`: Provider 全体の execution policy（`ExecutionPolicy`）のデフォルト。quote 時の推定と backend 実行の両方に適用します。デフォルト 4096。
 - `llm.chat_profiles`: 許可/広告する `llm.chat` プロファイルのマップ。空の場合、任意プロファイルを受け付けますが manifest では広告しません。
   - `backend_model`: backend に渡す上流モデル ID。デフォルトはプロファイル名。
@@ -132,7 +154,7 @@ YAML がない場合、内蔵の価格表（msat / 100 万トークン）を使�
 1. QuoteRequest を検証し、プロファイルが許可されているか確認します。
 2. `computebackend.Task` に ExecutionPolicy（`max_output_tokens`）を適用します。
 3. `UsageEstimator`（`approx.v1`: `ceil(len(bytes)/4)`）でトークン使用量を推定します。
-4. `QuotePrice(profile, estimate, cached=0, price_table)` で msat 価格を計算し、TermsHash / invoice binding に埋め込みます。
+4. `QuotePrice(profile, estimate, cached=0, price_table)` で msat 価格を計算し、任意で `pricing.in_flight_surge` を適用してから TermsHash / invoice binding に埋め込みます。
 5. 支払いが確定したら、`profile -> backend_model` を解決し、backend でタスクを実行して `lcp_result` で返します。
 
 ## backend に関する補足

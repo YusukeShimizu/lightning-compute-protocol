@@ -1,0 +1,16 @@
+name-template: "proto-go v$RESOLVED_VERSION"
+tag-template: "proto-go/v$RESOLVED_VERSION"
+
+include-labels:
+  - "area/proto"
+
+exclude-labels:
+  - "skip-changelog"
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+
+template: |
+  ## Changes
+
+  $CHANGES
+

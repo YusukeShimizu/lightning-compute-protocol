@@ -1,25 +1,25 @@
-name: go-lcpd
+name: proto-go
 
 on:
   push:
     branches:
       - main
     paths:
-      - go-lcpd/**
+      - go-lcpd/proto/**
       - proto/**
       - proto-go/**
-      - .github/workflows/test.yml
+      - .github/workflows/proto-go.yml
   pull_request:
     paths:
-      - go-lcpd/**
+      - go-lcpd/proto/**
       - proto/**
       - proto-go/**
-      - .github/workflows/test.yml
+      - .github/workflows/proto-go.yml
   workflow_dispatch:
 
 jobs:
-  go-lcpd:
-    name: go-lcpd (lint + test)
+  proto-go:
+    name: proto-go (buf lint + generate check)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -28,15 +28,18 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v9
 
-      # Speeds up Nix builds by caching store paths in GitHub Actions cache (no secrets required).
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v9
         with:
-          # Disable telemetry/diagnostics. Remove this line if you want to help improve the action.
           diagnostic-endpoint: ""
-          # Prefer the GitHub Actions cache (works on PRs/forks); don't use FlakeHub Cache.
           use-gha-cache: true
           use-flakehub: false
 
-      - name: Lint and test
-        run: nix develop ./go-lcpd -c make -C go-lcpd lint test
+      - name: Lint protos
+        run: nix develop ./go-lcpd -c sh -lc 'cd go-lcpd && buf lint'
+
+      - name: Verify proto-go generated code is up to date
+        run: |
+          nix develop ./go-lcpd -c sh -lc 'cd go-lcpd && buf generate --template ../proto-go/buf.gen.yaml'
+          git diff --exit-code -- proto-go
+
