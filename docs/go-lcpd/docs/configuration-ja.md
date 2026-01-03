@@ -26,7 +26,7 @@
 | `LCPD_LND_RPC_ADDR`                 | lnd を使うなら必須  | `host:port`                                                             |
 | `LCPD_LND_TLS_CERT_PATH`            |      通常は必須     | `tls.cert` パス（空ならシステムルートで検証）                            |
 | `LCPD_LND_ADMIN_MACAROON_PATH`      | mainnet では推奨     | admin macaroon（支払い / invoice 操作に必要）                            |
-| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |                任意 | `lcp_manifest` 再送間隔（例: `30s`。`0s` で無効化）                      |
+| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |                任意 | 接続中の peer へ `lcp_manifest` を定期的に再送（未設定/0s で無効）        |
 
 典型的なデフォルトパス（ネットワークと lnd 構成に合わせて調整してください）:
 

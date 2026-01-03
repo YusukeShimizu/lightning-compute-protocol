@@ -11,8 +11,6 @@ BIN_PATH="${LCPD_GRPCD_BIN:-"$ROOT_DIR/bin/lcpd-grpcd"}"
 GRPC_ADDR="${LCPD_GRPCD_GRPC_ADDR:-"127.0.0.1:50051"}"
 STARTUP_TIMEOUT="${LCPD_GRPCD_STARTUP_TIMEOUT:-"20s"}"
 
-ENV_FILE="${LCPD_GRPCD_ENV_FILE:-"$ROOT_DIR/lcpd.env"}"
-
 LOG_PATH="${LCPD_GRPCD_LOG_PATH:-"$LOG_DIR/lcpd-grpcd.log"}"
 LOG_KEEP_ROTATED="${LCPD_GRPCD_LOG_KEEP_ROTATED:-"10"}"
 
@@ -32,7 +30,6 @@ Environment variables (optional):
   LCPD_GRPCD_BIN                 Path to lcpd-grpcd binary (default: ./bin/lcpd-grpcd)
   LCPD_GRPCD_GRPC_ADDR           gRPC listen addr (default: 127.0.0.1:50051)
   LCPD_GRPCD_STARTUP_TIMEOUT     fx startup timeout (default: 20s)
-  LCPD_GRPCD_ENV_FILE            Optional env file to source before start (default: ./lcpd.env)
 
   LCPD_GRPCD_DATA_DIR            State dir (default: ./.data/lcpd-grpcd)
   LCPD_GRPCD_LOG_PATH            Symlink path pointing at the current run log (default: $DATA_DIR/logs/lcpd-grpcd.log)
@@ -41,6 +38,8 @@ Environment variables (optional):
 Notes:
   - This script keeps a PID file under $DATA_DIR/pids/.
   - It sends SIGINT for graceful shutdown.
+  - This script does NOT source any env files. Configure go-lcpd via direnv
+    (`./.envrc`, recommended) or by exporting `LCPD_*` variables in your shell.
   - For long-running / auto-restart / boot-time startup, prefer systemd/launchd
     (see docs/background.md).
 EOF
@@ -75,20 +74,6 @@ read_pidfile() {
 		return 1
 	fi
 	echo "$pid"
-}
-
-load_env_file() {
-	local path="$1"
-	if [[ ! -f "$path" ]]; then
-		return 0
-	fi
-
-	# This intentionally treats the file as bash (so it can include quoted values).
-	# Keep it simple: KEY="value" lines; never commit real secrets.
-	set -a
-	# shellcheck disable=SC1090
-	source "$path"
-	set +a
 }
 
 make_run_log_path() {
@@ -160,7 +145,6 @@ cleanup_run_logs() {
 
 start_lcpd_grpcd() {
 	ensure_cmd nohup
-	load_env_file "$ENV_FILE"
 
 	if [[ ! -x "$BIN_PATH" ]]; then
 		die "lcpd-grpcd binary not found/executable: $BIN_PATH (build it via: cd go-lcpd && mkdir -p bin && GOBIN=\"$PWD/bin\" go install ./tools/lcpd-grpcd)"

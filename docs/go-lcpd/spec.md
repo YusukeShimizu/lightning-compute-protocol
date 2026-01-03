@@ -374,8 +374,9 @@ Actions:
 * `send_custom_message(grpc_conn, peer_pubkey, msg_type, payload_bytes) -> ok | error`
 * `disconnect_peer(grpc_conn, peer_pubkey) -> ok | error`
 Operational Principle:
-* `lcp_manifest` MUST be sent at most once per connection (to avoid infinite loops).
-* If `lcp_manifest` is received and we have not sent ours yet, reply once (SHOULD).
+* If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is unset or <= 0, `lcp_manifest` MUST be sent at most once per connection (to avoid infinite loops).
+* If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is set to a positive duration, go-lcpd SHOULD periodically re-send `lcp_manifest` to connected peers on that interval.
+* If `lcp_manifest` is received and we have not sent ours yet, reply once (SHOULD). If we have already sent ours, do not reply.
 * Inbound messages are classified via `LCPMessageRouter`; manifests are decoded internally and applied to `PeerDirectory`.
 
 ### LightningRPC
@@ -480,7 +481,8 @@ Then:
 1. Connect to lnd via `LNDPeerMessaging.dial` (if not configured, disable integration and do nothing).
 2. Fetch currently connected peers via `LNDPeerMessaging.list_peers` and apply them to `PeerDirectory` (connected + custom_msg_enabled).
 3. For each peer, send `lcp_manifest` once if it has not been sent yet and call `PeerDirectory.mark_manifest_sent`.
-4. Start the `subscribe_peer_events` and `subscribe_custom_messages` loops.
+4. If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is set to a positive duration, start a periodic loop that re-sends `lcp_manifest` to connected peers on that interval.
+5. Start the `subscribe_peer_events` and `subscribe_custom_messages` loops.
 
 ### sync lnd_inbound_custom_message_dispatch
 Summary: Classify inbound custom messages; apply manifests to `PeerDirectory`; dispatch the rest to handlers.

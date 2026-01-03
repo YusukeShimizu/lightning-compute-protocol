@@ -27,15 +27,20 @@ mkdir -p bin
 GOBIN="$PWD/bin" go install ./tools/lcpd-grpcd
 ```
 
-### 1) env ファイルを作る（推奨）
+### 1) 環境変数の設定
 
-起動パラメータと秘密情報をシェル履歴に残さないためです。
+起動パラメータと秘密情報をシェル履歴に残さないため、direnv（`.envrc`）で管理するのがおすすめです。
+direnv を使わない場合は、シェルや service manager 側で `LCPD_*` を export してください。
+
+#### Option A: direnv（`.envrc`）
 
 ```sh
 cd go-lcpd
-cp lcpd.env.sample lcpd.env
-chmod 600 lcpd.env
+cp .envrc.sample .envrc
+direnv allow
 ```
+
+その後 `.envrc` を編集して `LCPD_*` を追加してください。
 
 Requester のみ（Provider 実行なし）のヒント:
 
@@ -94,6 +99,8 @@ nc -vz 127.0.0.1 50051
 lsof -nP -iTCP:50051 -sTCP:LISTEN
 ```
 
+`LCPD_GRPCD_GRPC_ADDR=127.0.0.1:15051` のように listen アドレスを変更した場合は、ポート番号も合わせてください。
+
 ### ログとローテーションの挙動
 
 - ログのリンクパス（デフォルト）: `./.data/lcpd-grpcd/logs/lcpd-grpcd.log`（gitignored）
@@ -122,8 +129,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/ABS/PATH/TO/go-lcpd
-EnvironmentFile=/ABS/PATH/TO/go-lcpd/lcpd.env
-ExecStart=/ABS/PATH/TO/go-lcpd/bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+ExecStart=/usr/bin/env direnv exec /ABS/PATH/TO/go-lcpd /ABS/PATH/TO/go-lcpd/bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 Restart=on-failure
 RestartSec=2s
 KillSignal=SIGINT
@@ -169,7 +175,7 @@ launchd は macOS の service manager です。バックグラウンド + 自動
     <array>
       <string>/bin/bash</string>
       <string>-lc</string>
-      <string>cd /ABS/PATH/TO/go-lcpd && source ./lcpd.env && exec ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051</string>
+      <string>cd /ABS/PATH/TO/go-lcpd && exec direnv exec . ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -201,5 +207,5 @@ launchctl print "gui/$UID/com.bruwbird.lcpd-grpcd"
 
 補足:
 
-- plist では `source ./lcpd.env` を使うことで、認証情報を plist に埋め込まずに済みます。
+- plist では `direnv exec` を使うことで、認証情報を plist に埋め込まずに済みます（`.envrc` に置く）。
 - macOS はこれらのログファイルを自動ローテーションしません。`newsyslog` を使うか、定期的にアーカイブ/削除してください。

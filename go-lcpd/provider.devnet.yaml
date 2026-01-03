@@ -1,0 +1,11 @@
+enabled: true
+quote_ttl_seconds: 300
+
+llm:
+  max_output_tokens: 512
+  chat_profiles:
+    gpt-5.2:
+      price:
+        # regtest example pricing (choose any policy you like)
+        input_msat_per_mtok: 1
+        output_msat_per_mtok: 1

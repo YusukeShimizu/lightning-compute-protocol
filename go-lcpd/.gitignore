@@ -1,5 +1,4 @@
 .envrc
-lcpd.env
 .tools/
 bin/
 tmp/

@@ -17,8 +17,10 @@ type Config struct {
 	TLSCertPath       string
 	AdminMacaroonPath string
 
-	// ManifestResendInterval is deprecated and currently unused.
-	// It is kept for backward compatibility with older configs.
+	// ManifestResendInterval, if set to a positive duration, periodically
+	// re-sends `lcp_manifest` to connected peers.
+	//
+	// Unset (or <= 0) disables periodic re-sends.
 	ManifestResendInterval *time.Duration
 }
 

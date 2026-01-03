@@ -26,7 +26,7 @@ This document summarizes what to configure and where.
 | `LCPD_LND_RPC_ADDR`                 |  Required if using lnd | `host:port`                                                             |
 | `LCPD_LND_TLS_CERT_PATH`            |       Usually required | Path to `tls.cert` (if empty, verify with system roots)                 |
 | `LCPD_LND_ADMIN_MACAROON_PATH`      | Recommended on mainnet | Admin macaroon (needed for payments/invoice ops)                        |
-| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |               Optional | Interval for re-sending `lcp_manifest` (e.g., `30s`, disable with `0s`) |
+| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |               Optional | Periodically re-send `lcp_manifest` to connected peers (unset/0s disables) |
 
 Typical default paths (adjust for your network and lnd setup):
 

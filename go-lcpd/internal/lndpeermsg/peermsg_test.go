@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lnd/lnrpc"
@@ -189,6 +190,72 @@ func TestPeerMessaging_start_MissingRPCAddr_DisablesWithoutError(t *testing.T) {
 	startErr := pm.start(context.Background())
 	if startErr != nil {
 		t.Fatalf("start returned error: %v", startErr)
+	}
+}
+
+func TestPeerMessaging_manifestResendLoopWithTicks_ResendsManifestToConnectedPeers(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeLightningClient{}
+	dir := peerdirectory.New()
+
+	pm, err := NewStandalone(dir, fake, newDiscardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewStandalone: %v", err)
+	}
+
+	peerBytes, peerPubKey := newPeerPubKey()
+	dir.MarkConnected(peerPubKey)
+	dir.MarkManifestSent(peerPubKey) // resend should still send again
+
+	ticks := make(chan time.Time, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pm.manifestResendLoopWithTicks(ctx, ticks)
+		close(done)
+	}()
+
+	ticks <- time.Now()
+	ticks <- time.Now()
+
+	deadline := time.NewTimer(500 * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		fake.mu.Lock()
+		got := len(fake.sendReqs)
+		fake.mu.Unlock()
+		if got >= 2 {
+			break
+		}
+
+		select {
+		case <-deadline.C:
+			t.Fatalf("timeout waiting for SendCustomMessage calls; got=%d want>=2", got)
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+
+	cancel()
+	<-done
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	if got, want := len(fake.sendReqs), 2; got != want {
+		t.Fatalf("SendCustomMessage calls mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+	for i, req := range fake.sendReqs {
+		if got, want := req.GetType(), uint32(lcpwire.MessageTypeManifest); got != want {
+			t.Fatalf("send[%d] type mismatch (-want +got):\n%s", i, cmp.Diff(want, got))
+		}
+		if diff := cmp.Diff(peerBytes, req.GetPeer()); diff != "" {
+			t.Fatalf("send[%d] peer mismatch (-want +got):\n%s", i, diff)
+		}
+		if diff := cmp.Diff(pm.localManifestPayload, req.GetData()); diff != "" {
+			t.Fatalf("send[%d] manifest payload mismatch (-want +got):\n%s", i, diff)
+		}
 	}
 }
 

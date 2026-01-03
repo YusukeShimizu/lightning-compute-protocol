@@ -151,8 +151,8 @@ export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 # optional: macaroons (mainnet/testnet, etc.)
 export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
 
-# optional: stabilize `lcp_manifest` exchange (enabled by default)
-# export LCPD_LND_MANIFEST_RESEND_INTERVAL="30s"        # disable with 0s
+# Optional: periodically re-send `lcp_manifest` to connected peers (unset or "0s" disables).
+# export LCPD_LND_MANIFEST_RESEND_INTERVAL="10s"
 ```
 
 Notes:
