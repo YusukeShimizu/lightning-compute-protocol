@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -328,5 +329,109 @@ func TestBackend_Execute_Unauthorized(t *testing.T) {
 	}
 	if !errors.Is(execErr, computebackend.ErrUnauthenticated) {
 		t.Fatalf("Execute: expected unauthenticated error, got %v", execErr)
+	}
+}
+
+func TestBackend_Execute_OpenAIChatCompletionsV1_Passthrough(t *testing.T) {
+	t.Parallel()
+
+	reqCh := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/v1/chat/completions"; got != want {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if got, want := r.Header.Get("Authorization"), "Bearer "+testAPIKey; got != want {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		reqCh <- body
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	backend, err := openaibackend.New(openaibackend.Config{
+		APIKey:  testAPIKey,
+		BaseURL: srv.URL,
+		HTTPClient: &http.Client{
+			Timeout: 2 * time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	input := []byte(
+		`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}],` +
+			`"tools":[{"type":"function"}]}`,
+	)
+
+	got, err := backend.Execute(context.Background(), computebackend.Task{
+		TaskKind:   "openai.chat_completions.v1",
+		Model:      "gpt-5.2",
+		InputBytes: input,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	reqBody := mustRecvBytes(t, reqCh)
+	if diff := cmp.Diff(input, reqBody); diff != "" {
+		t.Fatalf("request body mismatch (-want +got):\n%s", diff)
+	}
+
+	want := computebackend.ExecutionResult{
+		OutputBytes: []byte(`{"id":"resp","object":"chat.completion"}`),
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBackend_Execute_OpenAIChatCompletionsV1_RejectsParamsBytes(t *testing.T) {
+	t.Parallel()
+
+	backend, err := openaibackend.New(openaibackend.Config{
+		APIKey:  testAPIKey,
+		BaseURL: "http://example.com",
+		HTTPClient: &http.Client{
+			Timeout: 2 * time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, execErr := backend.Execute(context.Background(), computebackend.Task{
+		TaskKind:    "openai.chat_completions.v1",
+		Model:       "gpt-5.2",
+		InputBytes:  []byte(`{"model":"gpt-5.2"}`),
+		ParamsBytes: []byte(`{"unexpected":true}`),
+	})
+	if execErr == nil {
+		t.Fatalf("Execute: expected error")
+	}
+	if !errors.Is(execErr, computebackend.ErrInvalidTask) {
+		t.Fatalf("expected invalid task error, got %v", execErr)
+	}
+}
+
+func mustRecvBytes(t *testing.T, ch <-chan []byte) []byte {
+	t.Helper()
+
+	select {
+	case b := <-ch:
+		return b
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for request")
+		return nil
 	}
 }

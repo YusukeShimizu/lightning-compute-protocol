@@ -256,14 +256,14 @@ Meaning:
 
 * type: 22 (`params_template`)
 
-  * data: [`byte`:`params_template`] (bytes depending on `task_kind`; `llm.chat` uses §5.2.1)
+  * data: [`byte`:`params_template`] (bytes depending on `task_kind`; standardized kinds include §5.2.1)
 
 Matching against `lcp_quote_request` (recommended):
 
 * If the Provider declares `supported_tasks`, and the received `lcp_quote_request` does not match at least one task template, the Provider SHOULD return `lcp_error(code=unsupported_task)`.
 * Task template matching:
   * `task_kind` MUST match as a string.
-  * `params` handling depends on `task_kind`. For `task_kind="llm.chat"`, §5.2.1 MUST be followed.
+  * `params` handling depends on `task_kind`. For standardized kinds (`llm.chat`, `openai.chat_completions.v1`), §5.2.1 MUST be followed.
 
 ---
 
@@ -281,12 +281,12 @@ Required TLVs (minimum):
 
 Optional TLVs:
 
-* type: 22 (`params`): [`byte`:`params`] (bytes depending on `task_kind`; `llm.chat` uses §5.2.1)
+* type: 22 (`params`): [`byte`:`params`] (bytes depending on `task_kind`; standardized kinds include §5.2.1)
 
 Meaning:
 
 * The Provider MAY reject unsupported tasks via `lcp_error`.
-* For `task_kind="llm.chat"`, the sender MUST follow the encoding rules in §5.2.1.
+* For standardized kinds (`llm.chat`, `openai.chat_completions.v1`), the sender MUST follow the encoding rules in §5.2.1.
 * If the Provider declares `lcp_manifest.supported_tasks`, the Requester SHOULD choose matching `task_kind` / `params`.
 
 Input requirement (MUST):
@@ -332,6 +332,39 @@ Constraint (recommended):
 Result:
 
 * The decoded result stream bytes MUST be a UTF-8 string.
+
+#### `task_kind = "openai.chat_completions.v1"`
+
+Input stream interpretation:
+
+* The decoded input stream bytes MUST be the exact HTTP request body bytes for an OpenAI-compatible `POST /v1/chat/completions` call.
+* The Requester MUST set the input stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
+
+`params` encoding:
+
+* `params` MUST be a TLV stream called `openai_chat_completions_v1_params_tlvs`.
+* The TLV encoding for `openai_chat_completions_v1_params_tlvs` is the same as the TLV stream in §4.
+* `openai_chat_completions_v1_params_tlvs` MUST include at least `model`.
+
+`openai_chat_completions_v1_params_tlvs` (standard TLVs):
+
+* type: 1 (`model`): [`byte`:`model`] (UTF-8 string)
+  Meaning:
+  * `model` MUST identify the execution target (for example, an OpenAI model ID).
+
+Constraint (recommended):
+
+* Providers SHOULD reject `openai_chat_completions_v1_params_tlvs` containing unknown param types with `lcp_error(code=unsupported_params)`.
+
+Result:
+
+* The decoded result stream bytes MUST be the exact HTTP response body bytes for the corresponding OpenAI-compatible `POST /v1/chat/completions` call.
+* The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"` for non-streaming responses.
+
+Non-streaming constraint (recommended):
+
+* This specification defines only non-streaming semantics: the request JSON field `stream` MUST be omitted or false.
+* Providers SHOULD reject requests that enable streaming with `lcp_error(code=unsupported_params)` or with `lcp_result(status=failed)`.
 
 Extensions:
 
@@ -673,4 +706,3 @@ LCP v0.2 makes the following trade-offs explicit:
 * Provider receives full input stream before quoting, which increases pre-payment bandwidth exposure (bounded by manifest limits).
 
 This specification does not define forwarding via onion messages or blinded paths.
-

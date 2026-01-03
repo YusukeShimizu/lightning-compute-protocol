@@ -1,7 +1,7 @@
 # LCP v0.1 仕様（日本語概要）
 
 このページは LCP v0.1 の日本語概要です。
-正規（normative）な仕様は英語版の `protocol/protocol.md` を参照してください（このリポジトリでは英語版が SSOT です）。
+正規（normative）な仕様は英語版の `docs/protocol/protocol.md` を参照してください（このリポジトリでは英語版が SSOT です）。
 
 ## 概要
 
@@ -48,8 +48,17 @@ LCP v0.1 は BOLT #1 の odd type のカスタムメッセージを使います�
 - 同一 type の重複はしません
 - unknown TLV は無視します（forward compatibility）
 
+## LCP v0.2 の `task_kind`: `openai.chat_completions.v1`（概要）
+
+LCP v0.2 では `task_kind="openai.chat_completions.v1"` を定義し、OpenAI 互換の `POST /v1/chat/completions` の HTTP body（JSON）を LCP の input/result stream の bytes としてそのまま運びます。
+
+- input stream: `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+- `params` は TLV stream（`openai_chat_completions_v1_params_tlvs`）で、少なくとも `model` を含みます
+- result stream（non-streaming）: `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+
+詳細・正規（normative）な仕様は英語版 `docs/protocol/protocol.md` の §5.2.1 を参照してください。
+
 ## 参考
 
-- LCP 英語仕様（SSOT）: `protocol/protocol.md`
+- LCP 英語仕様（SSOT）: `docs/protocol/protocol.md`
 - Lightning BOLT #1 messaging: `https://github.com/lightning/bolts/blob/master/01-messaging.md`
-

@@ -177,3 +177,10 @@ type LLMChatParams struct {
 	// Unknown contains unrecognized TLV values keyed by TLV type.
 	Unknown map[uint64][]byte
 }
+
+type OpenAIChatCompletionsV1Params struct {
+	Model string
+
+	// Unknown contains unrecognized TLV values keyed by TLV type.
+	Unknown map[uint64][]byte
+}

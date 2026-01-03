@@ -53,6 +53,7 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | --- | --- | --- |
 | `OPENAI_SERVE_HTTP_ADDR` | `127.0.0.1:8080` | HTTP listen `host:port` |
 | `OPENAI_SERVE_LCPD_GRPC_ADDR` | `127.0.0.1:50051` | `lcpd-grpcd` gRPC address |
+| `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `OPENAI_SERVE_API_KEYS` | (empty) | If set, require `Authorization: Bearer ...` |
 | `OPENAI_SERVE_DEFAULT_PEER_ID` | (empty) | Default LCP peer id (66 hex chars) |
 | `OPENAI_SERVE_MODEL_MAP` | (empty) | `model=peer_id;model2=peer_id` |
@@ -61,17 +62,16 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | If >0, reject quotes exceeding this |
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
-| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
 
 ## How it works
 
 High-level data flow:
 
 1. Your client calls the OpenAI-compatible HTTP endpoint (`/v1/chat/completions`).
-2. `openai-serve` converts the request into an LCP `LLMChat` task.
+2. `openai-serve` forwards the raw request body bytes as an LCP `openai.chat_completions.v1` task.
 3. `openai-serve` forwards the task to a local `lcpd-grpcd` (Requester) over gRPC.
 4. The Requester talks to an LCP Provider over Lightning custom messages, requests a quote, pays, and receives the result.
-5. `openai-serve` returns an OpenAI-style JSON response and includes LCP metadata in response headers.
+5. `openai-serve` returns the raw Provider response bytes (no re-encoding) and includes LCP metadata in response headers.
 
 The Requester (`lcpd-grpcd`) is the component that owns your Lightning node connection and can spend sats.
 `openai-serve` is a stateless HTTP gateway; it does not connect to Lightning directly.
@@ -84,42 +84,22 @@ The Requester (`lcpd-grpcd`) is the component that owns your Lightning node conn
 - `GET /v1/models`
 - `GET /healthz`
 
-### JSON decoding is strict
+### JSON passthrough
 
-Requests are decoded with `DisallowUnknownFields`.
-If your client sends unknown fields (not in the request struct), the request will be rejected with a 400.
+`openai-serve` is a passthrough gateway: it transports the exact request/response JSON bytes end-to-end.
+Unknown request fields are accepted and forwarded to Providers.
 
-### Supported request fields (`/v1/chat/completions`)
+`openai-serve` performs only minimal validation before routing:
 
-Required:
+- Body must be a valid JSON object.
+- `model` must be present and non-empty.
+- `messages` must be present and non-empty.
+- `stream` must be omitted or `false` (streaming is not supported in this MVP).
 
-- `model`
-- `messages` (array of `{role, content}`)
+### Body/result constraints
 
-Supported (optional):
-
-- `temperature` (0..2, finite)
-- `max_tokens` / `max_completion_tokens` (only one, or both set to the same value)
-
-Not supported (rejected if present):
-
-- `stream=true` (only non-streaming is supported)
-- `n!=1`
-- `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, `seed`
-- `tools`, `tool_choice`, `response_format`
-- `functions`, `function_call`
-- `logprobs`, `top_logprobs`
-
-Ignored (commonly sent by clients):
-
-- `user`
-
-### Prompt/result constraints
-
-- Prompt is built from `messages` using a simple text template and is limited by `OPENAI_SERVE_MAX_PROMPT_BYTES`.
 - Request body is limited to 1 MiB.
-- Provider results must be UTF-8 (non-UTF-8 results return a 502).
-- Token usage is approximate (bytes/4 heuristic).
+- Provider result bytes are returned as-is, and the HTTP `Content-Type` is taken from the LCP result metadata.
 
 ## Routing and model selection
 

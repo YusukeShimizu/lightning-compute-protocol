@@ -383,7 +383,7 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 		estimator,
 		jobs,
 		replaystore.New(0),
-		manifestPeerDirectory("peer1"),
+		manifestPeerDirectory(),
 		nil,
 	)
 	handler.clock = clock
@@ -447,7 +447,7 @@ func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
 		estimator,
 		jobs,
 		replaystore.New(0),
-		manifestPeerDirectory("peer1"),
+		manifestPeerDirectory(),
 		nil,
 	)
 	handler.clock = clock
@@ -543,7 +543,11 @@ func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
 	}
 	for i, wantType := range wantTypes {
 		if got := messages[i].msgType; got != wantType {
-			t.Fatalf("unexpected msg_type at index=%d (-want +got):\n%s", i, cmp.Diff(wantType, got))
+			t.Fatalf(
+				"unexpected msg_type at index=%d (-want +got):\n%s",
+				i,
+				cmp.Diff(wantType, got),
+			)
 		}
 	}
 
@@ -582,7 +586,10 @@ func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
 		t.Fatalf("result.ok.result_content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if got, want := gotResult.OK.ResultContentEncoding, "identity"; got != want {
-		t.Fatalf("result.ok.result_content_encoding mismatch (-want +got):\n%s", cmp.Diff(want, got))
+		t.Fatalf(
+			"result.ok.result_content_encoding mismatch (-want +got):\n%s",
+			cmp.Diff(want, got),
+		)
 	}
 
 	wantSum := sha256.Sum256([]byte("hello world"))
@@ -601,6 +608,241 @@ func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
 		job, ok := jobs.Get(key)
 		return ok && job.State == jobstore.StateDone
 	})
+}
+
+func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{now: time.Unix(2000, 0)}
+	messenger := &fakeMessenger{}
+	invoices := newFakeInvoiceCreator()
+	invoices.result = InvoiceResult{
+		PaymentRequest: "lnbcrt1settle",
+		PaymentHash:    mustHash32(0xCC),
+		AddIndex:       12,
+	}
+	jobs := jobstore.New()
+	backend := &fakeBackend{
+		result: computebackend.ExecutionResult{
+			OutputBytes: []byte(`{"ok":true}`),
+		},
+	}
+	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
+	estimator := llm.NewApproxUsageEstimator()
+
+	handler := NewHandler(
+		Config{Enabled: true, QuoteTTLSeconds: 300},
+		DefaultValidator(),
+		messenger,
+		invoices,
+		backend,
+		policy,
+		estimator,
+		jobs,
+		replaystore.New(0),
+		manifestPeerDirectory(),
+		nil,
+	)
+	handler.clock = clock
+	handler.replay = nil
+
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
+	})
+	inputBytes := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
+	payload := mustEncodeQuoteRequest(t, req)
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
+		Payload:    payload,
+	})
+	key := jobstore.Key{PeerPubKey: "peer1", JobID: req.Envelope.JobID}
+
+	inputStreamID := mustHash32(0x11)
+	inputTotalLen := uint64(len(inputBytes))
+	inputSum := sha256.Sum256(inputBytes)
+	inputHash := lcp.Hash32(inputSum)
+
+	beginPayload := mustEncodeStreamBegin(t, lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			MsgID:           fixedMsgID(0x04),
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID:        inputStreamID,
+		Kind:            lcpwire.StreamKindInput,
+		TotalLen:        &inputTotalLen,
+		SHA256:          &inputHash,
+		ContentType:     contentTypeApplicationJSON,
+		ContentEncoding: "identity",
+	})
+
+	chunkPayload := mustEncodeStreamChunk(t, lcpwire.StreamChunk{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID: inputStreamID,
+		Seq:      0,
+		Data:     inputBytes,
+	})
+
+	endPayload := mustEncodeStreamEnd(t, lcpwire.StreamEnd{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			MsgID:           fixedMsgID(0x05),
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID: inputStreamID,
+		TotalLen: inputTotalLen,
+		SHA256:   inputHash,
+	})
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
+		Payload:    beginPayload,
+	})
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
+		Payload:    chunkPayload,
+	})
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
+		Payload:    endPayload,
+	})
+
+	if invoices.createCalls() == 0 {
+		t.Fatalf("expected invoice to be created")
+	}
+
+	invoices.Settle()
+
+	waitFor(t, 3*time.Second, func() bool { return len(messenger.messages()) >= 5 })
+	messages := messenger.messages()
+
+	begin := mustDecodeStreamBegin(t, messages[1].payload)
+	if got, want := begin.Kind, lcpwire.StreamKindResult; got != want {
+		t.Fatalf("stream_begin.kind mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+	if got, want := begin.ContentType, contentTypeApplicationJSON; got != want {
+		t.Fatalf("stream_begin.content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+
+	gotResult := mustDecodeResult(t, messages[4].payload)
+	if got, want := gotResult.Status, lcpwire.ResultStatusOK; got != want {
+		t.Fatalf("result.status mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+	if gotResult.OK == nil {
+		t.Fatalf("result ok metadata is nil")
+	}
+	if got, want := gotResult.OK.ResultContentType, contentTypeApplicationJSON; got != want {
+		t.Fatalf("result.ok.result_content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+	if got, want := gotResult.OK.ResultContentEncoding, "identity"; got != want {
+		t.Fatalf(
+			"result.ok.result_content_encoding mismatch (-want +got):\n%s",
+			cmp.Diff(want, got),
+		)
+	}
+
+	waitFor(t, time.Second, func() bool {
+		job, ok := jobs.Get(key)
+		return ok && job.State == jobstore.StateDone
+	})
+}
+
+func TestHandler_HandleStreamBegin_OpenAIChatCompletionsV1_RejectsWrongContentType(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{now: time.Unix(2000, 0)}
+	messenger := &fakeMessenger{}
+	invoices := newFakeInvoiceCreator()
+	invoices.result = InvoiceResult{
+		PaymentRequest: "lnbcrt1settle",
+		PaymentHash:    mustHash32(0xCC),
+		AddIndex:       12,
+	}
+	jobs := jobstore.New()
+	backend := &fakeBackend{
+		result: computebackend.ExecutionResult{
+			OutputBytes: []byte(`{"ok":true}`),
+		},
+	}
+	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
+	estimator := llm.NewApproxUsageEstimator()
+
+	handler := NewHandler(
+		Config{Enabled: true, QuoteTTLSeconds: 300},
+		DefaultValidator(),
+		messenger,
+		invoices,
+		backend,
+		policy,
+		estimator,
+		jobs,
+		replaystore.New(0),
+		manifestPeerDirectory(),
+		nil,
+	)
+	handler.clock = clock
+	handler.replay = nil
+
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
+	})
+	inputBytes := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
+	payload := mustEncodeQuoteRequest(t, req)
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
+		Payload:    payload,
+	})
+	key := jobstore.Key{PeerPubKey: "peer1", JobID: req.Envelope.JobID}
+	t.Cleanup(func() { handler.cancelJob(key) })
+
+	inputStreamID := mustHash32(0x11)
+	inputTotalLen := uint64(len(inputBytes))
+	inputSum := sha256.Sum256(inputBytes)
+	inputHash := lcp.Hash32(inputSum)
+
+	beginPayload := mustEncodeStreamBegin(t, lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: req.Envelope.ProtocolVersion,
+			JobID:           req.Envelope.JobID,
+			MsgID:           fixedMsgID(0x04),
+			Expiry:          req.Envelope.Expiry,
+		},
+		StreamID:        inputStreamID,
+		Kind:            lcpwire.StreamKindInput,
+		TotalLen:        &inputTotalLen,
+		SHA256:          &inputHash,
+		ContentType:     contentTypeTextPlain,
+		ContentEncoding: "identity",
+	})
+
+	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+		PeerPubKey: "peer1",
+		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
+		Payload:    beginPayload,
+	})
+
+	sent := requireSingleSentMessage(t, messenger.messages())
+	if sent.msgType != lcpwire.MessageTypeError {
+		t.Fatalf("expected error message, got %d", sent.msgType)
+	}
+
+	gotErr := mustDecodeError(t, sent.payload)
+	if got, want := gotErr.Code, lcpwire.ErrorCodeUnsupportedEncoding; got != want {
+		t.Fatalf("error code mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
 }
 
 type fakeClock struct {
@@ -874,7 +1116,21 @@ func mustDecodeResult(t *testing.T, payload []byte) lcpwire.Result {
 	return result
 }
 
-func mustComputeTermsHash(t *testing.T, terms lcp.Terms, commit protocolcompat.TermsCommit) lcp.Hash32 {
+func mustDecodeError(t *testing.T, payload []byte) lcpwire.Error {
+	t.Helper()
+
+	errMsg, err := lcpwire.DecodeError(payload)
+	if err != nil {
+		t.Fatalf("decode lcp_error: %v", err)
+	}
+	return errMsg
+}
+
+func mustComputeTermsHash(
+	t *testing.T,
+	terms lcp.Terms,
+	commit protocolcompat.TermsCommit,
+) lcp.Hash32 {
 	t.Helper()
 
 	hash, err := protocolcompat.ComputeTermsHash(terms, commit)

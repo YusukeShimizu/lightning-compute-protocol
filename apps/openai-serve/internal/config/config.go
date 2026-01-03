@@ -29,8 +29,6 @@ type Config struct {
 	TimeoutQuote   time.Duration
 	TimeoutExecute time.Duration
 
-	MaxPromptBytes int
-
 	LogLevel string
 }
 
@@ -51,8 +49,6 @@ type envConfig struct {
 
 	TimeoutQuote   time.Duration `env:"OPENAI_SERVE_TIMEOUT_QUOTE"`
 	TimeoutExecute time.Duration `env:"OPENAI_SERVE_TIMEOUT_EXECUTE"`
-
-	MaxPromptBytes *int `env:"OPENAI_SERVE_MAX_PROMPT_BYTES"`
 }
 
 const (
@@ -62,8 +58,6 @@ const (
 
 	defaultTimeoutQuote   = 5 * time.Second
 	defaultTimeoutExecute = 120 * time.Second
-
-	defaultMaxPromptBytes = 60000
 
 	peerIDHexLen  = 66
 	peerIDByteLen = peerIDHexLen / 2
@@ -86,8 +80,6 @@ func LoadFromEnv(ctx context.Context) (Config, error) {
 
 		TimeoutQuote:   defaultTimeoutQuote,
 		TimeoutExecute: defaultTimeoutExecute,
-
-		MaxPromptBytes: defaultMaxPromptBytes,
 	}
 
 	var env envConfig
@@ -138,10 +130,6 @@ func LoadFromEnv(ctx context.Context) (Config, error) {
 		cfg.TimeoutExecute = env.TimeoutExecute
 	}
 
-	if env.MaxPromptBytes != nil {
-		cfg.MaxPromptBytes = *env.MaxPromptBytes
-	}
-
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
 	}
@@ -167,9 +155,6 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.TimeoutExecute <= 0 {
 		return errors.New("OPENAI_SERVE_TIMEOUT_EXECUTE must be > 0")
-	}
-	if cfg.MaxPromptBytes < 0 {
-		return errors.New("OPENAI_SERVE_MAX_PROMPT_BYTES must be >= 0")
 	}
 	return nil
 }

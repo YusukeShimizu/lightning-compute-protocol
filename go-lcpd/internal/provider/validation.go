@@ -8,6 +8,7 @@ import (
 )
 
 const taskKindLLMChat = "llm.chat"
+const taskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
 
 type QuoteRequestValidator struct {
 	SupportedProtocolVersions map[uint16]struct{}
@@ -20,7 +21,8 @@ func DefaultValidator() QuoteRequestValidator {
 			lcpwire.ProtocolVersionV02: {},
 		},
 		SupportedTaskKinds: map[string]struct{}{
-			taskKindLLMChat: {},
+			taskKindLLMChat:                 {},
+			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}
 }
@@ -89,6 +91,32 @@ func (v QuoteRequestValidator) taskKindSupported(taskKind string) bool {
 
 func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
 	if req.TaskKind != taskKindLLMChat {
+		if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
+			return nil
+		}
+
+		if req.ParamsBytes == nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 params are required",
+			}
+		}
+
+		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+		if err != nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 params must be a valid TLV stream",
+			}
+		}
+
+		if len(params.Unknown) > 0 {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 params contain unknown tlv types",
+			}
+		}
+
 		return nil
 	}
 

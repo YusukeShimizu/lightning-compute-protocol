@@ -2,32 +2,24 @@ package httpapi
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
-	"github.com/bruwbird/lcp/apps/openai-serve/internal/openai"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 const (
-	responseIDPrefix = "lcpchatcmpl-"
-	responseIDBytes  = 12
-
-	cancelJobTimeout      = 2 * time.Second
-	unsupportedFieldsCap  = 12
-	temperatureMilliScale = 1000
+	cancelJobTimeout        = 2 * time.Second
+	contentEncodingIdentity = "identity"
 )
 
 func (s *Server) handleChatCompletions(c *gin.Context) {
@@ -36,24 +28,17 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	req, ok := decodeAndValidateChatRequest(c)
+	reqBytes, model, ok := decodeAndValidateChatCompletionsRequest(c)
 	if !ok {
 		return
 	}
-
-	prompt, ok := s.buildPrompt(c, req.Messages)
-	if !ok {
-		return
-	}
-
-	model := strings.TrimSpace(req.Model)
 
 	peerID, ok := s.resolvePeerForModel(c, model)
 	if !ok {
 		return
 	}
 
-	task, ok := s.buildLCPChatTask(c, model, prompt, req)
+	task, ok := s.buildLCPOpenAIChatCompletionsV1Task(c, model, reqBytes)
 	if !ok {
 		return
 	}
@@ -70,8 +55,17 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	resp, ok := s.buildChatCompletionResponse(c, model, prompt, execResp)
-	if !ok {
+	result := execResp.GetResult()
+	if result == nil {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no result")
+		return
+	}
+	if result.GetStatus() != lcpdv1.Result_STATUS_OK {
+		msg := strings.TrimSpace(result.GetMessage())
+		if msg == "" {
+			msg = "provider returned non-ok status"
+		}
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", msg)
 		return
 	}
 
@@ -80,38 +74,65 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	c.Header("X-Lcp-Job-Id", hex.EncodeToString(jobID))
 	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
 	c.Header("X-Lcp-Terms-Hash", hex.EncodeToString(quote.GetTerms().GetTermsHash()))
-	writeJSON(c, http.StatusOK, resp)
+
+	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))
+		return
+	}
+	contentType := strings.TrimSpace(result.GetContentType())
+	if contentType == "" {
+		contentType = "application/json; charset=utf-8"
+	}
+	c.Data(http.StatusOK, contentType, result.GetResult())
 }
 
-func decodeAndValidateChatRequest(c *gin.Context) (openai.ChatCompletionsRequest, bool) {
-	var req openai.ChatCompletionsRequest
-	if err := decodeJSONBody(c, &req); err != nil {
-		if isRequestBodyTooLarge(err) {
-			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", err.Error())
-			return openai.ChatCompletionsRequest{}, false
+func decodeAndValidateChatCompletionsRequest(c *gin.Context) ([]byte, string, bool) {
+	body, readErr := readRequestBodyBytes(c)
+	if readErr != nil {
+		if isRequestBodyTooLarge(readErr) {
+			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", readErr.Error())
+			return nil, "", false
 		}
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return openai.ChatCompletionsRequest{}, false
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", readErr.Error())
+		return nil, "", false
 	}
 
-	if err := validateChatRequest(req); err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return openai.ChatCompletionsRequest{}, false
+	var parsed struct {
+		Model    string            `json:"model"`
+		Messages []json.RawMessage `json:"messages"`
+		Stream   *bool             `json:"stream,omitempty"`
 	}
-	return req, true
-}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		msg := strings.TrimPrefix(err.Error(), "json: ")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", msg)
+		return nil, "", false
+	}
 
-func (s *Server) buildPrompt(c *gin.Context, messages []openai.ChatMessage) (string, bool) {
-	prompt, err := openai.BuildPrompt(messages)
-	if err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return "", false
+	model := parsed.Model
+	trimmedModel := strings.TrimSpace(model)
+	if trimmedModel == "" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return nil, "", false
 	}
-	if s.cfg.MaxPromptBytes > 0 && len([]byte(prompt)) > s.cfg.MaxPromptBytes {
-		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "prompt is too large")
-		return "", false
+	if trimmedModel != model {
+		writeOpenAIError(
+			c,
+			http.StatusBadRequest,
+			"invalid_request_error",
+			"model must not have leading/trailing whitespace",
+		)
+		return nil, "", false
 	}
-	return prompt, true
+	if len(parsed.Messages) == 0 {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
+		return nil, "", false
+	}
+	if parsed.Stream != nil && *parsed.Stream {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "stream=true is not supported")
+		return nil, "", false
+	}
+
+	return body, model, true
 }
 
 func (s *Server) resolvePeerForModel(
@@ -135,13 +156,12 @@ func (s *Server) resolvePeerForModel(
 	return peerID, true
 }
 
-func (s *Server) buildLCPChatTask(
+func (s *Server) buildLCPOpenAIChatCompletionsV1Task(
 	c *gin.Context,
 	model string,
-	prompt string,
-	req openai.ChatCompletionsRequest,
+	reqBytes []byte,
 ) (*lcpdv1.Task, bool) {
-	task, err := buildLCPChatTask(model, prompt, req)
+	task, err := buildLCPOpenAIChatCompletionsV1Task(model, reqBytes)
 	if err != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, false
@@ -187,28 +207,6 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 		return nil, false
 	}
 	return execResp, true
-}
-
-func (s *Server) buildChatCompletionResponse(
-	c *gin.Context,
-	model string,
-	prompt string,
-	execResp *lcpdv1.AcceptAndExecuteResponse,
-) (openai.ChatCompletionsResponse, bool) {
-	resultBytes := execResp.GetResult().GetResult()
-	if !utf8.Valid(resultBytes) {
-		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned non-utf8 result")
-		return openai.ChatCompletionsResponse{}, false
-	}
-
-	id, err := randomHexID(responseIDPrefix, responseIDBytes)
-	if err != nil {
-		writeOpenAIError(c, http.StatusInternalServerError, "server_error", "failed to generate response id")
-		return openai.ChatCompletionsResponse{}, false
-	}
-
-	resp := buildChatResponse(id, model, prompt, string(resultBytes))
-	return resp, true
 }
 
 func (s *Server) listPeers(c *gin.Context) (*lcpdv1.ListLCPPeersResponse, error) {
@@ -269,168 +267,23 @@ func shouldCancelAfterExecuteError(c *gin.Context, err error) bool {
 	return false
 }
 
-func buildLCPChatTask(model, prompt string, req openai.ChatCompletionsRequest) (*lcpdv1.Task, error) {
-	temperatureMilli, err := temperatureToMilli(req.Temperature)
-	if err != nil {
-		return nil, err
+func buildLCPOpenAIChatCompletionsV1Task(model string, requestJSON []byte) (*lcpdv1.Task, error) {
+	if strings.TrimSpace(model) == "" {
+		return nil, errors.New("model is required")
 	}
-	maxOutputTokens, err := maxTokens(req.MaxTokens, req.MaxCompletionTokens)
-	if err != nil {
-		return nil, err
+	if len(requestJSON) == 0 {
+		return nil, errors.New("request body is required")
 	}
-
 	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: prompt,
-				Params: &lcpdv1.LLMChatParams{
-					Profile:          model,
-					TemperatureMilli: temperatureMilli,
-					MaxOutputTokens:  maxOutputTokens,
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+					Model: model,
 				},
 			},
 		},
 	}, nil
-}
-
-func buildChatResponse(id, model, prompt, completion string) openai.ChatCompletionsResponse {
-	promptTokens := openai.ApproxTokensFromBytes(len([]byte(prompt)))
-	completionTokens := openai.ApproxTokensFromBytes(len([]byte(completion)))
-	totalTokens := promptTokens + completionTokens
-
-	return openai.ChatCompletionsResponse{
-		ID:      id,
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []openai.ChatChoice{
-			{
-				Index: 0,
-				Message: openai.ChatMessage{
-					Role:    "assistant",
-					Content: openai.ChatContent(completion),
-				},
-				FinishReason: "stop",
-			},
-		},
-		Usage: &openai.Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      totalTokens,
-		},
-	}
-}
-
-func validateChatRequest(req openai.ChatCompletionsRequest) error {
-	if strings.TrimSpace(req.Model) == "" {
-		return errors.New("model is required")
-	}
-	if len(req.Messages) == 0 {
-		return errors.New("messages is required")
-	}
-
-	if req.Stream != nil && *req.Stream {
-		return errors.New("stream=true is not supported")
-	}
-	if req.N != nil && *req.N != 1 {
-		return errors.New("only n=1 is supported")
-	}
-
-	unsupported := make([]string, 0, unsupportedFieldsCap)
-	if req.TopP != nil {
-		unsupported = append(unsupported, "top_p")
-	}
-	if len(req.Stop) > 0 {
-		unsupported = append(unsupported, "stop")
-	}
-	if req.PresencePenalty != nil {
-		unsupported = append(unsupported, "presence_penalty")
-	}
-	if req.FrequencyPenalty != nil {
-		unsupported = append(unsupported, "frequency_penalty")
-	}
-	if req.Seed != nil {
-		unsupported = append(unsupported, "seed")
-	}
-	if len(req.Tools) > 0 {
-		unsupported = append(unsupported, "tools")
-	}
-	if len(req.ToolChoice) > 0 {
-		unsupported = append(unsupported, "tool_choice")
-	}
-	if len(req.ResponseFormat) > 0 {
-		unsupported = append(unsupported, "response_format")
-	}
-	if len(req.Functions) > 0 {
-		unsupported = append(unsupported, "functions")
-	}
-	if len(req.FunctionCall) > 0 {
-		unsupported = append(unsupported, "function_call")
-	}
-	if len(req.Logprobs) > 0 || len(req.TopLogprobs) > 0 {
-		unsupported = append(unsupported, "logprobs/top_logprobs")
-	}
-
-	if len(unsupported) > 0 {
-		sort.Strings(unsupported)
-		return fmt.Errorf("unsupported fields: %s", strings.Join(unsupported, ", "))
-	}
-
-	return nil
-}
-
-func temperatureToMilli(v *float64) (uint32, error) {
-	if v == nil {
-		return 0, nil
-	}
-	if math.IsNaN(*v) || math.IsInf(*v, 0) {
-		return 0, errors.New("temperature must be a finite number")
-	}
-	if *v < 0 || *v > 2 {
-		return 0, errors.New("temperature must be between 0 and 2")
-	}
-	milli := int64(math.Round(*v * temperatureMilliScale))
-	if milli < 0 || milli > math.MaxUint32 {
-		return 0, errors.New("temperature is out of range")
-	}
-	return uint32(milli), nil
-}
-
-func maxTokens(maxTokensValue *int, maxCompletionTokensValue *int) (uint32, error) {
-	var v *int
-	switch {
-	case maxTokensValue != nil && maxCompletionTokensValue != nil:
-		if *maxTokensValue != *maxCompletionTokensValue {
-			return 0, errors.New("max_tokens and max_completion_tokens cannot both be set to different values")
-		}
-		v = maxTokensValue
-	case maxTokensValue != nil:
-		v = maxTokensValue
-	case maxCompletionTokensValue != nil:
-		v = maxCompletionTokensValue
-	default:
-		return 0, nil
-	}
-
-	if *v <= 0 {
-		return 0, errors.New("max_tokens must be > 0")
-	}
-	uv := uint64(*v)
-	if uv > uint64(math.MaxUint32) {
-		return 0, errors.New("max_tokens is too large")
-	}
-	return uint32(uv), nil
-}
-
-func randomHexID(prefix string, nBytes int) (string, error) {
-	if nBytes <= 0 {
-		return "", errors.New("nBytes must be > 0")
-	}
-	b := make([]byte, nBytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return prefix + hex.EncodeToString(b), nil
 }
 
 func copyBytes(b []byte) []byte {

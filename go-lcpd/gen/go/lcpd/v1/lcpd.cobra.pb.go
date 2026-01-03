@@ -172,6 +172,24 @@ func _LCPDServiceRequestQuoteCommand(cfg *client.Config) *cobra.Command {
 		_Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat}
 		_Task_LlmChat.Params = _Task_LlmChat_Params
 	})
+	_Task_OpenaiChatCompletionsV1 := &OpenAIChatCompletionsV1TaskSpec{}
+	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task OpenaiChatCompletionsV1"), false, "")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
+	})
+	flag.BytesBase64Var(cmd.PersistentFlags(), &_Task_OpenaiChatCompletionsV1.RequestJson, cfg.FlagNamer("Task OpenaiChatCompletionsV1 RequestJson"), "Raw HTTP request body bytes for `POST /v1/chat/completions`.")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1 RequestJson"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
+	})
+	_Task_OpenaiChatCompletionsV1_Params := &OpenAIChatCompletionsV1Params{}
+	cmd.PersistentFlags().StringVar(&_Task_OpenaiChatCompletionsV1_Params.Model, cfg.FlagNamer("Task OpenaiChatCompletionsV1 Params Model"), "", "\"model\" (TLV type 1).\n Identifier for the execution target (for example, an OpenAI model ID).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1 Params Model"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
+		_Task_OpenaiChatCompletionsV1.Params = _Task_OpenaiChatCompletionsV1_Params
+	})
 
 	return cmd
 }
