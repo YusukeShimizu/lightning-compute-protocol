@@ -212,20 +212,8 @@ func (s *Service) RequestQuote(
 	}
 	payloadBytes := len(payload)
 
-	if remoteManifest.MaxPayloadBytes != 0 &&
-		len(payload) > int(remoteManifest.MaxPayloadBytes) {
-		return nil, status.Error(
-			codes.ResourceExhausted,
-			"quote_request payload exceeds peer max_payload_bytes",
-		)
-	}
-
-	inputLen := uint64(len(inputStream.DecodedBytes))
-	if inputLen > remoteManifest.MaxStreamBytes || inputLen > remoteManifest.MaxJobBytes {
-		return nil, status.Error(
-			codes.ResourceExhausted,
-			"input stream exceeds peer max_stream_bytes/max_job_bytes",
-		)
+	if limitsErr := validateQuoteRequestRemoteLimits(remoteManifest, payload, inputStream); limitsErr != nil {
+		return nil, limitsErr
 	}
 
 	if s.messenger == nil {
@@ -284,6 +272,30 @@ func (s *Service) RequestQuote(
 		PeerId: peerID,
 		Terms:  terms,
 	}, nil
+}
+
+func validateQuoteRequestRemoteLimits(
+	remoteManifest lcpwire.Manifest,
+	payload []byte,
+	inputStream lcptasks.InputStream,
+) error {
+	if remoteManifest.MaxPayloadBytes != 0 &&
+		len(payload) > int(remoteManifest.MaxPayloadBytes) {
+		return status.Error(
+			codes.ResourceExhausted,
+			"quote_request payload exceeds peer max_payload_bytes",
+		)
+	}
+
+	inputLen := uint64(len(inputStream.DecodedBytes))
+	if inputLen > remoteManifest.MaxStreamBytes || inputLen > remoteManifest.MaxJobBytes {
+		return status.Error(
+			codes.ResourceExhausted,
+			"input stream exceeds peer max_stream_bytes/max_job_bytes",
+		)
+	}
+
+	return nil
 }
 
 func (s *Service) buildQuoteRequestPayload(

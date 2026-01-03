@@ -30,7 +30,6 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 
 	started := time.Now()
-	ctx := c.Request.Context()
 
 	reqBytes, req, ok := decodeAndValidateChatRequest(c)
 	if !ok {
@@ -71,59 +70,26 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 	execLatency := time.Since(execStart)
 
-	result := execResp.GetResult()
-	if result == nil {
-		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no result")
-		return
-	}
-	if result.GetStatus() != lcpdv1.Result_STATUS_OK {
-		msg := strings.TrimSpace(result.GetMessage())
-		if msg == "" {
-			msg = "provider returned non-ok status"
-		}
-		writeOpenAIError(c, http.StatusBadGateway, "server_error", msg)
+	result, ok := validateChatCompletionResult(c, execResp)
+	if !ok {
 		return
 	}
 
-	price := quote.GetTerms().GetPriceMsat()
-	totalLatency := time.Since(started)
-
-	resultBytes := execResp.GetResult().GetResult()
-	completionBytes := len(resultBytes)
-	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
-	totalTokens := promptTokens + completionTokens
-
-	s.log.InfoContext(
-		ctx,
-		"chat completion",
-		"model", model,
-		"peer_id", peerID,
-		"job_id", hex.EncodeToString(jobID),
-		"price_msat", price,
-		"terms_hash", hex.EncodeToString(quote.GetTerms().GetTermsHash()),
-		"prompt_bytes", promptBytes,
-		"completion_bytes", completionBytes,
-		"prompt_tokens_approx", promptTokens,
-		"completion_tokens_approx", completionTokens,
-		"total_tokens_approx", totalTokens,
-		"quote_ms", quoteLatency.Milliseconds(),
-		"execute_ms", execLatency.Milliseconds(),
-		"total_ms", totalLatency.Milliseconds(),
-	)
-	c.Header("X-Lcp-Peer-Id", peerID)
-	c.Header("X-Lcp-Job-Id", hex.EncodeToString(jobID))
-	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
-	c.Header("X-Lcp-Terms-Hash", hex.EncodeToString(quote.GetTerms().GetTermsHash()))
-
-	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
-		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))
+	if !s.logAndWriteChatCompletionResult(
+		c,
+		started,
+		model,
+		peerID,
+		jobID,
+		quote,
+		promptBytes,
+		promptTokens,
+		quoteLatency,
+		execLatency,
+		result,
+	) {
 		return
 	}
-	contentType := strings.TrimSpace(result.GetContentType())
-	if contentType == "" {
-		contentType = "application/json; charset=utf-8"
-	}
-	c.Data(http.StatusOK, contentType, result.GetResult())
 }
 
 func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
@@ -265,6 +231,88 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 		return nil, false
 	}
 	return execResp, true
+}
+
+func validateChatCompletionResult(
+	c *gin.Context,
+	execResp *lcpdv1.AcceptAndExecuteResponse,
+) (*lcpdv1.Result, bool) {
+	result := execResp.GetResult()
+	if result == nil {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no result")
+		return nil, false
+	}
+	if result.GetStatus() != lcpdv1.Result_STATUS_OK {
+		msg := strings.TrimSpace(result.GetMessage())
+		if msg == "" {
+			msg = "provider returned non-ok status"
+		}
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", msg)
+		return nil, false
+	}
+	return result, true
+}
+
+func (s *Server) logAndWriteChatCompletionResult(
+	c *gin.Context,
+	started time.Time,
+	model string,
+	peerID string,
+	jobID []byte,
+	quote *lcpdv1.RequestQuoteResponse,
+	promptBytes int,
+	promptTokens int,
+	quoteLatency time.Duration,
+	execLatency time.Duration,
+	result *lcpdv1.Result,
+) bool {
+	ctx := c.Request.Context()
+
+	price := quote.GetTerms().GetPriceMsat()
+	totalLatency := time.Since(started)
+
+	resultBytes := result.GetResult()
+	completionBytes := len(resultBytes)
+	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
+	totalTokens := promptTokens + completionTokens
+
+	jobIDHex := hex.EncodeToString(jobID)
+	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+
+	s.log.InfoContext(
+		ctx,
+		"chat completion",
+		"model", model,
+		"peer_id", peerID,
+		"job_id", jobIDHex,
+		"price_msat", price,
+		"terms_hash", termsHashHex,
+		"prompt_bytes", promptBytes,
+		"completion_bytes", completionBytes,
+		"prompt_tokens_approx", promptTokens,
+		"completion_tokens_approx", completionTokens,
+		"total_tokens_approx", totalTokens,
+		"quote_ms", quoteLatency.Milliseconds(),
+		"execute_ms", execLatency.Milliseconds(),
+		"total_ms", totalLatency.Milliseconds(),
+	)
+
+	c.Header("X-Lcp-Peer-Id", peerID)
+	c.Header("X-Lcp-Job-Id", jobIDHex)
+	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
+	c.Header("X-Lcp-Terms-Hash", termsHashHex)
+
+	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))
+		return false
+	}
+
+	contentType := strings.TrimSpace(result.GetContentType())
+	if contentType == "" {
+		contentType = "application/json; charset=utf-8"
+	}
+	c.Data(http.StatusOK, contentType, resultBytes)
+	return true
 }
 
 func (s *Server) listPeers(c *gin.Context) (*lcpdv1.ListLCPPeersResponse, error) {
