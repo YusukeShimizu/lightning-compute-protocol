@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"

@@ -1,0 +1,46 @@
+name: release-drafter
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  go-lcpd:
+    name: go-lcpd (draft release notes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update draft
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter/go-lcpd.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  openai-serve:
+    name: openai-serve (draft release notes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update draft
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter/openai-serve.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  proto-go:
+    name: proto-go (draft release notes)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update draft
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter/proto-go.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

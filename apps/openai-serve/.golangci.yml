@@ -232,6 +232,10 @@ linters:
       # Default: false
       check-type-assertions: true
 
+    gomoddirectives:
+      # This repo is a multi-module monorepo; allow local `replace` directives for linking sibling modules.
+      replace-local: true
+
     exhaustive:
       # Program elements to check for exhaustiveness.
       # Default: [ switch ]
