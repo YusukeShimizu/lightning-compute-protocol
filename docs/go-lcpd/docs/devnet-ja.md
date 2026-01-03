@@ -170,7 +170,7 @@ export LCPD_PROVIDER_CONFIG_PATH="$PWD/provider.devnet.yaml"
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths alice | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths alice | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23051
 ```
 
 ### 2) Bob で go-lcpd を起動（Requester のみ / 別ターミナル）
@@ -183,14 +183,14 @@ export LCPD_LOG_LEVEL=debug
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths bob | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths bob | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50052
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23052
 ```
 
 ### 3) `ListLCPPeers` を呼ぶ（manifest 交換の確認）
 
 ```sh
 cd go-lcpd
-./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50052 -o prettyjson
+./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
 `peers[0].remoteManifest.supportedTasks[].llmChat.profile` に `gpt-5.2` が見えれば、Provider がプロファイルを広告できています。
@@ -203,7 +203,7 @@ cd go-lcpd
 ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 
 ./bin/lcpd-oneshot \
-  -server-addr 127.0.0.1:50052 \
+  -server-addr 127.0.0.1:23052 \
   -peer-id "$ALICE_PUBKEY" \
   -pay-invoice \
   -profile gpt-5.2 \
@@ -223,4 +223,3 @@ ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 ./scripts/devnet down
 rm -rf ./.data/devnet
 ```
-

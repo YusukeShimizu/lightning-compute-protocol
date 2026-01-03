@@ -7,5 +7,6 @@ llm:
     gpt-5.2:
       price:
         # regtest example pricing (choose any policy you like)
-        input_msat_per_mtok: 1
-        output_msat_per_mtok: 1
+        input_msat_per_mtok: 1750000
+        cached_input_msat_per_mtok: 175000
+        output_msat_per_mtok: 14000000

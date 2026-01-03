@@ -170,7 +170,7 @@ export LCPD_PROVIDER_CONFIG_PATH="$PWD/provider.devnet.yaml"
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths alice | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths alice | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23051
 ```
 
 ### 2) Start go-lcpd on Bob (Requester-only / separate terminal)
@@ -183,14 +183,14 @@ export LCPD_LOG_LEVEL=debug
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths bob | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths bob | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50052
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23052
 ```
 
 ### 3) Call `ListLCPPeers` (confirm manifest exchange)
 
 ```sh
 cd go-lcpd
-./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50052 -o prettyjson
+./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
 If you can see `gpt-5.2` under `peers[0].remoteManifest.supportedTasks[].llmChat.profile`, it means the Provider successfully advertised the profile.
@@ -203,7 +203,7 @@ cd go-lcpd
 ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 
 ./bin/lcpd-oneshot \
-  -server-addr 127.0.0.1:50052 \
+  -server-addr 127.0.0.1:23052 \
   -peer-id "$ALICE_PUBKEY" \
   -pay-invoice \
   -profile gpt-5.2 \
