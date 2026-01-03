@@ -1,25 +1,27 @@
-name: go-lcpd
+name: openai-serve
 
 on:
   push:
     branches:
       - main
     paths:
-      - go-lcpd/**
+      - apps/openai-serve/**
+      - go-lcpd/proto/**
       - proto/**
       - proto-go/**
-      - .github/workflows/test.yml
+      - .github/workflows/openai-serve.yml
   pull_request:
     paths:
-      - go-lcpd/**
+      - apps/openai-serve/**
+      - go-lcpd/proto/**
       - proto/**
       - proto-go/**
-      - .github/workflows/test.yml
+      - .github/workflows/openai-serve.yml
   workflow_dispatch:
 
 jobs:
-  go-lcpd:
-    name: go-lcpd (lint + test)
+  openai-serve:
+    name: openai-serve (lint + test)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -28,15 +30,13 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v9
 
-      # Speeds up Nix builds by caching store paths in GitHub Actions cache (no secrets required).
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v9
         with:
-          # Disable telemetry/diagnostics. Remove this line if you want to help improve the action.
           diagnostic-endpoint: ""
-          # Prefer the GitHub Actions cache (works on PRs/forks); don't use FlakeHub Cache.
           use-gha-cache: true
           use-flakehub: false
 
       - name: Lint and test
-        run: nix develop ./go-lcpd -c make -C go-lcpd lint test
+        run: nix develop ./go-lcpd -c make -C apps/openai-serve lint test
+

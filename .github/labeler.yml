@@ -1,0 +1,19 @@
+area/go-lcpd:
+  - changed-files:
+      - any-glob-to-any-file: go-lcpd/**
+
+area/openai-serve:
+  - changed-files:
+      - any-glob-to-any-file: apps/openai-serve/**
+
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file: docs/**
+
+area/proto:
+  - changed-files:
+      - any-glob-to-any-file:
+          - go-lcpd/proto/**
+          - proto/**
+          - proto-go/**
+

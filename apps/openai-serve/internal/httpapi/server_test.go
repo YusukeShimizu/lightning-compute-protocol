@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/apps/openai-serve/internal/config"
 	httpapi "github.com/bruwbird/lcp/apps/openai-serve/internal/httpapi"
 	"github.com/bruwbird/lcp/apps/openai-serve/internal/openai"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"

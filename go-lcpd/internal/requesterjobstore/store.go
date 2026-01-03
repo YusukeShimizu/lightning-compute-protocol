@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/envconfig"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"google.golang.org/protobuf/proto"
 )
 

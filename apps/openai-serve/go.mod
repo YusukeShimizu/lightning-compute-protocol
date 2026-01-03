@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20251209175733-2a1774d88802.1
+	github.com/bruwbird/lcp/proto-go v0.0.0
 	github.com/gin-gonic/gin v1.11.0
 	github.com/google/go-cmp v0.7.0
 	github.com/sethvargo/go-envconfig v1.3.0
@@ -45,3 +46,5 @@ require (
 	golang.org/x/tools v0.35.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251124214823-79d6a2a48846 // indirect
 )
+
+replace github.com/bruwbird/lcp/proto-go => ../../proto-go

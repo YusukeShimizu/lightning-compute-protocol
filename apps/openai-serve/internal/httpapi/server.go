@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	lcpdv1 "github.com/bruwbird/lcp/apps/openai-serve/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/apps/openai-serve/internal/config"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/gin-gonic/gin"
 )
 
