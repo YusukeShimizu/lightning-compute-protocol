@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"time"
 
-	lcpdv1 "github.com/bruwbird/lcp/go-lcpd/gen/go/lcpd/v1"
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterjobstore"
+	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
