@@ -109,7 +109,7 @@ BOB_P2P_ADDR="$(./scripts/devnet paths bob | awk -F= '/^p2p_addr=/{print $2}')"
 ### 2) Alice → Bob へチャネルを開く（Bob が支払えるように push）
 
 ```sh
-./scripts/devnet lncli alice openchannel --node_key "$BOB_PUBKEY" --local_amt 200000 --push_amt 10000
+./scripts/devnet lncli alice openchannel --node_key "$BOB_PUBKEY" --local_amt 10000000 --push_amt 5000000
 ./scripts/devnet bitcoin-cli generatetoaddress 3 "$ADDR"
 ./scripts/devnet lncli alice listchannels
 ./scripts/devnet lncli bob listchannels
@@ -148,7 +148,7 @@ quote_ttl_seconds: 300
 
 llm:
   max_output_tokens: 512
-  chat_profiles:
+  models:
     gpt-5.2:
       price:
         # regtest example pricing (choose any policy you like)
@@ -170,7 +170,7 @@ export LCPD_PROVIDER_CONFIG_PATH="$PWD/provider.devnet.yaml"
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths alice | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths alice | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23051
 ```
 
 ### 2) Bob で go-lcpd を起動（Requester のみ / 別ターミナル）
@@ -183,17 +183,17 @@ export LCPD_LOG_LEVEL=debug
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths bob | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths bob | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50052
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23052
 ```
 
 ### 3) `ListLCPPeers` を呼ぶ（manifest 交換の確認）
 
 ```sh
 cd go-lcpd
-./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50052 -o prettyjson
+./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
-`peers[0].remoteManifest.supportedTasks[].llmChat.profile` に `gpt-5.2` が見えれば、Provider がプロファイルを広告できています。
+`peers[0].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` に `gpt-5.2` が見えれば、Provider が model を広告できています。
 
 ### 4) Bob から Alice にジョブを 1 つ送る（Quote → Pay → Result）
 
@@ -203,10 +203,10 @@ cd go-lcpd
 ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 
 ./bin/lcpd-oneshot \
-  -server-addr 127.0.0.1:50052 \
+  -server-addr 127.0.0.1:23052 \
   -peer-id "$ALICE_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word." \
   -timeout 60s
 ```
@@ -223,4 +223,3 @@ ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 ./scripts/devnet down
 rm -rf ./.data/devnet
 ```
-

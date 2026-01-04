@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -71,16 +72,25 @@ func (s *chatSession) Turn(
 	turnCtx, cancel := context.WithTimeout(ctx, s.baseOpts.Timeout)
 	defer cancel()
 
+	requestJSON, err := buildOpenAIChatCompletionsV1RequestJSON(
+		s.baseOpts.Model,
+		prompt,
+		s.baseOpts.TemperatureMilli,
+		s.baseOpts.MaxOutputTokens,
+	)
+	if err != nil {
+		s.history = s.history[:len(s.history)-1]
+		return chatTurnOutput{Trimmed: trimmed}, err
+	}
+
 	quoteResp, err := client.RequestQuote(turnCtx, &lcpdv1.RequestQuoteRequest{
 		PeerId: s.baseOpts.PeerID,
 		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_LlmChat{
-				LlmChat: &lcpdv1.LLMChatTaskSpec{
-					Prompt: prompt,
-					Params: &lcpdv1.LLMChatParams{
-						Profile:          s.baseOpts.Profile,
-						TemperatureMilli: s.baseOpts.TemperatureMilli,
-						MaxOutputTokens:  s.baseOpts.MaxOutputTokens,
+			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+					RequestJson: requestJSON,
+					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+						Model: s.baseOpts.Model,
 					},
 				},
 			},
@@ -115,7 +125,13 @@ func (s *chatSession) Turn(
 		return chatTurnOutput{Trimmed: trimmed}, errors.New("accept and execute: result is nil")
 	}
 
-	reply := normalizeAssistantReply(string(execResp.GetResult().GetResult()))
+	replyBytes := execResp.GetResult().GetResult()
+	reply := strings.TrimSpace(extractAssistantContentFromChatCompletionsResponse(replyBytes))
+	if reply == "" {
+		reply = normalizeAssistantReply(string(replyBytes))
+	} else {
+		reply = normalizeAssistantReply(reply)
+	}
 	reply = strings.TrimRight(reply, "\r\n")
 
 	s.totalMsat += terms.GetPriceMsat()
@@ -129,6 +145,23 @@ func (s *chatSession) Turn(
 	}, nil
 }
 
+func extractAssistantContentFromChatCompletionsResponse(body []byte) string {
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ""
+	}
+	if len(parsed.Choices) == 0 {
+		return ""
+	}
+	return parsed.Choices[0].Message.Content
+}
+
 func (s *chatSession) Run(
 	ctx context.Context,
 	client lcpdClient,
@@ -138,9 +171,9 @@ func (s *chatSession) Run(
 ) error {
 	fmt.Fprintf(
 		out,
-		"chat peer_id=%s profile=%s (Ctrl-D or /exit)\n",
+		"chat peer_id=%s model=%s (Ctrl-D or /exit)\n",
 		s.baseOpts.PeerID,
-		s.baseOpts.Profile,
+		s.baseOpts.Model,
 	)
 
 	if initial := strings.TrimSpace(s.baseOpts.Prompt); initial != "" {

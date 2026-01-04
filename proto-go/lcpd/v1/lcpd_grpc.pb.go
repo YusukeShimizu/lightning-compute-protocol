@@ -15,7 +15,7 @@
 // uses BOLT #1 custom messages carrying TLV streams to negotiate and execute
 // compute jobs (quote → payment → execution → result delivery).
 //
-// This API is designed to be compatible with the LCP v0.1 wire protocol
+// This API is designed to be compatible with the LCP v0.2 wire protocol
 // described in `docs/protocol/protocol.md`.
 
 package lcpdv1

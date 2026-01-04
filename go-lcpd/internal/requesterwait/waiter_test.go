@@ -16,7 +16,7 @@ import (
 func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 	t.Parallel()
 
-	waiter := requesterwait.New(nil)
+	waiter := requesterwait.New(nil, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -24,7 +24,7 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 	msgID := newMsgID(0x22)
 	quote := lcpwire.QuoteResponse{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          123,
@@ -71,7 +71,7 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 func TestWaitQuoteResponse_DeliversError(t *testing.T) {
 	t.Parallel()
 
-	waiter := requesterwait.New(nil)
+	waiter := requesterwait.New(nil, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -80,7 +80,7 @@ func TestWaitQuoteResponse_DeliversError(t *testing.T) {
 	message := "oops"
 	errMsg := lcpwire.Error{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          456,
@@ -122,23 +122,23 @@ func TestWaitQuoteResponse_DeliversError(t *testing.T) {
 	}
 }
 
-func TestWaitResult_ReceivesPendingResult(t *testing.T) {
+func TestWaitResult_ReceivesPendingFailedResult(t *testing.T) {
 	t.Parallel()
 
-	waiter := requesterwait.New(nil)
+	waiter := requesterwait.New(nil, nil)
 
 	jobID := newJobID(0x55)
 	msgID := newMsgID(0x66)
-	contentType := "text/plain; charset=utf-8"
+	msg := "failed"
 	result := lcpwire.Result{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          777,
 		},
-		Result:      []byte("hello"),
-		ContentType: &contentType,
+		Status:  lcpwire.ResultStatusFailed,
+		Message: &msg,
 	}
 	payload, err := lcpwire.EncodeResult(result)
 	if err != nil {
@@ -165,12 +165,15 @@ func TestWaitResult_ReceivesPendingResult(t *testing.T) {
 	if diff := cmp.Diff(result, *out.Result); diff != "" {
 		t.Fatalf("Result mismatch (-want +got):\n%s", diff)
 	}
+	if len(out.ResultBytes) != 0 {
+		t.Fatalf("expected empty result_bytes for failed status, got %d bytes", len(out.ResultBytes))
+	}
 }
 
 func TestWaitResult_CancelThenRetry(t *testing.T) {
 	t.Parallel()
 
-	waiter := requesterwait.New(nil)
+	waiter := requesterwait.New(nil, nil)
 	jobID := newJobID(0x77)
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
@@ -184,14 +187,16 @@ func TestWaitResult_CancelThenRetry(t *testing.T) {
 	}
 
 	msgID := newMsgID(0x88)
+	msg := "cancelled"
 	result := lcpwire.Result{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          1234,
 		},
-		Result: []byte("later"),
+		Status:  lcpwire.ResultStatusCancelled,
+		Message: &msg,
 	}
 	payload, err := lcpwire.EncodeResult(result)
 	if err != nil {
@@ -219,12 +224,12 @@ func TestWaitResult_CancelThenRetry(t *testing.T) {
 func TestWaitQuoteResponse_IgnoresDifferentPeer(t *testing.T) {
 	t.Parallel()
 
-	waiter := requesterwait.New(nil)
+	waiter := requesterwait.New(nil, nil)
 	jobID := newJobID(0x99)
 	msgID := newMsgID(0xaa)
 	quote := lcpwire.QuoteResponse{
 		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV01,
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			JobID:           jobID,
 			MsgID:           msgID,
 			Expiry:          42,

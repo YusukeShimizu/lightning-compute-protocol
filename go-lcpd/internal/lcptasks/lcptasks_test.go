@@ -10,17 +10,17 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestValidateTask_LLMChat(t *testing.T) {
+func TestValidateTask_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
+	requestJSON := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
+
 	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{
-					Profile:          "profile-a",
-					TemperatureMilli: 700,
-					MaxOutputTokens:  256,
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+					Model: "gpt-5.2",
 				},
 			},
 		},
@@ -50,45 +50,105 @@ func TestValidateTask_Errors(t *testing.T) {
 			wantErr: lcptasks.ErrTaskSpecRequired,
 		},
 		{
-			name: "llm_chat spec nil",
+			name: "openai_chat_completions_v1 spec nil",
 			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{},
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{},
 			},
-			wantErr: lcptasks.ErrLLMChatTaskRequired,
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1TaskRequired,
 		},
 		{
-			name: "prompt empty",
+			name: "openai_chat_completions_v1 request_json empty",
 			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Params: &lcpdv1.LLMChatParams{Profile: "profile-a"},
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						Params: &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
 					},
 				},
 			},
-			wantErr: lcptasks.ErrLLMChatPromptRequired,
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1RequestJSONRequired,
 		},
 		{
-			name: "params nil",
+			name: "openai_chat_completions_v1 params nil",
 			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Prompt: "hello",
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"model":"gpt-5.2"}`),
 					},
 				},
 			},
-			wantErr: lcptasks.ErrLLMChatParamsRequired,
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1ParamsRequired,
 		},
 		{
-			name: "profile empty",
+			name: "openai_chat_completions_v1 params.model empty",
 			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Prompt: "hello",
-						Params: &lcpdv1.LLMChatParams{},
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"model":"gpt-5.2"}`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{},
 					},
 				},
 			},
-			wantErr: lcptasks.ErrLLMChatProfileRequired,
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1ModelRequired,
+		},
+		{
+			name: "openai_chat_completions_v1 request_json invalid json",
+			task: &lcpdv1.Task{
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
+					},
+				},
+			},
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1RequestJSONInvalid,
+		},
+		{
+			name: "openai_chat_completions_v1 request_json stream true",
+			task: &lcpdv1.Task{
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"model":"gpt-5.2","stream":true}`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
+					},
+				},
+			},
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1StreamingUnsupported,
+		},
+		{
+			name: "openai_chat_completions_v1 request_json model missing",
+			task: &lcpdv1.Task{
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"stream":false}`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
+					},
+				},
+			},
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1RequestModelRequired,
+		},
+		{
+			name: "openai_chat_completions_v1 request_json messages missing",
+			task: &lcpdv1.Task{
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"model":"gpt-5.2"}`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
+					},
+				},
+			},
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1RequestMessagesRequired,
+		},
+		{
+			name: "openai_chat_completions_v1 model mismatch",
+			task: &lcpdv1.Task{
+				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+						RequestJson: []byte(`{"model":"gpt-5.2","messages":[{}]}`),
+						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "other"},
+					},
+				},
+			},
+			wantErr: lcptasks.ErrOpenAIChatCompletionsV1ModelMismatch,
 		},
 	}
 
@@ -104,18 +164,15 @@ func TestValidateTask_Errors(t *testing.T) {
 	}
 }
 
-func TestToWireQuoteRequestTask_LLMChat(t *testing.T) {
+func TestToWireQuoteRequestTask_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
+	requestJSON := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
 	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello, world",
-				Params: &lcpdv1.LLMChatParams{
-					Profile:          "profile-a",
-					TemperatureMilli: 700,
-					MaxOutputTokens:  256,
-				},
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
 			},
 		},
 	}
@@ -125,83 +182,45 @@ func TestToWireQuoteRequestTask_LLMChat(t *testing.T) {
 		t.Fatalf("ToWireQuoteRequestTask: %v", err)
 	}
 
-	tempMilli := uint32(700)
-	maxTokens := uint32(256)
-	wantParams := lcpwire.LLMChatParams{
-		Profile:          "profile-a",
-		TemperatureMilli: &tempMilli,
-		MaxOutputTokens:  &maxTokens,
+	if diff := cmp.Diff(lcptasks.TaskKindOpenAIChatCompletionsV1, got.TaskKind); diff != "" {
+		t.Fatalf("TaskKind mismatch (-want +got):\n%s", diff)
 	}
-	wantParamsBytes, err := lcpwire.EncodeLLMChatParams(wantParams)
+
+	decoded, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(got.ParamsBytes)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("DecodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 
-	want := lcptasks.QuoteRequestTask{
-		TaskKind:      lcptasks.TaskKindLLMChat,
-		Input:         []byte("hello, world"),
-		ParamsBytes:   wantParamsBytes,
-		LLMChatParams: &wantParams,
-	}
-
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("wire task mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestToWireQuoteRequestTask_OmitsZeroOptionalParams(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "zero optional",
-				Params: &lcpdv1.LLMChatParams{
-					Profile: "profile-b",
-				},
-			},
-		},
-	}
-
-	got, err := lcptasks.ToWireQuoteRequestTask(task)
-	if err != nil {
-		t.Fatalf("ToWireQuoteRequestTask: %v", err)
-	}
-
-	if got.LLMChatParams == nil {
-		t.Fatalf("LLMChatParams is nil")
-	}
-
-	wantParams := lcpwire.LLMChatParams{
-		Profile: "profile-b",
-	}
-
-	if diff := cmp.Diff(wantParams, *got.LLMChatParams); diff != "" {
-		t.Fatalf("LLMChatParams mismatch (-want +got):\n%s", diff)
-	}
-
-	decoded, err := lcpwire.DecodeLLMChatParams(got.ParamsBytes)
-	if err != nil {
-		t.Fatalf("DecodeLLMChatParams: %v", err)
-	}
+	wantParams := lcpwire.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"}
 	if diff := cmp.Diff(wantParams, decoded); diff != "" {
-		t.Fatalf("encoded params mismatch (-want +got):\n%s", diff)
+		t.Fatalf("params mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestToWireQuoteRequestTask_ValidationError(t *testing.T) {
+func TestToWireInputStream_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
+	requestJSON := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
 	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Params: &lcpdv1.LLMChatParams{Profile: "profile-c"},
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
 			},
 		},
 	}
 
-	_, err := lcptasks.ToWireQuoteRequestTask(task)
-	if !errors.Is(err, lcptasks.ErrLLMChatPromptRequired) {
-		t.Fatalf("expected prompt validation error, got %v", err)
+	got, err := lcptasks.ToWireInputStream(task)
+	if err != nil {
+		t.Fatalf("ToWireInputStream: %v", err)
+	}
+
+	want := lcptasks.InputStream{
+		DecodedBytes:    requestJSON,
+		ContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
+		ContentEncoding: lcptasks.ContentEncodingIdentity,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("input stream mismatch (-want +got):\n%s", diff)
 	}
 }

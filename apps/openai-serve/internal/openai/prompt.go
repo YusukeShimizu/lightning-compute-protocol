@@ -15,24 +15,37 @@ func BuildPrompt(messages []ChatMessage) (string, error) {
 	var convoLines []string
 
 	for i, m := range messages {
-		role := strings.ToLower(strings.TrimSpace(m.Role))
+		roleRaw := strings.TrimSpace(m.Role)
+		role := strings.ToLower(roleRaw)
 		content := strings.TrimSpace(string(m.Content))
 		if role == "" {
 			return "", fmt.Errorf("messages[%d].role is required", i)
 		}
 		if content == "" {
-			return "", fmt.Errorf("messages[%d].content is required", i)
+			continue
 		}
 
 		switch role {
-		case "system":
+		case "system", "developer":
 			systemParts = append(systemParts, content)
 		case "user":
 			convoLines = append(convoLines, fmt.Sprintf("User: %s", content))
 		case "assistant":
 			convoLines = append(convoLines, fmt.Sprintf("Assistant: %s", content))
+		case "tool":
+			if name := strings.TrimSpace(m.Name); name != "" {
+				convoLines = append(convoLines, fmt.Sprintf("Tool(%s): %s", name, content))
+			} else {
+				convoLines = append(convoLines, fmt.Sprintf("Tool: %s", content))
+			}
+		case "function":
+			if name := strings.TrimSpace(m.Name); name != "" {
+				convoLines = append(convoLines, fmt.Sprintf("Function(%s): %s", name, content))
+			} else {
+				convoLines = append(convoLines, fmt.Sprintf("Function: %s", content))
+			}
 		default:
-			return "", fmt.Errorf("unsupported messages[%d].role: %q", i, m.Role)
+			convoLines = append(convoLines, fmt.Sprintf("%s: %s", roleRaw, content))
 		}
 	}
 

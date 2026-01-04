@@ -44,6 +44,17 @@ func (h *Handler) HandleInboundCustomMessage(
 		if h.requester != nil {
 			h.requester.HandleInboundCustomMessage(ctx, msg)
 		}
+	case lcpwire.MessageTypeStreamBegin,
+		lcpwire.MessageTypeStreamChunk,
+		lcpwire.MessageTypeStreamEnd:
+		// Stream messages are dispatched to both sides. Each subsystem is
+		// responsible for ignoring streams that do not match its expected state.
+		if h.provider != nil {
+			h.provider.HandleInboundCustomMessage(ctx, msg)
+		}
+		if h.requester != nil {
+			h.requester.HandleInboundCustomMessage(ctx, msg)
+		}
 	case lcpwire.MessageTypeManifest:
 		return
 	default:

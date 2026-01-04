@@ -65,10 +65,11 @@ func TestHandler_quotePrice_AppliesInFlightSurge(t *testing.T) {
 	handler.inFlight = 5
 	handler.jobMu.Unlock()
 
-	req := newLLMChatQuoteRequest("gpt-5.2")
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2")
 
-	base := mustQuotePriceForPrompt(t, policy, estimator, "gpt-5.2", req.Input).PriceMsat
-	got, err := handler.quotePrice(req)
+	inputBytes := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"prompt"}]}`)
+	base := mustQuotePriceForPrompt(t, policy, estimator, "gpt-5.2", inputBytes).PriceMsat
+	got, err := handler.quotePrice(req, inputBytes)
 	if err != nil {
 		t.Fatalf("quotePrice: %v", err)
 	}

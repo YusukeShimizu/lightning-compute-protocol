@@ -146,11 +146,13 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 	quoteReq := &lcpdv1.RequestQuoteRequest{
 		PeerId: bobPubKey,
 		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_LlmChat{
-				LlmChat: &lcpdv1.LLMChatTaskSpec{
-					Prompt: "hello from grpc requester",
-					Params: &lcpdv1.LLMChatParams{
-						Profile: "gpt-5.2",
+			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+					RequestJson: []byte(
+						`{"model":"gpt-5.2","messages":[{"role":"user","content":"hello from grpc requester"}]}`,
+					),
+					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+						Model: "gpt-5.2",
 					},
 				},
 			},
@@ -190,6 +192,10 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToWireQuoteRequestTask: %v", err)
 	}
+	inputStream, err := lcptasks.ToWireInputStream(quoteReq.GetTask())
+	if err != nil {
+		t.Fatalf("ToWireInputStream: %v", err)
+	}
 
 	wantTermsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: uint16(terms.GetProtocolVersion()),
@@ -197,9 +203,11 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 		PriceMsat:       terms.GetPriceMsat(),
 		QuoteExpiry:     uint64(terms.GetQuoteExpiry().GetSeconds()),
 	}, protocolcompat.TermsCommit{
-		TaskKind: wireTask.TaskKind,
-		Input:    wireTask.Input,
-		Params:   wireTask.ParamsBytes,
+		TaskKind:             wireTask.TaskKind,
+		Input:                inputStream.DecodedBytes,
+		InputContentType:     inputStream.ContentType,
+		InputContentEncoding: inputStream.ContentEncoding,
+		Params:               wireTask.ParamsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
@@ -269,7 +277,7 @@ func writeProviderConfig(
 	t *testing.T,
 	path string,
 	enabled bool,
-	supportedProfiles []string,
+	supportedModels []string,
 ) {
 	t.Helper()
 
@@ -281,12 +289,12 @@ func writeProviderConfig(
 	} else {
 		builder.WriteString("enabled: false\n")
 	}
-	if len(supportedProfiles) > 0 {
+	if len(supportedModels) > 0 {
 		builder.WriteString("llm:\n")
-		builder.WriteString("  chat_profiles:\n")
-		for _, profile := range supportedProfiles {
+		builder.WriteString("  models:\n")
+		for _, model := range supportedModels {
 			builder.WriteString("    ")
-			builder.WriteString(profile)
+			builder.WriteString(model)
 			builder.WriteString(": {}\n")
 		}
 	}

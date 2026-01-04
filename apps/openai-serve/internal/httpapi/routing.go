@@ -73,10 +73,10 @@ func (s *Server) resolvePeerID(model string, peersResp *lcpdv1.ListLCPPeersRespo
 	for _, p := range peersResp.GetPeers() {
 		manifest := p.GetRemoteManifest()
 		for _, tmpl := range manifest.GetSupportedTasks() {
-			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_LLM_CHAT {
+			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 {
 				continue
 			}
-			if tmpl.GetLlmChat().GetProfile() == model {
+			if tmpl.GetOpenaiChatCompletionsV1().GetModel() == model {
 				return p.GetPeerId(), nil
 			}
 		}
@@ -98,14 +98,14 @@ func collectModelsFromPeers(resp *lcpdv1.ListLCPPeersResponse) map[string]struct
 	out := make(map[string]struct{})
 	for _, p := range resp.GetPeers() {
 		for _, tmpl := range p.GetRemoteManifest().GetSupportedTasks() {
-			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_LLM_CHAT {
+			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 {
 				continue
 			}
-			profile := strings.TrimSpace(tmpl.GetLlmChat().GetProfile())
-			if profile == "" {
+			model := strings.TrimSpace(tmpl.GetOpenaiChatCompletionsV1().GetModel())
+			if model == "" {
 				continue
 			}
-			out[profile] = struct{}{}
+			out[model] = struct{}{}
 		}
 	}
 

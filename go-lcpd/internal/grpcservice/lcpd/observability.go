@@ -3,6 +3,7 @@ package lcpd
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
@@ -14,14 +15,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const taskKindLLMChat = "llm.chat"
+const taskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
 
 type taskLogSummary struct {
-	taskKind         string
-	profile          string
-	promptBytes      int
-	maxOutputTokens  uint32
-	temperatureMilli uint32
+	taskKind        string
+	model           string
+	requestBytes    int
+	maxOutputTokens uint32
 }
 
 func summarizeTask(task *lcpdv1.Task) taskLogSummary {
@@ -29,18 +29,43 @@ func summarizeTask(task *lcpdv1.Task) taskLogSummary {
 		return taskLogSummary{}
 	}
 
-	chat := task.GetLlmChat()
-	if chat == nil {
+	spec := task.GetOpenaiChatCompletionsV1()
+	if spec == nil {
 		return taskLogSummary{}
 	}
 
-	return taskLogSummary{
-		taskKind:         taskKindLLMChat,
-		profile:          chat.GetParams().GetProfile(),
-		promptBytes:      len(chat.GetPrompt()),
-		maxOutputTokens:  chat.GetParams().GetMaxOutputTokens(),
-		temperatureMilli: chat.GetParams().GetTemperatureMilli(),
+	model := ""
+	if params := spec.GetParams(); params != nil {
+		model = params.GetModel()
 	}
+
+	return taskLogSummary{
+		taskKind:        taskKindOpenAIChatCompletionsV1,
+		model:           model,
+		requestBytes:    len(spec.GetRequestJson()),
+		maxOutputTokens: maxOutputTokensFromOpenAIChatCompletionsRequestJSON(spec.GetRequestJson()),
+	}
+}
+
+func maxOutputTokensFromOpenAIChatCompletionsRequestJSON(b []byte) uint32 {
+	var parsed struct {
+		MaxCompletionTokens *uint32 `json:"max_completion_tokens,omitempty"`
+		MaxTokens           *uint32 `json:"max_tokens,omitempty"`
+		MaxOutputTokens     *uint32 `json:"max_output_tokens,omitempty"`
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		return 0
+	}
+	if parsed.MaxCompletionTokens != nil {
+		return *parsed.MaxCompletionTokens
+	}
+	if parsed.MaxTokens != nil {
+		return *parsed.MaxTokens
+	}
+	if parsed.MaxOutputTokens != nil {
+		return *parsed.MaxOutputTokens
+	}
+	return 0
 }
 
 func (s *Service) summarizeStoredTask(peerID string, jobID lcp.JobID) taskLogSummary {
@@ -74,10 +99,9 @@ func (s *Service) logQuoteReceived(
 		"peer_id", peerID,
 		"job_id", jobID.String(),
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
-		"prompt_bytes", summary.promptBytes,
+		"model", summary.model,
+		"request_bytes", summary.requestBytes,
 		"max_output_tokens", summary.maxOutputTokens,
-		"temperature_milli", summary.temperatureMilli,
 		"payload_bytes", payloadBytes,
 		"price_msat", terms.GetPriceMsat(),
 		"quote_expiry_unix", unixSeconds(terms.GetQuoteExpiry()),
@@ -108,10 +132,9 @@ func (s *Service) logResultReceived(
 		"peer_id", peerID,
 		"job_id", jobID.String(),
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
-		"prompt_bytes", summary.promptBytes,
+		"model", summary.model,
+		"request_bytes", summary.requestBytes,
 		"max_output_tokens", summary.maxOutputTokens,
-		"temperature_milli", summary.temperatureMilli,
 		"price_msat", terms.GetPriceMsat(),
 		"quote_expiry_unix", unixSeconds(terms.GetQuoteExpiry()),
 		"terms_hash", hex.EncodeToString(terms.GetTermsHash()),
@@ -137,7 +160,7 @@ func (s *Service) requestQuoteWaiterError(
 		"job_id", jobID.String(),
 		"grpc_code", status.Code(st),
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
+		"model", summary.model,
 	)
 	return st
 }
@@ -155,7 +178,7 @@ func (s *Service) requestQuoteLCPError(
 		"job_id", jobID.String(),
 		"grpc_code", codes.FailedPrecondition,
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
+		"model", summary.model,
 		"lcp_error_code", lcpErr.Code,
 	)
 	return grpcStatusFromLCPError(*lcpErr)
@@ -175,7 +198,7 @@ func (s *Service) acceptAndExecuteVerifyError(
 			"job_id", jobID.String(),
 			"grpc_code", st.Code(),
 			"task_kind", summary.taskKind,
-			"profile", summary.profile,
+			"model", summary.model,
 		)
 	}
 	return verifyErr
@@ -196,7 +219,7 @@ func (s *Service) acceptAndExecuteLightningError(
 		"job_id", jobID.String(),
 		"grpc_code", status.Code(st),
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
+		"model", summary.model,
 	)
 	return st
 }
@@ -216,7 +239,7 @@ func (s *Service) acceptAndExecuteWaiterError(
 		"job_id", jobID.String(),
 		"grpc_code", status.Code(st),
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
+		"model", summary.model,
 	)
 	return st
 }
@@ -234,7 +257,7 @@ func (s *Service) acceptAndExecuteLCPError(
 		"job_id", jobID.String(),
 		"grpc_code", codes.FailedPrecondition,
 		"task_kind", summary.taskKind,
-		"profile", summary.profile,
+		"model", summary.model,
 		"lcp_error_code", lcpErr.Code,
 	)
 	return grpcStatusFromLCPError(*lcpErr)

@@ -2,6 +2,7 @@ package requesterwait
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"sync"
 
@@ -17,8 +18,14 @@ type QuoteOutcome struct {
 }
 
 type ResultOutcome struct {
+	// Result is the decoded terminal `lcp_result`.
 	Result *lcpwire.Result
-	Error  *lcpwire.Error
+
+	// ResultBytes is the reconstructed decoded bytes from the validated result
+	// stream. It is set iff Result.Status == ok.
+	ResultBytes []byte
+
+	Error *lcpwire.Error
 }
 
 var (
@@ -41,21 +48,62 @@ type entry struct {
 	resultOutcome   *ResultOutcome
 	resultDelivered bool
 	resultCh        chan ResultOutcome
+
+	// Result stream reassembly state (v0.2).
+	resultStream      *streamState
+	terminalResult    *lcpwire.Result
+	terminalDelivered bool
 }
 
 type Waiter struct {
 	mu      sync.Mutex
 	entries map[key]*entry
 	logger  *zap.SugaredLogger
+
+	maxStreamBytes uint64
+	maxJobBytes    uint64
 }
 
-func New(logger *zap.SugaredLogger) *Waiter {
+const (
+	defaultMaxStreamBytes = uint64(4_194_304)
+	defaultMaxJobBytes    = uint64(8_388_608)
+)
+
+type streamState struct {
+	streamID        lcp.Hash32
+	contentType     string
+	contentEncoding string
+
+	expectedSeq uint32
+	buf         []byte
+
+	beginTotalLen *uint64
+	beginSHA256   *lcp.Hash32
+
+	done bool
+}
+
+func New(logger *zap.SugaredLogger, localManifest *lcpwire.Manifest) *Waiter {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
+
+	maxStreamBytes := defaultMaxStreamBytes
+	maxJobBytes := defaultMaxJobBytes
+	if localManifest != nil {
+		if localManifest.MaxStreamBytes != 0 {
+			maxStreamBytes = localManifest.MaxStreamBytes
+		}
+		if localManifest.MaxJobBytes != 0 {
+			maxJobBytes = localManifest.MaxJobBytes
+		}
+	}
+
 	return &Waiter{
-		entries: make(map[key]*entry),
-		logger:  logger.With("component", "requesterwait"),
+		entries:        make(map[key]*entry),
+		logger:         logger.With("component", "requesterwait"),
+		maxStreamBytes: maxStreamBytes,
+		maxJobBytes:    maxJobBytes,
 	}
 }
 
@@ -111,13 +159,34 @@ func (w *Waiter) HandleInboundCustomMessage(
 			return
 		}
 		w.deliverQuoteResponse(msg.PeerPubKey, resp)
+	case lcpwire.MessageTypeStreamBegin:
+		begin, err := lcpwire.DecodeStreamBegin(msg.Payload)
+		if err != nil {
+			w.logger.Debugw("decode lcp_stream_begin failed", "err", err)
+			return
+		}
+		w.handleStreamBegin(msg.PeerPubKey, begin)
+	case lcpwire.MessageTypeStreamChunk:
+		chunk, err := lcpwire.DecodeStreamChunk(msg.Payload)
+		if err != nil {
+			w.logger.Debugw("decode lcp_stream_chunk failed", "err", err)
+			return
+		}
+		w.handleStreamChunk(msg.PeerPubKey, chunk)
+	case lcpwire.MessageTypeStreamEnd:
+		end, err := lcpwire.DecodeStreamEnd(msg.Payload)
+		if err != nil {
+			w.logger.Debugw("decode lcp_stream_end failed", "err", err)
+			return
+		}
+		w.handleStreamEnd(msg.PeerPubKey, end)
 	case lcpwire.MessageTypeResult:
 		res, err := lcpwire.DecodeResult(msg.Payload)
 		if err != nil {
 			w.logger.Debugw("decode lcp_result failed", "err", err)
 			return
 		}
-		w.deliverResult(msg.PeerPubKey, res)
+		w.handleTerminalResult(msg.PeerPubKey, res)
 	case lcpwire.MessageTypeError:
 		errMsg, err := lcpwire.DecodeError(msg.Payload)
 		if err != nil {
@@ -133,6 +202,238 @@ func (w *Waiter) HandleInboundCustomMessage(
 		// ignore other message types
 		return
 	}
+}
+
+func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
+	if begin.Kind != lcpwire.StreamKindResult {
+		return
+	}
+	if begin.ContentEncoding != "identity" {
+		w.deliverProtocolError(
+			peerID,
+			begin.Envelope,
+			lcpwire.ErrorCodeUnsupportedEncoding,
+			"unsupported content_encoding",
+		)
+		return
+	}
+
+	if begin.TotalLen != nil {
+		if *begin.TotalLen > w.maxStreamBytes || *begin.TotalLen > w.maxJobBytes {
+			w.deliverProtocolError(
+				peerID,
+				begin.Envelope,
+				lcpwire.ErrorCodePayloadTooLarge,
+				"result stream exceeds local limits",
+			)
+			return
+		}
+	}
+
+	k := key{peerID: peerID, jobID: begin.Envelope.JobID}
+
+	w.mu.Lock()
+	e := w.ensureEntryLocked(k)
+	if e.resultStream != nil && !e.resultStream.done {
+		// Ignore duplicate begin; the stream is already in progress.
+		w.mu.Unlock()
+		return
+	}
+
+	e.resultStream = &streamState{
+		streamID:        begin.StreamID,
+		contentType:     begin.ContentType,
+		contentEncoding: begin.ContentEncoding,
+		expectedSeq:     0,
+		buf:             nil,
+		beginTotalLen:   begin.TotalLen,
+		beginSHA256:     begin.SHA256,
+		done:            false,
+	}
+	w.mu.Unlock()
+}
+
+func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
+	k := key{peerID: peerID, jobID: chunk.Envelope.JobID}
+
+	w.mu.Lock()
+	e := w.ensureEntryLocked(k)
+	st := e.resultStream
+	if st == nil || st.done {
+		w.mu.Unlock()
+		return
+	}
+	if st.streamID != chunk.StreamID {
+		// Ignore chunks for unknown streams.
+		w.mu.Unlock()
+		return
+	}
+
+	// Enforce ordering (duplicates are ignored).
+	if chunk.Seq < st.expectedSeq {
+		w.mu.Unlock()
+		return
+	}
+	if chunk.Seq > st.expectedSeq {
+		env := chunk.Envelope
+		w.mu.Unlock()
+		w.deliverProtocolError(peerID, env, lcpwire.ErrorCodeChunkOutOfOrder, "chunk out of order")
+		return
+	}
+
+	nextLen := uint64(len(st.buf)) + uint64(len(chunk.Data))
+	if nextLen > w.maxStreamBytes || nextLen > w.maxJobBytes {
+		env := chunk.Envelope
+		w.mu.Unlock()
+		w.deliverProtocolError(peerID, env, lcpwire.ErrorCodePayloadTooLarge, "result stream exceeds local limits")
+		return
+	}
+
+	st.buf = append(st.buf, chunk.Data...)
+	st.expectedSeq++
+	w.mu.Unlock()
+}
+
+func (w *Waiter) handleStreamEnd(peerID string, end lcpwire.StreamEnd) {
+	k := key{peerID: peerID, jobID: end.Envelope.JobID}
+
+	w.mu.Lock()
+	e := w.ensureEntryLocked(k)
+	st := e.resultStream
+	if st == nil || st.done {
+		w.mu.Unlock()
+		return
+	}
+	if st.streamID != end.StreamID {
+		w.mu.Unlock()
+		return
+	}
+
+	// Copy bytes for validation outside the lock.
+	bufCopy := append([]byte(nil), st.buf...)
+	contentType := st.contentType
+	contentEncoding := st.contentEncoding
+	st.done = true
+	w.mu.Unlock()
+
+	if uint64(len(bufCopy)) != end.TotalLen {
+		w.deliverProtocolError(peerID, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream total_len mismatch")
+		return
+	}
+
+	sum := sha256Sum(bufCopy)
+	if sum != end.SHA256 {
+		w.deliverProtocolError(peerID, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream sha256 mismatch")
+		return
+	}
+
+	w.mu.Lock()
+	// Re-check entry and attempt completion with terminal result if present.
+	e = w.ensureEntryLocked(k)
+	terminal := e.terminalResult
+	w.mu.Unlock()
+
+	if terminal != nil {
+		w.tryDeliverResult(peerID, *terminal, bufCopy, contentType, contentEncoding)
+	}
+}
+
+func (w *Waiter) handleTerminalResult(peerID string, res lcpwire.Result) {
+	k := key{peerID: peerID, jobID: res.Envelope.JobID}
+
+	w.mu.Lock()
+	e := w.ensureEntryLocked(k)
+	if e.terminalDelivered {
+		w.mu.Unlock()
+		return
+	}
+	rCopy := cloneTerminalResult(res)
+	e.terminalResult = rCopy
+	e.terminalDelivered = true
+
+	st := e.resultStream
+	var (
+		streamDone bool
+		streamBuf  []byte
+		ct         string
+		ce         string
+	)
+	if st != nil && st.done {
+		streamDone = true
+		streamBuf = append([]byte(nil), st.buf...)
+		ct = st.contentType
+		ce = st.contentEncoding
+	}
+	w.mu.Unlock()
+
+	if res.Status != lcpwire.ResultStatusOK {
+		w.deliverResult(peerID, res, nil)
+		return
+	}
+
+	if !streamDone {
+		// Wait for stream_end before delivering status=ok.
+		return
+	}
+
+	w.tryDeliverResult(peerID, res, streamBuf, ct, ce)
+}
+
+func (w *Waiter) tryDeliverResult(
+	peerID string,
+	terminal lcpwire.Result,
+	resultBytes []byte,
+	streamContentType string,
+	streamContentEncoding string,
+) {
+	if terminal.Status != lcpwire.ResultStatusOK || terminal.OK == nil {
+		w.deliverResult(peerID, terminal, resultBytes)
+		return
+	}
+
+	sum := sha256Sum(resultBytes)
+	if sum != terminal.OK.ResultHash {
+		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_hash mismatch")
+		return
+	}
+	if uint64(len(resultBytes)) != terminal.OK.ResultLen {
+		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_len mismatch")
+		return
+	}
+	if streamContentType != "" && streamContentType != terminal.OK.ResultContentType {
+		w.deliverProtocolError(
+			peerID,
+			terminal.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"result_content_type mismatch",
+		)
+		return
+	}
+	if streamContentEncoding != "" && streamContentEncoding != terminal.OK.ResultContentEncoding {
+		w.deliverProtocolError(
+			peerID,
+			terminal.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"result_content_encoding mismatch",
+		)
+		return
+	}
+
+	w.deliverResult(peerID, terminal, resultBytes)
+}
+
+func (w *Waiter) deliverProtocolError(
+	peerID string,
+	env lcpwire.JobEnvelope,
+	code lcpwire.ErrorCode,
+	message string,
+) {
+	msg := message
+	w.deliverError(peerID, lcpwire.Error{
+		Envelope: env,
+		Code:     code,
+		Message:  &msg,
+	})
 }
 
 func waitOutcome[T any](
@@ -222,9 +523,13 @@ func (w *Waiter) deliverQuoteResponse(peerID string, resp lcpwire.QuoteResponse)
 	}
 }
 
-func (w *Waiter) deliverResult(peerID string, res lcpwire.Result) {
+func (w *Waiter) deliverResult(peerID string, res lcpwire.Result, resultBytes []byte) {
 	k := key{peerID: peerID, jobID: res.Envelope.JobID}
-	out := ResultOutcome{Result: cloneResult(res)}
+
+	out := ResultOutcome{
+		Result:      cloneTerminalResult(res),
+		ResultBytes: append([]byte(nil), resultBytes...),
+	}
 
 	var ch chan ResultOutcome
 
@@ -289,18 +594,6 @@ func cloneQuoteResponse(in lcpwire.QuoteResponse) *lcpwire.QuoteResponse {
 	return &c
 }
 
-func cloneResult(in lcpwire.Result) *lcpwire.Result {
-	c := in
-	if len(in.Result) > 0 {
-		c.Result = append([]byte(nil), in.Result...)
-	}
-	if in.ContentType != nil {
-		ct := *in.ContentType
-		c.ContentType = &ct
-	}
-	return &c
-}
-
 func cloneError(in lcpwire.Error) *lcpwire.Error {
 	c := in
 	if in.Message != nil {
@@ -311,3 +604,21 @@ func cloneError(in lcpwire.Error) *lcpwire.Error {
 }
 
 var _ lndpeermsg.InboundMessageHandler = (*Waiter)(nil)
+
+func cloneTerminalResult(in lcpwire.Result) *lcpwire.Result {
+	c := in
+	if in.OK != nil {
+		okCopy := *in.OK
+		c.OK = &okCopy
+	}
+	if in.Message != nil {
+		msg := *in.Message
+		c.Message = &msg
+	}
+	return &c
+}
+
+func sha256Sum(b []byte) lcp.Hash32 {
+	sum := sha256.Sum256(b)
+	return lcp.Hash32(sum)
+}

@@ -78,7 +78,7 @@ func TestHandler_DispatchesPerSpec(t *testing.T) {
 		},
 		{
 			name:          "unknown odd -> nobody",
-			msgType:       uint16(lcpwire.MessageTypeManifest + 8),
+			msgType:       uint16(lcpwire.MessageTypeError + 2),
 			wantProvider:  0,
 			wantRequester: 0,
 		},

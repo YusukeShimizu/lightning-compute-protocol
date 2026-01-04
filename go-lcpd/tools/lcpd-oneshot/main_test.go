@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -23,7 +25,7 @@ func TestRunPipeline_RequestQuoteOnly(t *testing.T) {
 
 	opts := runOptions{
 		PeerID:           strings.Repeat("a", 66),
-		Profile:          "gpt-5.2",
+		Model:            "gpt-5.2",
 		TemperatureMilli: 700,
 		MaxOutputTokens:  256,
 		PayInvoice:       false,
@@ -45,25 +47,56 @@ func TestRunPipeline_RequestQuoteOnly(t *testing.T) {
 	if diff := cmp.Diff(opts.PeerID, fake.requestQuoteReq.GetPeerId()); diff != "" {
 		t.Fatalf("peer_id mismatch (-want +got):\n%s", diff)
 	}
-	llmChat := fake.requestQuoteReq.GetTask().GetLlmChat()
-	if llmChat == nil {
-		t.Fatalf("task.llm_chat is nil")
+	openaiTask := fake.requestQuoteReq.GetTask().GetOpenaiChatCompletionsV1()
+	if openaiTask == nil {
+		t.Fatalf("task.openai_chat_completions_v1 is nil")
 	}
-	if diff := cmp.Diff(opts.Prompt, llmChat.GetPrompt()); diff != "" {
-		t.Fatalf("prompt mismatch (-want +got):\n%s", diff)
-	}
-	params := llmChat.GetParams()
+	params := openaiTask.GetParams()
 	if params == nil {
-		t.Fatalf("task.llm_chat.params is nil")
+		t.Fatalf("task.openai_chat_completions_v1.params is nil")
 	}
-	if diff := cmp.Diff(opts.Profile, params.GetProfile()); diff != "" {
-		t.Fatalf("profile mismatch (-want +got):\n%s", diff)
+
+	if diff := cmp.Diff(opts.Model, params.GetModel()); diff != "" {
+		t.Fatalf("params.model mismatch (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(opts.TemperatureMilli, params.GetTemperatureMilli()); diff != "" {
-		t.Fatalf("temperature_milli mismatch (-want +got):\n%s", diff)
+
+	var req struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Temperature *float64 `json:"temperature,omitempty"`
+		MaxTokens   *uint32  `json:"max_tokens,omitempty"`
 	}
-	if diff := cmp.Diff(opts.MaxOutputTokens, params.GetMaxOutputTokens()); diff != "" {
-		t.Fatalf("max_output_tokens mismatch (-want +got):\n%s", diff)
+	if unmarshalErr := json.Unmarshal(openaiTask.GetRequestJson(), &req); unmarshalErr != nil {
+		t.Fatalf("unmarshal request_json: %v", unmarshalErr)
+	}
+	if diff := cmp.Diff(opts.Model, req.Model); diff != "" {
+		t.Fatalf("request_json.model mismatch (-want +got):\n%s", diff)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("request_json.messages length mismatch: got %d want 1", len(req.Messages))
+	}
+	if diff := cmp.Diff("user", req.Messages[0].Role); diff != "" {
+		t.Fatalf("request_json.messages[0].role mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(opts.Prompt, req.Messages[0].Content); diff != "" {
+		t.Fatalf("request_json.messages[0].content mismatch (-want +got):\n%s", diff)
+	}
+
+	if req.Temperature == nil {
+		t.Fatalf("request_json.temperature is nil")
+	}
+	if got, want := *req.Temperature, 0.7; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("request_json.temperature mismatch: got %v want %v", got, want)
+	}
+
+	if req.MaxTokens == nil {
+		t.Fatalf("request_json.max_tokens is nil")
+	}
+	if diff := cmp.Diff(opts.MaxOutputTokens, *req.MaxTokens); diff != "" {
+		t.Fatalf("request_json.max_tokens mismatch (-want +got):\n%s", diff)
 	}
 
 	if res.Terms == nil {
@@ -84,7 +117,7 @@ func TestRunPipeline_RequestQuoteAndAcceptAndExecute(t *testing.T) {
 
 	opts := runOptions{
 		PeerID:           strings.Repeat("b", 66),
-		Profile:          "gpt-5.2",
+		Model:            "gpt-5.2",
 		TemperatureMilli: 0,
 		MaxOutputTokens:  0,
 		PayInvoice:       true,
@@ -231,7 +264,7 @@ func (f *fakeClient) RequestQuote(
 	f.requestQuoteReq = req
 
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           bytes.Repeat([]byte{0x01}, 32),
 		PriceMsat:       1500,
 		TermsHash:       bytes.Repeat([]byte{0x02}, 32),

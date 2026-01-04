@@ -91,6 +91,13 @@ func Start(ctx context.Context, t *testing.T, cfg RunConfig) *Handle {
 
 	env := []string{
 		"LCPD_BACKEND=" + backend,
+		// Ensure the started process is hermetic and not influenced by the
+		// developer's local LND_* env vars (which would break E2E expectations).
+		"LCPD_LND_RPC_ADDR=",
+		"LCPD_LND_TLS_CERT_PATH=",
+		"LCPD_LND_ADMIN_MACAROON_PATH=",
+		"LCPD_LND_MACAROON_PATH=",
+		"LCPD_LND_MANIFEST_RESEND_INTERVAL=",
 	}
 	if cfg.DeterministicB64 != "" {
 		env = append(env, "LCPD_DETERMINISTIC_OUTPUT_BASE64="+cfg.DeterministicB64)

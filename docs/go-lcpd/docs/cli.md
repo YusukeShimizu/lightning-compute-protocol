@@ -30,9 +30,9 @@ All command examples below use:
 - `lcpd-grpcd` serves plaintext gRPC (no TLS, no auth). Bind to `127.0.0.1` or protect it via SSH/VPN/reverse-proxy if you must access it remotely.
 - `AcceptAndExecute` pays a BOLT11 invoice via your `lnd`. On mainnet this spends real funds. Start with regtest and use small amounts.
 - LCP messaging requires an active Lightning peer connection to the Provider, and the Provider must support LCP (manifest observed).
-- The only supported task type is `llm.chat`.
+- The only supported task type is `openai.chat_completions.v1` (raw OpenAI-compatible request/response JSON bytes passthrough).
 - Quote execution is time-bounded by `terms.quoteExpiry`; calls after expiry are expected to fail.
-- LCP peer messaging enforces payload limits (`max_payload_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes.
+- LCP peer messaging enforces payload/stream limits (`max_payload_bytes`, `max_stream_bytes`, `max_job_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes payload, `4 MiB` stream, `8 MiB` job.
 - `job_id` CLI flags are base64 (proto `bytes`), matching protojson encoding.
 - `lcpdctl --timeout` is a dial timeout (not an RPC deadline). Cancel long-running RPCs with Ctrl-C, or use `lcpd-oneshot -timeout ...` for an overall deadline.
 
@@ -84,7 +84,7 @@ This starts the daemon, but LCP peer operations (`ListLCPPeers`, `RequestQuote`,
 
 Defaults:
 - `server-addr=127.0.0.1:50051`
-- `profile=gpt-5.2`
+- `model=gpt-5.2`
 - `timeout=30s`
 
 Constraints:
@@ -99,7 +99,7 @@ Example (text output):
 cd go-lcpd
 ./bin/lcpd-oneshot \
   -peer-id "<provider_pubkey_hex>" \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word."
 ```
 
@@ -121,7 +121,7 @@ Usage:
 cd go-lcpd
 ./bin/lcpd-oneshot \
   -peer-id "<provider_pubkey_hex>" \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -pay-invoice \
   -chat
 ```
@@ -151,8 +151,8 @@ export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 # optional: macaroons (mainnet/testnet, etc.)
 export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
 
-# optional: stabilize `lcp_manifest` exchange (enabled by default)
-# export LCPD_LND_MANIFEST_RESEND_INTERVAL="30s"        # disable with 0s
+# Optional: periodically re-send `lcp_manifest` to connected peers (unset or "0s" disables).
+# export LCPD_LND_MANIFEST_RESEND_INTERVAL="10s"
 ```
 
 Notes:
@@ -190,7 +190,7 @@ Tip:
 
 ## Quickstart (RequestQuote → AcceptAndExecute)
 
-This section shows the full flow using only `lcpdctl lcpd ...` (quote → pay → result).
+This section shows the full flow using only `lcpdctl lcpd ...` (quote → pay → stream(result) → `lcp_result`).
 
 - The examples do not write files (stdout only).
 - No Python is needed (we use `jq` to format JSON).
@@ -209,16 +209,20 @@ cd go-lcpd
 
 SERVER_ADDR="127.0.0.1:50051"
 PEER_ID="<provider_pubkey_hex>"
-PROFILE="gpt-5.2"
+MODEL="gpt-5.2"
 
 PROMPT="Say hello in one word."
+
+request_json="$(jq -nc --arg model "$MODEL" --arg prompt "$PROMPT" \
+  '{model:$model, messages:[{role:"user", content:$prompt}]}' )"
+request_json_b64="$(printf '%s' "$request_json" | base64 | tr -d '\n')"
 
 quote_json="$(./bin/lcpdctl lcpd request-quote \
   -s "$SERVER_ADDR" \
   --peer-id "$PEER_ID" \
-  --task-llm-chat \
-  --task-llm-chat-prompt "$PROMPT" \
-  --task-llm-chat-params-profile "$PROFILE" \
+  --task-openai-chat-completions-v1 \
+  --task-openai-chat-completions-v1-params-model "$MODEL" \
+  --task-openai-chat-completions-v1-request-json "$request_json_b64" \
   -o json)"
 echo "$quote_json" | jq -C .
 # If you don't have `jq` installed, use: echo "$quote_json"
@@ -233,10 +237,25 @@ cd go-lcpd
 
 job_id_b64="$(echo "$quote_json" | jq -r '.terms.jobId')"
 
-./bin/lcpdctl lcpd accept-and-execute \
+exec_json="$(./bin/lcpdctl lcpd accept-and-execute \
   -s "$SERVER_ADDR" \
   --peer-id "$PEER_ID" \
   --job-id "$job_id_b64" \
   --pay-invoice \
-  -o prettyjson
+  -o json)"
+echo "$exec_json" | jq -C .
+# If you don't have `jq` installed, use: echo "$exec_json"
+```
+
+Note: `AcceptAndExecuteResponse.result.result` is base64-encoded bytes in JSON output.
+To decode and pretty-print the raw OpenAI response JSON:
+
+```sh
+result_b64="$(echo "$exec_json" | jq -r '.result.result')"
+
+# GNU coreutils:
+# echo "$result_b64" | base64 -d | jq -C .
+#
+# macOS:
+# echo "$result_b64" | base64 -D | jq -C .
 ```

@@ -5,8 +5,8 @@ without ever persisting raw user content.
 
 ## Hard rules (MUST NOT)
 
-- MUST NOT log raw prompts (`llm_chat.prompt` / wire `input` bytes).
-- MUST NOT log raw model outputs (wire `lcp_result.result` bytes).
+- MUST NOT log raw request JSON (`openai_chat_completions_v1.request_json` / wire `input` stream bytes).
+- MUST NOT log raw model outputs (raw result stream bytes / gRPC `Result.result`).
 - MUST NOT log secrets: API keys, macaroons, access tokens.
 - MUST NOT log BOLT11 `payment_request` strings (invoices).
 - MUST NOT log raw Lightning custom-message payloads or full gRPC request/response objects.
@@ -16,10 +16,10 @@ without ever persisting raw user content.
 The code favors logging **metadata** only:
 
 - Correlation: `job_id`, `peer_id` / `peer_pub_key`
-- Task metadata: `task_kind`, `profile`, `prompt_bytes`, `max_output_tokens`, `temperature_milli`
+- Task metadata: `task_kind`, `model`, `input_bytes`
 - Quote/payment: `price_msat`, `quote_expiry_unix`
 - Timing: `quote_ms`, `pay_ms`, `wait_ms`, `execute_ms`, `total_ms`
-- Output metadata: `result_bytes`, `content_type`, `usage_*` (token units when available)
+- Output metadata: `output_bytes`, `content_type`, `usage_*` (token units when available)
 
 ## Log levels
 
@@ -36,4 +36,3 @@ The code favors logging **metadata** only:
   retention as a security decision.
 - If you write logs to disk, use restrictive permissions and rotation. See
   [Background run + logging](/go-lcpd/docs/background).
-

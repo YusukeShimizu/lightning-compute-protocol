@@ -8,7 +8,7 @@
 
 ## Goal
 
-Run your own `lnd`, connect to the Provider below, and complete Quote → Pay → Result:
+Run your own `lnd`, connect to the Provider below, and complete Quote → Pay → Stream:
 
 - Provider node: `03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db983@54.214.32.132:20309`
 
@@ -99,7 +99,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 ```
 
-## 6) Inspect Provider supported profiles (optional)
+## 6) Inspect Provider supported models (optional)
 
 In another terminal:
 
@@ -108,14 +108,14 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50051 -o prettyjson
 ```
 
-`peers[].remoteManifest.supportedTasks[].llmChat.profile` contains the Provider profiles (if advertised).
+`peers[].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` contains the Provider models (if advertised).
 
 Notes:
 
-- `supportedTasks` is an optional field in `lcp_manifest`. If the Provider does not configure `llm.chat_profiles` (or Provider mode is disabled), it will not advertise `supported_tasks`.
+- `supportedTasks` is an optional field in `lcp_manifest`. If the Provider does not configure `llm.models` (or Provider mode is disabled), it will not advertise `supported_tasks`.
 - `-o prettyjson` omits empty fields, so it may not show `supportedTasks` even if the field is absent by design.
 
-## 7) Run one job (Quote → Pay → Result)
+## 7) Run one job (Quote → Pay → Stream)
 
 In another terminal:
 
@@ -128,7 +128,7 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
   -server-addr 127.0.0.1:50051 \
   -peer-id "$PROVIDER_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word." \
   -timeout 60s
 ```
@@ -146,12 +146,12 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
   -server-addr 127.0.0.1:50051 \
   -peer-id "$PROVIDER_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -chat
 ```
 
 ## Troubleshooting
 
 - `peer is not ready for lcp`: check that `lnd` is connected to the Provider (`lncli listpeers`), and confirm `lcpdctl list-lcp-peers` sees it.
-- `lcp_error code=2: unsupported profile ...`: set `-profile` to a value the Provider supports (see step 6).
+- `lcp_error code=2: unsupported model ...`: set `-model` to a value the Provider supports (see step 6).
 - `payment failed`: you may have no channel / no route / insufficient liquidity. Check `lncli walletbalance` and `lncli listchannels`.

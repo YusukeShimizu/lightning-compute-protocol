@@ -22,19 +22,12 @@ func TestPutQuoteAndGetTerms(t *testing.T) {
 
 	jobID := newJobID(0x01)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       10,
 		QuoteExpiry:     timestamppb.New(now.Add(5 * time.Minute)),
 	}
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	if err := store.PutQuote("peer-a", task, terms); err != nil {
 		t.Fatalf("PutQuote: %v", err)
@@ -71,20 +64,13 @@ func TestGetTerms_Expired(t *testing.T) {
 
 	jobID := newJobID(0x02)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       20,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
 	}
 
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	if err := store.PutQuote("peer-b", task, terms); err != nil {
 		t.Fatalf("PutQuote: %v", err)
@@ -122,19 +108,12 @@ func TestMarkState(t *testing.T) {
 
 	jobID := newJobID(0x03)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       30,
 		QuoteExpiry:     timestamppb.New(now.Add(10 * time.Minute)),
 	}
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	if err := store.PutQuote("peer-c", task, terms); err != nil {
 		t.Fatalf("PutQuote: %v", err)
@@ -166,27 +145,20 @@ func TestGC_ExpiresQuotedJobsOnly(t *testing.T) {
 
 	jobQuoted := newJobID(0x04)
 	quotedTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobQuoted[:],
 		PriceMsat:       40,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
 	}
 	jobDone := newJobID(0x05)
 	doneTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobDone[:],
 		PriceMsat:       50,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Hour)),
 	}
 
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	if err := store.PutQuote("peer-d", task, quotedTerms); err != nil {
 		t.Fatalf("PutQuote quoted: %v", err)
@@ -219,19 +191,12 @@ func TestPeerIsolation(t *testing.T) {
 
 	jobID := newJobID(0x06)
 	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       60,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 	}
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	if err := store.PutQuote("peer-e", task, terms); err != nil {
 		t.Fatalf("PutQuote peer-e: %v", err)
@@ -265,19 +230,12 @@ func TestPutQuote_Validation(t *testing.T) {
 
 	jobID := newJobID(0x07)
 	validTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 		JobId:           jobID[:],
 		PriceMsat:       70,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 	}
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{Profile: "p"},
-			},
-		},
-	}
+	task := newTestTask()
 
 	tests := []struct {
 		name    string
@@ -312,7 +270,7 @@ func TestPutQuote_Validation(t *testing.T) {
 			peerID: "peer",
 			task:   task,
 			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 				JobId:           []byte{0x01, 0x02},
 				QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 			},
@@ -323,7 +281,7 @@ func TestPutQuote_Validation(t *testing.T) {
 			peerID: "peer",
 			task:   task,
 			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV01),
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
 				JobId:           jobID[:],
 			},
 			wantErr: requesterjobstore.ErrQuoteExpiryRequired,
@@ -339,6 +297,18 @@ func TestPutQuote_Validation(t *testing.T) {
 				t.Fatalf("PutQuote error mismatch (-want +got):\n%s", cmp.Diff(tc.wantErr, err))
 			}
 		})
+	}
+}
+
+func newTestTask() *lcpdv1.Task {
+	const model = "gpt-5.2"
+	return &lcpdv1.Task{
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`),
+				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
+			},
+		},
 	}
 }
 

@@ -26,7 +26,7 @@ This document summarizes what to configure and where.
 | `LCPD_LND_RPC_ADDR`                 |  Required if using lnd | `host:port`                                                             |
 | `LCPD_LND_TLS_CERT_PATH`            |       Usually required | Path to `tls.cert` (if empty, verify with system roots)                 |
 | `LCPD_LND_ADMIN_MACAROON_PATH`      | Recommended on mainnet | Admin macaroon (needed for payments/invoice ops)                        |
-| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |               Optional | Interval for re-sending `lcp_manifest` (e.g., `30s`, disable with `0s`) |
+| `LCPD_LND_MANIFEST_RESEND_INTERVAL` |               Optional | Periodically re-send `lcp_manifest` to connected peers (unset/0s disables) |
 
 Typical default paths (adjust for your network and lnd setup):
 
@@ -64,7 +64,7 @@ Provider behavior for `lcpd-grpcd` is configured via YAML only.
 - If unset, `config.yaml` in the current directory is used (if present)
 - If the file is empty or missing, defaults apply (Provider disabled, TTL=300s, `max_output_tokens=4096`, built-in price table, etc.)
 
-Sample with explicit defaults: `../config.yaml`
+Sample with explicit defaults: `go-lcpd/config.yaml.sample` (copy to `go-lcpd/config.yaml`)
 
 ### Examples
 
@@ -84,12 +84,9 @@ pricing:
 
 llm:
   max_output_tokens: 4096
-  chat_profiles:
+  models:
     gpt-5.2:
-      # Optional: if omitted, backend_model defaults to the profile name.
-      # backend_model: gpt-5.2
-
-      # Optional: per-profile override for max output tokens.
+      # Optional: per-model override for max output tokens.
       # max_output_tokens: 4096
 
       # Required: pricing (msat per 1M tokens).
@@ -97,12 +94,6 @@ llm:
         input_msat_per_mtok: 1750000
         cached_input_msat_per_mtok: 175000
         output_msat_per_mtok: 14000000
-
-      # Optional: OpenAI-compatible Chat Completions parameters (Provider-side defaults).
-      # openai:
-      #   temperature: 0.7
-      #   top_p: 1
-      #   stop: ["\\n\\n"]
 ```
 
 #### regtest example
@@ -113,7 +104,7 @@ quote_ttl_seconds: 60
 
 llm:
   max_output_tokens: 512
-  chat_profiles:
+  models:
     gpt-5.2:
       max_output_tokens: 512
       price:
@@ -121,13 +112,14 @@ llm:
         output_msat_per_mtok: 1
 ```
 
-### Model / profile naming
+### Model naming
 
-- `profile` is the LCP wire identifier (`llm_chat_params.profile`). It appears in:
-  - `lcp_manifest.supported_tasks[].llm_chat.profile` (advertising)
-  - the Provider-side pricing lookup (invoice/terms binding)
-- `backend_model` is the upstream model ID passed to the compute backend (for example OpenAI-compatible `model`).
-- `profile` and `backend_model` do not have to match. Mapping is configured per-profile via `llm.chat_profiles.*.backend_model`.
+- `model` is the OpenAI model ID.
+- It appears in:
+  - `openai_chat_completions_v1_params_tlvs.model` on the wire (in `params_bytes`)
+  - the OpenAI request JSON (`request_json.model`) carried in the input stream bytes
+  - gRPC `LCPManifest.supported_tasks[].openai_chat_completions_v1.model` (model advertising)
+- The Provider uses `model` for allowlisting, pricing, and routing to the compute backend.
 
 ### Field reference
 
@@ -137,35 +129,33 @@ llm:
   - `threshold`: Number of in-flight jobs before surge applies.
   - `per_job_bps`: Additive multiplier per job above `threshold` (basis points; 10,000 = 1.0x). If `0`, surge is disabled.
   - `max_multiplier_bps`: Caps the total multiplier in basis points. If `0`, a safe default cap is used.
-- `llm.max_output_tokens`: Provider-wide default for execution policy (`ExecutionPolicy`). Applied both to quote-time estimation and backend execution. Default is 4096.
-- `llm.chat_profiles`: Map of allowed/advertised `llm.chat` profiles. If empty, accepts any profile but does not advertise them in the manifest.
-  - `backend_model`: Upstream model ID passed to the backend. Defaults to the profile name.
-  - `max_output_tokens`: Optional per-profile override (must be > 0).
-  - `price`: Required per-profile pricing (msat per 1M tokens). `input_msat_per_mtok` and `output_msat_per_mtok` are required; `cached_input_msat_per_mtok` is optional.
-  - `openai`: Optional OpenAI-compatible Chat Completions parameters (`temperature`, `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, `seed`).
+- `llm.max_output_tokens`: Provider-wide default for output token limits, used for quote-time estimation and request validation. Default is 4096.
+- `llm.models`: Map of allowed/advertised `openai.chat_completions.v1` model IDs. If empty, accepts any `model` but does not advertise `supported_tasks`.
+  - `max_output_tokens`: Optional per-model override (must be > 0).
+  - `price`: Required per-model pricing (msat per 1M tokens). `input_msat_per_mtok` and `output_msat_per_mtok` are required; `cached_input_msat_per_mtok` is optional.
 
 ### Default price table
 
 If YAML is not provided, a built-in price table is used (msat per 1M tokens):
 - `gpt-5.2`: input 1,750,000 / cached 175,000 / output 14,000,000
 
-### Quote → Execute flow (`llm.chat`)
+### Quote → Execute flow (`openai.chat_completions.v1`)
 
-1. Validate the QuoteRequest and check the profile is allowed.
-2. Apply ExecutionPolicy (`max_output_tokens`) to the `computebackend.Task`.
-3. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
-4. Compute price in msat via `QuotePrice(profile, estimate, cached=0, price_table)` and apply optional `pricing.in_flight_surge`, then embed it into TermsHash / invoice binding.
-5. After payment settles, map `profile -> backend_model`, execute the planned task in the backend, and return the result via `lcp_result`.
+1. Validate the QuoteRequest and check the model is allowed.
+2. Receive and validate the input stream as OpenAI request JSON bytes (`request_json.model`, `request_json.messages`, `request_json.stream=false`).
+3. Determine `max_output_tokens` for quote-time estimation:
+   - Start from `llm.max_output_tokens` (and optional per-model override).
+   - If the request sets an output-token cap (`max_completion_tokens` / `max_tokens` / `max_output_tokens`), it must be <= the Provider max, and that value is used for estimation.
+4. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
+5. Compute price in msat via `QuotePrice(model, estimate, cached=0, price_table)` and apply optional `pricing.in_flight_surge`, then embed it into TermsHash / invoice binding.
+6. After payment settles, execute the passthrough request in the backend, stream the result (`lcp_stream_*`), and finalize with `lcp_result`.
 
 ## Backend notes
 
 - `openai`: calls an external API (billing / rate limits / network dependency).
   - Uses the OpenAI-compatible Chat Completions API (`POST /v1/chat/completions`).
-  - `llm.chat` `profile` is mapped to the upstream `model` via `llm.chat_profiles.*.backend_model` (defaults to the profile name).
-  - Supports `params_bytes` JSON:
-    - `max_output_tokens` (and legacy `max_tokens`), sent as `max_completion_tokens`
-    - `temperature`, `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, `seed`
-  - Sends a single text user message (no tools, no multimodal inputs, no streaming).
+  - Sends the raw request body bytes from the LCP input stream as-is (non-streaming).
+  - Returns the raw OpenAI-compatible response body bytes as-is (non-streaming JSON).
 - `deterministic`: fixed-output backend for development (no external API).
 - `disabled`: does not execute (useful for Requester-only mode).
 

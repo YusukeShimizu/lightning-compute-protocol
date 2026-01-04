@@ -107,13 +107,14 @@ type PeerMessaging struct {
 	peerAddrMu sync.RWMutex
 	peerAddr   map[string]string
 
-	manifestSendMu   sync.Mutex
-	manifestLastSent map[string]time.Time
+	manifestSendMu sync.Mutex
 }
 
 const (
-	defaultProtocolVersion = lcpwire.ProtocolVersionV01
+	defaultProtocolVersion = lcpwire.ProtocolVersionV02
 	defaultMaxPayloadBytes = uint32(16384)
+	defaultMaxStreamBytes  = uint64(4_194_304)
+	defaultMaxJobBytes     = uint64(8_388_608)
 
 	subscriptionLoops = 2
 )
@@ -132,7 +133,9 @@ func New(p Params) (*PeerMessaging, error) {
 	maxPayloadBytes := defaultMaxPayloadBytes
 	localManifest := lcpwire.Manifest{
 		ProtocolVersion: defaultProtocolVersion,
-		MaxPayloadBytes: &maxPayloadBytes,
+		MaxPayloadBytes: maxPayloadBytes,
+		MaxStreamBytes:  defaultMaxStreamBytes,
+		MaxJobBytes:     defaultMaxJobBytes,
 	}
 	if p.LocalManifest != nil {
 		localManifest = *p.LocalManifest
@@ -151,7 +154,6 @@ func New(p Params) (*PeerMessaging, error) {
 		inboundHandler:       p.InboundHandler,
 		localManifestPayload: payload,
 		peerAddr:             make(map[string]string),
-		manifestLastSent:     make(map[string]time.Time),
 		peerEventsReady:      make(chan struct{}),
 		customMessagesReady:  make(chan struct{}),
 	}
@@ -198,6 +200,23 @@ func (p *PeerMessaging) start(ctx context.Context) error {
 		return nil
 	}
 
+	manifestResendInterval := time.Duration(0)
+	if p.cfg.ManifestResendInterval != nil {
+		manifestResendInterval = *p.cfg.ManifestResendInterval
+		if manifestResendInterval < 0 {
+			p.logger.Warnw(
+				"invalid LCPD_LND_MANIFEST_RESEND_INTERVAL; disabling periodic resend",
+				"value", manifestResendInterval,
+			)
+			manifestResendInterval = 0
+		} else if manifestResendInterval > 0 {
+			p.logger.Infow(
+				"periodic lcp_manifest resend enabled",
+				"interval", manifestResendInterval,
+			)
+		}
+	}
+
 	conn, dialErr := dial(ctx, *p.cfg)
 	if dialErr != nil {
 		return dialErr
@@ -213,9 +232,17 @@ func (p *PeerMessaging) start(ctx context.Context) error {
 		p.cleanupConn(cancel, conn)
 		return refreshErr
 	}
-	p.sendManifestToConnectedPeers(runCtx, p.manifestResendInterval(), "startup")
+	p.sendManifestToConnectedPeersOnce(runCtx, "startup")
 
-	p.wg.Add(subscriptionLoops + 1)
+	if manifestResendInterval > 0 {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			p.manifestResendLoop(runCtx, manifestResendInterval)
+		}()
+	}
+
+	p.wg.Add(subscriptionLoops)
 	go func() {
 		defer p.wg.Done()
 		p.peerEventsLoop(runCtx)
@@ -223,10 +250,6 @@ func (p *PeerMessaging) start(ctx context.Context) error {
 	go func() {
 		defer p.wg.Done()
 		p.customMessagesLoop(runCtx)
-	}()
-	go func() {
-		defer p.wg.Done()
-		p.manifestResendLoop(runCtx)
 	}()
 
 	peerEventsReadyErr := waitReady(ctx, p.peerEventsReady, "SubscribePeerEvents")
@@ -362,7 +385,7 @@ func (p *PeerMessaging) HandlePeerEvent(ctx context.Context, ev *lnrpc.PeerEvent
 			)
 		}
 		p.markPeerConnected(peerPubKey)
-		if err := p.sendManifestToPeer(ctx, peerPubKey, p.manifestResendInterval(), "peer_online"); err != nil {
+		if err := p.sendManifestIfNotSent(ctx, peerPubKey, "peer_online"); err != nil {
 			p.logger.Warnw(
 				"send lcp_manifest on peer online failed",
 				"peer_pub_key", peerPubKey,
@@ -371,9 +394,6 @@ func (p *PeerMessaging) HandlePeerEvent(ctx context.Context, ev *lnrpc.PeerEvent
 		}
 	case lnrpc.PeerEvent_PEER_OFFLINE:
 		p.peerDirectory.MarkDisconnected(peerPubKey)
-		p.manifestSendMu.Lock()
-		delete(p.manifestLastSent, peerPubKey)
-		p.manifestSendMu.Unlock()
 	default:
 	}
 }
@@ -424,10 +444,18 @@ func (p *PeerMessaging) HandleCustomMessage(ctx context.Context, msg *lnrpc.Cust
 			return
 		}
 		p.peerDirectory.MarkLCPReady(peerPubKey, manifest)
-		// Intentionally do not auto-reply on inbound manifest to avoid "ping-pong".
-		// Manifest exchange is made reliable via periodic re-send.
+		if err := p.sendManifestIfNotSent(ctx, peerPubKey, "reply_to_inbound_manifest"); err != nil {
+			p.logger.Warnw(
+				"send lcp_manifest reply failed",
+				"peer_pub_key", peerPubKey,
+				"err", err,
+			)
+		}
 	case lcpmsgrouter.RouteActionDispatchQuoteRequest,
 		lcpmsgrouter.RouteActionDispatchQuoteResponse,
+		lcpmsgrouter.RouteActionDispatchStreamBegin,
+		lcpmsgrouter.RouteActionDispatchStreamChunk,
+		lcpmsgrouter.RouteActionDispatchStreamEnd,
 		lcpmsgrouter.RouteActionDispatchResult,
 		lcpmsgrouter.RouteActionDispatchCancel,
 		lcpmsgrouter.RouteActionDispatchError:
@@ -503,17 +531,13 @@ func (p *PeerMessaging) refreshPeers(ctx context.Context) error {
 	return nil
 }
 
-func (p *PeerMessaging) sendManifestToConnectedPeers(
-	ctx context.Context,
-	minInterval time.Duration,
-	reason string,
-) {
+func (p *PeerMessaging) sendManifestToConnectedPeersOnce(ctx context.Context, reason string) {
 	peerIDs := p.peerDirectory.ListConnectedPeerIDs()
 	for _, peerID := range peerIDs {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := p.sendManifestToPeer(ctx, peerID, minInterval, reason); err != nil {
+		if err := p.sendManifestIfNotSent(ctx, peerID, reason); err != nil {
 			p.logger.Debugw(
 				"send lcp_manifest failed",
 				"peer_pub_key", peerID,
@@ -524,45 +548,44 @@ func (p *PeerMessaging) sendManifestToConnectedPeers(
 	}
 }
 
-func (p *PeerMessaging) manifestResendInterval() time.Duration {
-	resendInterval := defaultManifestResendInterval
-	if p.cfg != nil && p.cfg.ManifestResendInterval != nil {
-		resendInterval = *p.cfg.ManifestResendInterval
+func (p *PeerMessaging) sendManifestToConnectedPeers(ctx context.Context, reason string) {
+	peerIDs := p.peerDirectory.ListConnectedPeerIDs()
+	for _, peerID := range peerIDs {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := p.sendManifestAndMarkSent(ctx, peerID, reason); err != nil {
+			p.logger.Debugw(
+				"send lcp_manifest failed",
+				"peer_pub_key", peerID,
+				"reason", reason,
+				"err", err,
+			)
+		}
 	}
-	return resendInterval
 }
 
-func (p *PeerMessaging) sendManifestToPeer(
+func (p *PeerMessaging) sendManifestIfNotSent(
 	ctx context.Context,
 	peerPubKey string,
-	minInterval time.Duration,
 	reason string,
 ) error {
 	if peerPubKey == "" {
 		return nil
 	}
 
-	now := p.now()
-
 	p.manifestSendMu.Lock()
-	prev, ok := p.manifestLastSent[peerPubKey]
-	if ok && minInterval > 0 && now.Sub(prev) < minInterval {
-		p.manifestSendMu.Unlock()
+	defer p.manifestSendMu.Unlock()
+
+	if peer, ok := p.peerDirectory.GetPeer(peerPubKey); ok && peer.ManifestSent {
 		return nil
 	}
-	p.manifestLastSent[peerPubKey] = now
-	p.manifestSendMu.Unlock()
 
 	if err := p.sendManifest(ctx, peerPubKey); err != nil {
-		p.manifestSendMu.Lock()
-		if ok {
-			p.manifestLastSent[peerPubKey] = prev
-		} else {
-			delete(p.manifestLastSent, peerPubKey)
-		}
-		p.manifestSendMu.Unlock()
 		return err
 	}
+	p.peerDirectory.MarkManifestSent(peerPubKey)
+
 	p.logger.Debugw(
 		"sent lcp_manifest",
 		"peer_pub_key", peerPubKey,
@@ -571,27 +594,29 @@ func (p *PeerMessaging) sendManifestToPeer(
 	return nil
 }
 
-func (p *PeerMessaging) manifestResendLoop(ctx context.Context) {
-	resendInterval := p.manifestResendInterval()
-	if resendInterval <= 0 {
-		return
+func (p *PeerMessaging) sendManifestAndMarkSent(
+	ctx context.Context,
+	peerPubKey string,
+	reason string,
+) error {
+	if peerPubKey == "" {
+		return nil
 	}
 
-	t := time.NewTicker(resendInterval)
-	defer t.Stop()
+	p.manifestSendMu.Lock()
+	defer p.manifestSendMu.Unlock()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := p.refreshPeers(ctx); err != nil {
-				p.logger.Debugw("refresh peers on manifest resend failed", "err", err)
-				continue
-			}
-			p.sendManifestToConnectedPeers(ctx, resendInterval, "periodic_resend")
-		}
+	if err := p.sendManifest(ctx, peerPubKey); err != nil {
+		return err
 	}
+	p.peerDirectory.MarkManifestSent(peerPubKey)
+
+	p.logger.Debugw(
+		"sent lcp_manifest",
+		"peer_pub_key", peerPubKey,
+		"reason", reason,
+	)
+	return nil
 }
 
 func (p *PeerMessaging) sendManifest(ctx context.Context, peerPubKey string) error {
@@ -662,5 +687,25 @@ func waitReady(ctx context.Context, ch <-chan struct{}, name string) error {
 		return fmt.Errorf("%s not ready: %w", name, ctx.Err())
 	case <-ch:
 		return nil
+	}
+}
+
+func (p *PeerMessaging) manifestResendLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	p.manifestResendLoopWithTicks(ctx, ticker.C)
+}
+
+func (p *PeerMessaging) manifestResendLoopWithTicks(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			p.sendManifestToConnectedPeers(ctx, "periodic_resend")
+		}
 	}
 }

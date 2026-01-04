@@ -22,12 +22,33 @@ func TestBuildPrompt_Basic(t *testing.T) {
 	}
 }
 
-func TestBuildPrompt_UnsupportedRole(t *testing.T) {
-	_, err := openai.BuildPrompt([]openai.ChatMessage{
-		{Role: "tool", Content: "nope"},
+func TestBuildPrompt_SkipsEmptyContent(t *testing.T) {
+	got, err := openai.BuildPrompt([]openai.ChatMessage{
+		{Role: "system", Content: "You are a helpful assistant."},
+		{Role: "user", Content: "Say hello."},
+		{Role: "assistant", Content: ""},
 	})
-	if err == nil {
-		t.Fatalf("expected error")
+	if err != nil {
+		t.Fatalf("BuildPrompt() error: %v", err)
+	}
+
+	want := "<SYSTEM>\nYou are a helpful assistant.\n</SYSTEM>\n<CONVERSATION>\nUser: Say hello.\n</CONVERSATION>\nAssistant:"
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unexpected prompt (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuildPrompt_ToolRole(t *testing.T) {
+	got, err := openai.BuildPrompt([]openai.ChatMessage{
+		{Role: "tool", Name: "llm_search", Content: "found 123 results"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPrompt() error: %v", err)
+	}
+
+	want := "<CONVERSATION>\nTool(llm_search): found 123 results\n</CONVERSATION>\nAssistant:"
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unexpected prompt (-want +got):\n%s", diff)
 	}
 }
 

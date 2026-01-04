@@ -15,7 +15,7 @@ func TestApproxUsageEstimator_Estimate_Deterministic(t *testing.T) {
 
 	got, err := estimator.Estimate(
 		computebackend.Task{
-			TaskKind:   "llm.chat",
+			TaskKind:   "openai.chat_completions.v1",
 			Model:      "test-model",
 			InputBytes: []byte("hello"), // len=5 -> ceil(5/4)=2
 		},

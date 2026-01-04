@@ -43,6 +43,30 @@ func TestRouter_Route_KnownMessages(t *testing.T) {
 			},
 		},
 		{
+			name:    "stream_begin",
+			msgType: lcpwire.MessageTypeStreamBegin,
+			want: lcpmsgrouter.RouteDecision{
+				Action: lcpmsgrouter.RouteActionDispatchStreamBegin,
+				Reason: "lcp_stream_begin",
+			},
+		},
+		{
+			name:    "stream_chunk",
+			msgType: lcpwire.MessageTypeStreamChunk,
+			want: lcpmsgrouter.RouteDecision{
+				Action: lcpmsgrouter.RouteActionDispatchStreamChunk,
+				Reason: "lcp_stream_chunk",
+			},
+		},
+		{
+			name:    "stream_end",
+			msgType: lcpwire.MessageTypeStreamEnd,
+			want: lcpmsgrouter.RouteDecision{
+				Action: lcpmsgrouter.RouteActionDispatchStreamEnd,
+				Reason: "lcp_stream_end",
+			},
+		},
+		{
 			name:    "result",
 			msgType: lcpwire.MessageTypeResult,
 			want: lcpmsgrouter.RouteDecision{
@@ -111,7 +135,7 @@ func TestRouter_Route_UnknownOddIgnores(t *testing.T) {
 
 	got := router.Route(lcpmsgrouter.CustomMessage{
 		PeerPubKey: "peer",
-		MsgType:    uint16(lcpwire.MessageTypeManifest + 8), // odd unknown
+		MsgType:    uint16(lcpwire.MessageTypeError + 2), // odd unknown
 		Payload:    []byte("payload"),
 	})
 

@@ -8,6 +8,9 @@ const (
 	RouteActionDispatchManifest      RouteAction = "dispatch_manifest"
 	RouteActionDispatchQuoteRequest  RouteAction = "dispatch_quote_request"
 	RouteActionDispatchQuoteResponse RouteAction = "dispatch_quote_response"
+	RouteActionDispatchStreamBegin   RouteAction = "dispatch_stream_begin"
+	RouteActionDispatchStreamChunk   RouteAction = "dispatch_stream_chunk"
+	RouteActionDispatchStreamEnd     RouteAction = "dispatch_stream_end"
 	RouteActionDispatchResult        RouteAction = "dispatch_result"
 	RouteActionDispatchCancel        RouteAction = "dispatch_cancel"
 	RouteActionDispatchError         RouteAction = "dispatch_error"
@@ -52,6 +55,21 @@ func (router) Route(msg CustomMessage) RouteDecision {
 		return RouteDecision{
 			Action: RouteActionDispatchQuoteResponse,
 			Reason: "lcp_quote_response",
+		}
+	case lcpwire.MessageTypeStreamBegin:
+		return RouteDecision{
+			Action: RouteActionDispatchStreamBegin,
+			Reason: "lcp_stream_begin",
+		}
+	case lcpwire.MessageTypeStreamChunk:
+		return RouteDecision{
+			Action: RouteActionDispatchStreamChunk,
+			Reason: "lcp_stream_chunk",
+		}
+	case lcpwire.MessageTypeStreamEnd:
+		return RouteDecision{
+			Action: RouteActionDispatchStreamEnd,
+			Reason: "lcp_stream_end",
 		}
 	case lcpwire.MessageTypeResult:
 		return RouteDecision{

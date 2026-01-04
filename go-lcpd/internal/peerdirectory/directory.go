@@ -12,6 +12,7 @@ type Peer struct {
 	RemoteAddr       string
 	Connected        bool
 	CustomMsgEnabled bool
+	ManifestSent     bool
 	LCPReady         bool
 	RemoteManifest   *lcpwire.Manifest
 }
@@ -55,6 +56,7 @@ func (d *Directory) MarkConnected(peerID string) {
 		d.peers[peerID] = p
 	}
 	p.Connected = true
+	d.updateLCPReadyLocked(p)
 }
 
 func (d *Directory) MarkDisconnected(peerID string) {
@@ -68,6 +70,7 @@ func (d *Directory) MarkDisconnected(peerID string) {
 	}
 	p.Connected = false
 	p.CustomMsgEnabled = false
+	p.ManifestSent = false
 	p.LCPReady = false
 	p.RemoteManifest = nil
 }
@@ -82,6 +85,20 @@ func (d *Directory) MarkCustomMsgEnabled(peerID string, enabled bool) {
 		d.peers[peerID] = p
 	}
 	p.CustomMsgEnabled = enabled
+	d.updateLCPReadyLocked(p)
+}
+
+func (d *Directory) MarkManifestSent(peerID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	p, ok := d.peers[peerID]
+	if !ok {
+		p = &Peer{PeerID: peerID}
+		d.peers[peerID] = p
+	}
+	p.ManifestSent = true
+	d.updateLCPReadyLocked(p)
 }
 
 func (d *Directory) MarkLCPReady(peerID string, remoteManifest lcpwire.Manifest) {
@@ -95,8 +112,8 @@ func (d *Directory) MarkLCPReady(peerID string, remoteManifest lcpwire.Manifest)
 	}
 
 	manifestCopy := remoteManifest
-	p.LCPReady = true
 	p.RemoteManifest = &manifestCopy
+	d.updateLCPReadyLocked(p)
 }
 
 func (d *Directory) ListLCPPeers() []LCPPeer {
@@ -169,4 +186,11 @@ func (d *Directory) GetPeer(peerID string) (Peer, bool) {
 		out.RemoteManifest = &manifestCopy
 	}
 	return out, true
+}
+
+func (d *Directory) updateLCPReadyLocked(p *Peer) {
+	if p == nil {
+		return
+	}
+	p.LCPReady = p.Connected && p.CustomMsgEnabled && p.ManifestSent && p.RemoteManifest != nil
 }

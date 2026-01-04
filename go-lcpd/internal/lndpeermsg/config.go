@@ -12,20 +12,15 @@ import (
 
 var ErrLNDConnectionNotConfigured = errors.New("lnd connection not configured")
 
-const (
-	// defaultManifestResendInterval is a best-effort reliability improvement for
-	// manifest exchange across daemon startup ordering (lnd does not buffer
-	// inbound custom messages unless the receiver is subscribed).
-	defaultManifestResendInterval = 30 * time.Second
-)
-
 type Config struct {
 	RPCAddr           string
 	TLSCertPath       string
 	AdminMacaroonPath string
 
-	// ManifestResendInterval controls periodic best-effort re-sends of the local
-	// manifest to connected peers. Nil means "use default", 0 disables.
+	// ManifestResendInterval, if set to a positive duration, periodically
+	// re-sends `lcp_manifest` to connected peers.
+	//
+	// Unset (or <= 0) disables periodic re-sends.
 	ManifestResendInterval *time.Duration
 }
 

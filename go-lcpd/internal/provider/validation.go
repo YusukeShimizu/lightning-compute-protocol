@@ -7,7 +7,7 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 )
 
-const taskKindLLMChat = "llm.chat"
+const taskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
 
 type QuoteRequestValidator struct {
 	SupportedProtocolVersions map[uint16]struct{}
@@ -17,10 +17,10 @@ type QuoteRequestValidator struct {
 func DefaultValidator() QuoteRequestValidator {
 	return QuoteRequestValidator{
 		SupportedProtocolVersions: map[uint16]struct{}{
-			lcpwire.ProtocolVersionV01: {},
+			lcpwire.ProtocolVersionV02: {},
 		},
 		SupportedTaskKinds: map[string]struct{}{
-			taskKindLLMChat: {},
+			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}
 }
@@ -73,7 +73,7 @@ func (v QuoteRequestValidator) ValidateQuoteRequest(
 
 func (v QuoteRequestValidator) protocolSupported(protocolVersion uint16) bool {
 	if len(v.SupportedProtocolVersions) == 0 {
-		return protocolVersion == lcpwire.ProtocolVersionV01
+		return protocolVersion == lcpwire.ProtocolVersionV02
 	}
 	_, ok := v.SupportedProtocolVersions[protocolVersion]
 	return ok
@@ -81,28 +81,36 @@ func (v QuoteRequestValidator) protocolSupported(protocolVersion uint16) bool {
 
 func (v QuoteRequestValidator) taskKindSupported(taskKind string) bool {
 	if len(v.SupportedTaskKinds) == 0 {
-		return taskKind == taskKindLLMChat
+		return taskKind == taskKindOpenAIChatCompletionsV1
 	}
 	_, ok := v.SupportedTaskKinds[taskKind]
 	return ok
 }
 
 func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
-	if req.TaskKind != taskKindLLMChat {
+	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
 		return nil
 	}
 
-	if req.LLMChatParams == nil {
+	if req.ParamsBytes == nil {
 		return &ValidationError{
 			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "llm.chat params are required",
+			Message: "openai.chat_completions.v1 params are required",
 		}
 	}
 
-	if len(req.LLMChatParams.Unknown) > 0 {
+	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+	if err != nil {
 		return &ValidationError{
 			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "llm.chat params contain unknown tlv types",
+			Message: "openai.chat_completions.v1 params must be a valid TLV stream",
+		}
+	}
+
+	if len(params.Unknown) > 0 {
+		return &ValidationError{
+			Code:    lcpwire.ErrorCodeUnsupportedParams,
+			Message: "openai.chat_completions.v1 params contain unknown tlv types",
 		}
 	}
 
@@ -126,13 +134,6 @@ func matchesTemplate(req lcpwire.QuoteRequest, tmpl lcpwire.TaskTemplate) bool {
 		return false
 	}
 
-	if req.TaskKind == taskKindLLMChat {
-		if tmpl.LLMChatParams == nil || req.LLMChatParams == nil {
-			return false
-		}
-		return llmChatParamsInclude(*req.LLMChatParams, *tmpl.LLMChatParams)
-	}
-
 	if tmpl.ParamsBytes != nil {
 		if req.ParamsBytes == nil {
 			return false
@@ -140,31 +141,5 @@ func matchesTemplate(req lcpwire.QuoteRequest, tmpl lcpwire.TaskTemplate) bool {
 		return bytes.Equal(*req.ParamsBytes, *tmpl.ParamsBytes)
 	}
 
-	return true
-}
-
-func llmChatParamsInclude(req lcpwire.LLMChatParams, tmpl lcpwire.LLMChatParams) bool {
-	if tmpl.Profile != "" && req.Profile != tmpl.Profile {
-		return false
-	}
-	if tmpl.TemperatureMilli != nil {
-		if req.TemperatureMilli == nil || *req.TemperatureMilli != *tmpl.TemperatureMilli {
-			return false
-		}
-	}
-	if tmpl.MaxOutputTokens != nil {
-		if req.MaxOutputTokens == nil || *req.MaxOutputTokens != *tmpl.MaxOutputTokens {
-			return false
-		}
-	}
-	for typ, val := range tmpl.Unknown {
-		reqVal, ok := req.Unknown[typ]
-		if !ok {
-			return false
-		}
-		if !bytes.Equal(reqVal, val) {
-			return false
-		}
-	}
 	return true
 }

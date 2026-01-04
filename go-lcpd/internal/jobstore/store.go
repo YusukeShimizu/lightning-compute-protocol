@@ -12,13 +12,15 @@ import (
 type State string
 
 const (
-	StateQuoted         State = "quoted"
-	StateWaitingPayment State = "waiting_payment"
-	StatePaid           State = "paid"
-	StateExecuting      State = "executing"
-	StateDone           State = "done"
-	StateCanceled       State = "canceled"
-	StateFailed         State = "failed"
+	StateAwaitingInput   State = "awaiting_input"
+	StateQuoted          State = "quoted"
+	StateWaitingPayment  State = "waiting_payment"
+	StatePaid            State = "paid"
+	StateExecuting       State = "executing"
+	StateStreamingResult State = "streaming_result"
+	StateDone            State = "done"
+	StateCanceled        State = "canceled"
+	StateFailed          State = "failed"
 )
 
 type Key struct {
@@ -31,6 +33,10 @@ type Job struct {
 	JobID      lcp.JobID
 	State      State
 
+	QuoteRequest *lcpwire.QuoteRequest
+
+	InputStream *InputStreamState
+
 	QuoteExpiry     uint64
 	TermsHash       *lcp.Hash32
 	PaymentHash     *lcp.Hash32
@@ -39,6 +45,21 @@ type Job struct {
 	QuoteResponse *lcpwire.QuoteResponse
 
 	CreatedAt time.Time
+}
+
+type InputStreamState struct {
+	StreamID lcp.Hash32
+
+	ContentType     string
+	ContentEncoding string
+
+	ExpectedSeq uint32
+	Buf         []byte
+
+	TotalLen uint64
+	SHA256   lcp.Hash32
+
+	Validated bool
 }
 
 type Store struct {
@@ -163,6 +184,21 @@ func (s *Store) Len() int {
 }
 
 func cloneJob(job Job) Job {
+	if job.QuoteRequest != nil {
+		reqCopy := *job.QuoteRequest
+		if reqCopy.ParamsBytes != nil {
+			paramsCopy := append([]byte(nil), (*reqCopy.ParamsBytes)...)
+			reqCopy.ParamsBytes = &paramsCopy
+		}
+		job.QuoteRequest = &reqCopy
+	}
+	if job.InputStream != nil {
+		streamCopy := *job.InputStream
+		if len(streamCopy.Buf) > 0 {
+			streamCopy.Buf = append([]byte(nil), streamCopy.Buf...)
+		}
+		job.InputStream = &streamCopy
+	}
 	if job.TermsHash != nil {
 		termsCopy := *job.TermsHash
 		job.TermsHash = &termsCopy
@@ -199,10 +235,11 @@ func (s *Store) pruneExpiredLocked(nowUnix uint64) {
 		}
 
 		switch job.State {
-		case StateQuoted, StateWaitingPayment:
+		case StateAwaitingInput, StateQuoted, StateWaitingPayment:
 			delete(s.jobs, k)
 		case StatePaid,
 			StateExecuting,
+			StateStreamingResult,
 			StateDone,
 			StateCanceled,
 			StateFailed:
@@ -241,10 +278,11 @@ func (s *Store) evictOldestLocked(preferPending bool) bool {
 	for k, job := range s.jobs {
 		if preferPending {
 			switch job.State {
-			case StateQuoted, StateWaitingPayment:
+			case StateAwaitingInput, StateQuoted, StateWaitingPayment:
 				// ok
 			case StatePaid,
 				StateExecuting,
+				StateStreamingResult,
 				StateDone,
 				StateCanceled,
 				StateFailed:

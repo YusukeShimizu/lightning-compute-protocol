@@ -9,7 +9,7 @@ import (
 )
 
 func TestParseFlags_Defaults_NoLND(t *testing.T) {
-	t.Parallel()
+	clearLNDEnv(t)
 
 	got, err := parseFlags([]string{}, io.Discard)
 	if err != nil {
@@ -28,6 +28,7 @@ func TestParseFlags_Defaults_NoLND(t *testing.T) {
 }
 
 func TestParseFlags_LNDFromEnv(t *testing.T) {
+	clearLNDEnv(t)
 	t.Setenv("LCPD_LND_RPC_ADDR", "localhost:10009")
 	t.Setenv("LCPD_LND_TLS_CERT_PATH", "/tmp/tls.cert")
 	t.Setenv("LCPD_LND_ADMIN_MACAROON_PATH", "/tmp/admin.macaroon")
@@ -61,6 +62,7 @@ func TestParseFlags_LNDFromEnv(t *testing.T) {
 }
 
 func TestParseFlags_LNDFromEnv_AllowsEmptyTLSCertPath(t *testing.T) {
+	clearLNDEnv(t)
 	t.Setenv("LCPD_LND_RPC_ADDR", "localhost:10009")
 	t.Setenv("LCPD_LND_TLS_CERT_PATH", "")
 
@@ -87,6 +89,7 @@ func TestParseFlags_LNDFromEnv_AllowsEmptyTLSCertPath(t *testing.T) {
 }
 
 func TestParseFlags_LNDFlagsOverrideEnv(t *testing.T) {
+	clearLNDEnv(t)
 	t.Setenv("LCPD_LND_RPC_ADDR", "localhost:10009")
 	t.Setenv("LCPD_LND_TLS_CERT_PATH", "/tmp/env.cert")
 
@@ -127,6 +130,15 @@ func TestParseFlags_LNDFlagsOverrideEnv(t *testing.T) {
 			cmp.Diff("/tmp/flag.macaroon", got.lnd.AdminMacaroonPath),
 		)
 	}
+}
+
+func clearLNDEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("LCPD_LND_RPC_ADDR", "")
+	t.Setenv("LCPD_LND_TLS_CERT_PATH", "")
+	t.Setenv("LCPD_LND_ADMIN_MACAROON_PATH", "")
+	t.Setenv("LCPD_LND_MACAROON_PATH", "")
+	t.Setenv("LCPD_LND_MANIFEST_RESEND_INTERVAL", "0s")
 }
 
 func TestParseFlags_LNDFlagsRequireRPCAddr(t *testing.T) {

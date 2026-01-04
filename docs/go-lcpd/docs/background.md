@@ -28,15 +28,21 @@ mkdir -p bin
 GOBIN="$PWD/bin" go install ./tools/lcpd-grpcd
 ```
 
-### 1) Create an env file (recommended)
+### 1) Configure environment
 
-This keeps your startup parameters and secrets out of your shell history.
+You can keep startup parameters and secrets out of your shell history by using
+direnv (`.envrc`, recommended). If you don't use direnv, export `LCPD_*` env vars
+in your shell or service manager configuration.
+
+#### Option A: direnv (`.envrc`)
 
 ```sh
 cd go-lcpd
-cp lcpd.env.sample lcpd.env
-chmod 600 lcpd.env
+cp .envrc.sample .envrc
+direnv allow
 ```
+
+Then edit `.envrc` to add your `LCPD_*` settings.
 
 Requester-only (no Provider execution) tip:
 
@@ -95,6 +101,8 @@ nc -vz 127.0.0.1 50051
 lsof -nP -iTCP:50051 -sTCP:LISTEN
 ```
 
+If you override the listen address (e.g. `LCPD_GRPCD_GRPC_ADDR=127.0.0.1:15051`), adjust the port accordingly.
+
 ### Logs + rotation behavior
 
 - Log link path default: `./.data/lcpd-grpcd/logs/lcpd-grpcd.log` (gitignored)
@@ -123,8 +131,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/ABS/PATH/TO/go-lcpd
-EnvironmentFile=/ABS/PATH/TO/go-lcpd/lcpd.env
-ExecStart=/ABS/PATH/TO/go-lcpd/bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+ExecStart=/usr/bin/env direnv exec /ABS/PATH/TO/go-lcpd /ABS/PATH/TO/go-lcpd/bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 Restart=on-failure
 RestartSec=2s
 KillSignal=SIGINT
@@ -170,7 +177,7 @@ launchd is the macOS service manager. For background + auto-restart, use a Launc
     <array>
       <string>/bin/bash</string>
       <string>-lc</string>
-      <string>cd /ABS/PATH/TO/go-lcpd && source ./lcpd.env && exec ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051</string>
+      <string>cd /ABS/PATH/TO/go-lcpd && exec direnv exec . ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -202,5 +209,5 @@ launchctl print "gui/$UID/com.bruwbird.lcpd-grpcd"
 
 Notes:
 
-- The plist uses `source ./lcpd.env` so you can keep credentials out of the plist itself.
+- The plist uses `direnv exec` so you can keep credentials out of the plist itself (store secrets in `.envrc`).
 - macOS does not rotate these log files automatically; use `newsyslog` or periodically archive/delete old logs.

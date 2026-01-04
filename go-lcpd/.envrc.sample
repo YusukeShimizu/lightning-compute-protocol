@@ -13,8 +13,15 @@ use flake .
 # Optional: keep regtest data dir even on success.
 # export LCP_ITEST_KEEP_DATA=1
 
-# Optional: daemon settings.
-# export LCPD_LOG_LEVEL=debug
+# Daemon settings (safe defaults; edit as needed).
+export LCPD_LOG_LEVEL=info
+export LCPD_BACKEND=disabled
+
+# Provider config (YAML). If unset, lcpd-grpcd uses ./config.yaml if present.
+# The repo's default go-lcpd/config.yaml keeps the Provider disabled.
+# export LCPD_PROVIDER_CONFIG_PATH="$PWD/config.yaml"
+
+# Optional: override Provider backend configuration.
 # export LCPD_BACKEND=openai
 # export LCPD_LLM_MAX_OUTPUT_TOKENS=256
 #
@@ -24,4 +31,10 @@ use flake .
 # export LCPD_LND_RPC_ADDR="localhost:10009"
 # export LCPD_LND_TLS_CERT_PATH="$HOME/.lnd/tls.cert"
 # export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin.macaroon"
+
+# Optional: periodically re-send `lcp_manifest` to connected peers.
+# Unset (or "0s") disables periodic re-sends.
 # export LCPD_LND_MANIFEST_RESEND_INTERVAL="10s"
+
+# If you use `./scripts/lcpd-grpcd up`, keep all `LCPD_*` config here and run the
+# script from a direnv-loaded shell (or use `direnv exec`).

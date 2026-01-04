@@ -4,7 +4,6 @@ package lndpeermsg
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
@@ -38,10 +37,11 @@ func NewStandalone(
 	}
 	logger = logger.With("component", "lndpeermsg")
 
-	maxPayloadBytes := defaultMaxPayloadBytes
 	manifest := lcpwire.Manifest{
 		ProtocolVersion: defaultProtocolVersion,
-		MaxPayloadBytes: &maxPayloadBytes,
+		MaxPayloadBytes: defaultMaxPayloadBytes,
+		MaxStreamBytes:  defaultMaxStreamBytes,
+		MaxJobBytes:     defaultMaxJobBytes,
 	}
 	if localManifest != nil {
 		manifest = *localManifest
@@ -60,7 +60,6 @@ func NewStandalone(
 		inboundHandler:       nil,
 		localManifestPayload: payload,
 		peerAddr:             make(map[string]string),
-		manifestLastSent:     make(map[string]time.Time),
 		peerEventsReady:      make(chan struct{}),
 		customMessagesReady:  make(chan struct{}),
 	}

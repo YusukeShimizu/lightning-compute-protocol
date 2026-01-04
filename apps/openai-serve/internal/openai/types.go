@@ -1,17 +1,40 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 type ChatContent string
 
 func (c *ChatContent) UnmarshalJSON(b []byte) error {
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		*c = ""
+		return nil
+	}
+
 	var s string
-	if err := json.Unmarshal(b, &s); err != nil {
+	if err := json.Unmarshal(b, &s); err == nil {
+		*c = ChatContent(s)
+		return nil
+	}
+
+	// OpenAI-compatible "content parts" array. We extract text parts and ignore others.
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+	}
+	if err := json.Unmarshal(b, &parts); err != nil {
 		return err
 	}
-	*c = ChatContent(s)
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" {
+			sb.WriteString(p.Text)
+		}
+	}
+	*c = ChatContent(sb.String())
 	return nil
 }
 

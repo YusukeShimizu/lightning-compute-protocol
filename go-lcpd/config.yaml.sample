@@ -11,7 +11,7 @@
 # Enable provider:
 #   enabled: true
 #   llm:
-#     chat_profiles:
+#     models:
 #       gpt-5.2:
 #         price:
 #           input_msat_per_mtok: 1750000
@@ -28,18 +28,3 @@ quote_ttl_seconds: 300
 #     per_job_bps: 500 # +5% per job above threshold
 #     max_multiplier_bps: 30000 # 3.0x cap
 
-llm:
-  max_output_tokens: 4096
-  chat_profiles:
-    gpt-5.2:
-      # backend_model defaults to the profile name when omitted.
-      # backend_model: gpt-5.2
-      price:
-        input_msat_per_mtok: 17500000
-        cached_input_msat_per_mtok: 1750000
-        output_msat_per_mtok: 140000000
-      # Optional OpenAI-compatible parameters (Provider-side defaults).
-      # openai:
-      #   temperature: 0.7
-      #   top_p: 1
-      #   stop: ["\\n\\n"]

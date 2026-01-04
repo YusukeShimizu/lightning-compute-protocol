@@ -5,8 +5,8 @@
 
 ## 絶対にログに残してはいけないもの（MUST NOT）
 
-- 生のプロンプト（`llm_chat.prompt` / wire の `input`）
-- 生のモデル出力（wire の `lcp_result.result`）
+- 生のリクエスト JSON（`openai_chat_completions_v1.request_json` / wire の `input` stream bytes）
+- 生のモデル出力（result stream bytes / gRPC `Result.result`）
 - 秘密情報（API key / macaroon / access token など）
 - BOLT11 の `payment_request`（invoice 文字列）
 - Lightning カスタムメッセージの生 payload や、gRPC のリクエスト/レスポンス全体ダンプ
@@ -16,10 +16,10 @@
 ログは **メタデータ** に寄せます:
 
 - 相関: `job_id`, `peer_id` / `peer_pub_key`
-- タスク情報: `task_kind`, `profile`, `prompt_bytes`, `max_output_tokens`, `temperature_milli`
+- タスク情報: `task_kind`, `model`, `input_bytes`
 - 見積もり/支払い: `price_msat`, `quote_expiry_unix`
 - 時間: `quote_ms`, `pay_ms`, `wait_ms`, `execute_ms`, `total_ms`
-- 出力メタデータ: `result_bytes`, `content_type`, `usage_*`（可能な場合の token unit）
+- 出力メタデータ: `output_bytes`, `content_type`, `usage_*`（可能な場合の token unit）
 
 ## ログレベル
 
@@ -35,4 +35,3 @@
 - 生データを残さなくても、ログには **メタデータ**（peer id / job id / 価格 / 時間など）が残ります。保存先・保持期間はセキュリティ上の判断です。
 - ログをディスクに保存する場合は、権限の制限とローテーションを推奨します。
   [バックグラウンド実行とログ](/go-lcpd/docs/background-ja) も参照してください。
-

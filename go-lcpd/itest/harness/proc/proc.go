@@ -55,7 +55,7 @@ func Start(ctx context.Context, t *testing.T, cfg Config) *Process {
 		cmd.Dir = cfg.WorkDir
 	}
 	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
+		cmd.Env = mergeEnv(os.Environ(), cfg.Env)
 	}
 
 	stdoutR, stdoutW := io.Pipe()
@@ -93,6 +93,58 @@ func Start(ctx context.Context, t *testing.T, cfg Config) *Process {
 	})
 
 	return &p
+}
+
+func mergeEnv(base []string, overrides []string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+
+	overrideVals := make(map[string]string, len(overrides))
+	overrideOrder := make([]string, 0, len(overrides))
+	seen := make(map[string]struct{}, len(overrides))
+	for _, kv := range overrides {
+		k, v := splitEnv(kv)
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; !ok {
+			overrideOrder = append(overrideOrder, k)
+			seen[k] = struct{}{}
+		}
+		overrideVals[k] = v
+	}
+
+	used := make(map[string]struct{}, len(overrideVals))
+	out := make([]string, 0, len(base)+len(overrideVals))
+	for _, kv := range base {
+		k, _ := splitEnv(kv)
+		if v, ok := overrideVals[k]; ok {
+			out = append(out, k+"="+v)
+			used[k] = struct{}{}
+			continue
+		}
+		out = append(out, kv)
+	}
+
+	for _, k := range overrideOrder {
+		if _, ok := used[k]; ok {
+			continue
+		}
+		v := overrideVals[k]
+		out = append(out, k+"="+v)
+		used[k] = struct{}{}
+	}
+
+	return out
+}
+
+func splitEnv(kv string) (string, string) {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return kv, ""
+	}
+	return kv[:i], kv[i+1:]
 }
 
 func readLines(

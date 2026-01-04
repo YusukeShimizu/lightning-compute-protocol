@@ -9,7 +9,7 @@ It stores all state/logs under `./.data/devnet/` (gitignored).
 If a step fails, check logs/state under `./.data/devnet/`.
 Re-run with `LCPD_LOG_LEVEL=debug`.
 
-This doc runs a minimal Quote → Pay → Result flow with two roles:
+This doc runs a minimal Quote → Pay → Stream flow with two roles:
 
 - Alice: Provider. Configure Provider mode only on Alice. Use `LCPD_BACKEND=deterministic` to avoid external APIs.
 - Bob: Requester.
@@ -109,7 +109,7 @@ BOB_P2P_ADDR="$(./scripts/devnet paths bob | awk -F= '/^p2p_addr=/{print $2}')"
 ### 2) Open a channel from Alice → Bob (push funds so Bob can pay)
 
 ```sh
-./scripts/devnet lncli alice openchannel --node_key "$BOB_PUBKEY" --local_amt 200000 --push_amt 10000
+./scripts/devnet lncli alice openchannel --node_key "$BOB_PUBKEY" --local_amt 10000000 --push_amt 5000000
 ./scripts/devnet bitcoin-cli generatetoaddress 3 "$ADDR"
 ./scripts/devnet lncli alice listchannels
 ./scripts/devnet lncli bob listchannels
@@ -125,13 +125,13 @@ PAY_REQ="$(./scripts/devnet lncli alice addinvoice --amt 1000 | jq -r .payment_r
 ./scripts/devnet lncli bob payinvoice "$PAY_REQ"
 ```
 
-## Try go-lcpd (custom messages / Quote → Pay → Result)
+## Try go-lcpd (custom messages / Quote → Pay → Stream)
 
 Once the two `lnd` nodes are connected as peers, start `go-lcpd` on both sides.
 This triggers `lcp_manifest` exchange over BOLT #1 custom messages.
 You can observe it via `ListLCPPeers`.
 
-In this walkthrough, Alice runs as a Provider and returns `lcp_result` without external dependencies.
+In this walkthrough, Alice runs as a Provider, streams the result, and sends `lcp_result` without external dependencies.
 It uses `LCPD_BACKEND=deterministic`.
 
 Provider configuration is YAML-first (`LCPD_PROVIDER_CONFIG_PATH`).
@@ -148,7 +148,7 @@ quote_ttl_seconds: 300
 
 llm:
   max_output_tokens: 512
-  chat_profiles:
+  models:
     gpt-5.2:
       price:
         # regtest example pricing (choose any policy you like)
@@ -170,7 +170,7 @@ export LCPD_PROVIDER_CONFIG_PATH="$PWD/provider.devnet.yaml"
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths alice | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths alice | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23051
 ```
 
 ### 2) Start go-lcpd on Bob (Requester-only / separate terminal)
@@ -183,19 +183,19 @@ export LCPD_LOG_LEVEL=debug
 export LCPD_LND_RPC_ADDR="$(./scripts/devnet paths bob | awk -F= '/^rpc_addr=/{print $2}')"
 export LCPD_LND_TLS_CERT_PATH="$(./scripts/devnet paths bob | awk -F= '/^tls_cert_path=/{print $2}')"
 
-./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50052
+./bin/lcpd-grpcd -grpc_addr=127.0.0.1:23052
 ```
 
 ### 3) Call `ListLCPPeers` (confirm manifest exchange)
 
 ```sh
 cd go-lcpd
-./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50052 -o prettyjson
+./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
-If you can see `gpt-5.2` under `peers[0].remoteManifest.supportedTasks[].llmChat.profile`, it means the Provider successfully advertised the profile.
+If you can see `gpt-5.2` under `peers[0].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model`, it means the Provider successfully advertised the model.
 
-### 4) Send one job from Bob to Alice (Quote → Pay → Result)
+### 4) Send one job from Bob to Alice (Quote → Pay → Stream)
 
 ```sh
 cd go-lcpd
@@ -203,10 +203,10 @@ cd go-lcpd
 ALICE_PUBKEY="$(./scripts/devnet lncli alice getinfo | jq -r .identity_pubkey)"
 
 ./bin/lcpd-oneshot \
-  -server-addr 127.0.0.1:50052 \
+  -server-addr 127.0.0.1:23052 \
   -peer-id "$ALICE_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word." \
   -timeout 60s
 ```
