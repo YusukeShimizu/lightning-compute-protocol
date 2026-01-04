@@ -1,0 +1,38 @@
+# Provider config (YAML) for lcpd-grpcd.
+#
+# This file is intended as a safe default sample:
+# - Provider is disabled by default.
+# - TTL/max_output_tokens/pricing match the built-in defaults.
+#
+# Usage:
+#   cd go-lcpd
+#   export LCPD_PROVIDER_CONFIG_PATH="$PWD/config.yaml"  # optional if you run from this directory
+#
+# Enable provider:
+#   enabled: true
+#   llm:
+#     chat_profiles:
+#       gpt-5.2:
+#         price:
+#           input_msat_per_mtok: 1750000
+#           cached_input_msat_per_mtok: 175000
+#           output_msat_per_mtok: 14000000
+#
+enabled: true
+quote_ttl_seconds: 300
+
+llm:
+  max_output_tokens: 4096
+  chat_profiles:
+    gpt-5.2:
+      # backend_model defaults to the profile name when omitted.
+      # backend_model: gpt-5.2
+      price:
+        input_msat_per_mtok: 17500000
+        cached_input_msat_per_mtok: 1750000
+        output_msat_per_mtok: 140000000
+      # Optional OpenAI-compatible parameters (Provider-side defaults).
+      # openai:
+      #   temperature: 0.7
+      #   top_p: 1
+      #   stop: ["\\n\\n"]
