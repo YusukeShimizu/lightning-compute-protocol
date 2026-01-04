@@ -22,10 +22,11 @@ import (
 
 const (
 	defaultServerAddr = "127.0.0.1:50051"
-	defaultProfile    = "gpt-5.2"
+	defaultModel      = "gpt-5.2"
 	defaultTimeout    = 30 * time.Second
 
 	defaultChatMaxPromptBytes = 12000
+	temperatureMilliScale     = 1000
 )
 
 const (
@@ -40,7 +41,7 @@ var errPromptEmpty = errors.New("prompt is empty")
 type runOptions struct {
 	ServerAddr       string
 	PeerID           string
-	Profile          string
+	Model            string
 	TemperatureMilli uint32
 	MaxOutputTokens  uint32
 	PayInvoice       bool
@@ -142,11 +143,18 @@ func parseArgs(args []string, stdin io.Reader) (runOptions, error) {
 		"gRPC server address (host:port)",
 	)
 	fs.StringVar(&opts.PeerID, "peer-id", "", "target peer pubkey (66-hex compressed pubkey)")
-	fs.StringVar(
-		&opts.Profile,
+	modelFlag := fs.String(
+		"model",
+		"",
+		fmt.Sprintf(
+			"OpenAI model ID for openai.chat_completions.v1 (e.g. %s)",
+			defaultModel,
+		),
+	)
+	profileFlag := fs.String(
 		"profile",
-		defaultProfile,
-		"llm.chat profile (model or routing identifier)",
+		"",
+		"DEPRECATED: use -model (kept for backwards compatibility)",
 	)
 	temperatureMilli := fs.Uint(
 		"temperature-milli",
@@ -195,7 +203,20 @@ func parseArgs(args []string, stdin io.Reader) (runOptions, error) {
 	opts.Prompt = prompt
 
 	opts.PeerID = strings.TrimSpace(opts.PeerID)
-	opts.Profile = strings.TrimSpace(opts.Profile)
+
+	model := strings.TrimSpace(*modelFlag)
+	profile := strings.TrimSpace(*profileFlag)
+	if model != "" && profile != "" && model != profile {
+		return runOptions{}, errors.New("-model and -profile must match when both are set")
+	}
+	if model == "" {
+		model = profile
+	}
+	if model == "" {
+		model = defaultModel
+	}
+	opts.Model = model
+
 	if *temperatureMilli > uint(^uint32(0)) {
 		return runOptions{}, errors.New("temperature-milli must be <= 4294967295")
 	}
@@ -211,8 +232,8 @@ func parseArgs(args []string, stdin io.Reader) (runOptions, error) {
 	if opts.Timeout <= 0 {
 		return runOptions{}, errors.New("timeout must be > 0")
 	}
-	if opts.Profile == "" {
-		return runOptions{}, errors.New("profile is required")
+	if opts.Model == "" {
+		return runOptions{}, errors.New("model is required")
 	}
 
 	return opts, nil
@@ -324,16 +345,24 @@ func runPipeline(
 	client lcpdClient,
 	opts runOptions,
 ) (pipelineResult, error) {
+	requestJSON, err := buildOpenAIChatCompletionsV1RequestJSON(
+		opts.Model,
+		opts.Prompt,
+		opts.TemperatureMilli,
+		opts.MaxOutputTokens,
+	)
+	if err != nil {
+		return pipelineResult{}, err
+	}
+
 	quoteResp, err := client.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 		PeerId: opts.PeerID,
 		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_LlmChat{
-				LlmChat: &lcpdv1.LLMChatTaskSpec{
-					Prompt: opts.Prompt,
-					Params: &lcpdv1.LLMChatParams{
-						Profile:          opts.Profile,
-						TemperatureMilli: opts.TemperatureMilli,
-						MaxOutputTokens:  opts.MaxOutputTokens,
+			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+					RequestJson: requestJSON,
+					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+						Model: opts.Model,
 					},
 				},
 			},
@@ -375,6 +404,53 @@ func runPipeline(
 
 	res.Result = execResp.GetResult()
 	return res, nil
+}
+
+type openAIChatCompletionsV1Request struct {
+	Model string `json:"model"`
+
+	Messages []openAIChatMessage `json:"messages"`
+
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   *uint32  `json:"max_tokens,omitempty"`
+}
+
+type openAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func buildOpenAIChatCompletionsV1RequestJSON(
+	model string,
+	prompt string,
+	temperatureMilli uint32,
+	maxOutputTokens uint32,
+) ([]byte, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, errors.New("model is required")
+	}
+
+	req := openAIChatCompletionsV1Request{
+		Model: model,
+		Messages: []openAIChatMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+	if temperatureMilli != 0 {
+		temp := float64(temperatureMilli) / temperatureMilliScale
+		req.Temperature = &temp
+	}
+	if maxOutputTokens != 0 {
+		maxTokens := maxOutputTokens
+		req.MaxTokens = &maxTokens
+	}
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal OpenAI chat completions request: %w", err)
+	}
+	return out, nil
 }
 
 func formatHumanSummary(res pipelineResult) string {

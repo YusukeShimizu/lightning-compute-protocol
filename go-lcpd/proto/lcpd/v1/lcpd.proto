@@ -136,57 +136,23 @@ service LCPDService {
 // This is primarily used for Manifests and debugging.
 enum LCPTaskKind {
   LCP_TASK_KIND_UNSPECIFIED = 0;
-  LCP_TASK_KIND_LLM_CHAT = 1; // "llm.chat"
+  reserved 1;
+  reserved "LCP_TASK_KIND_LLM_CHAT";
   LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 = 2; // "openai.chat_completions.v1"
 }
 
 // Task is the strict container for a job request.
 // It uses `oneof` to enforce that only one valid task specification is provided.
 message Task {
+  reserved 1;
+  reserved "llm_chat";
+
   oneof spec {
     option (buf.validate.oneof).required = true;
-
-    // Structured specification for "llm.chat"
-    LLMChatTaskSpec llm_chat = 1;
 
     // Structured specification for "openai.chat_completions.v1"
     OpenAIChatCompletionsV1TaskSpec openai_chat_completions_v1 = 2;
   }
-}
-
-// LLMChatTaskSpec defines the inputs and parameters for an LLM Chat task.
-// Maps to:
-//   - input: UTF-8 string (prompt)
-//   - params: TLV encoded parameters
-message LLMChatTaskSpec {
-  // The prompt text to be processed.
-  string prompt = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).string.min_len = 1
-  ];
-
-  // The configuration parameters for the model.
-  LLMChatParams params = 2 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).required = true
-  ];
-}
-
-// LLMChatParams defines the tunable parameters for "llm.chat".
-message LLMChatParams {
-  // "profile" (TLV type 1).
-  // Identifier for the model or routing (e.g., "gpt-5.2").
-  string profile = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).string.min_len = 1
-  ];
-
-  // "temperature_milli" (TLV type 2).
-  // Scaled by 1000 (e.g., 700 = 0.7).
-  uint32 temperature_milli = 2;
-
-  // "max_output_tokens" (TLV type 3).
-  uint32 max_output_tokens = 3;
 }
 
 // OpenAIChatCompletionsV1TaskSpec defines a passthrough OpenAI-compatible
@@ -266,7 +232,7 @@ message Result {
   Status status = 1 [(buf.validate.field).required = true];
 
   // If status=OK, the decoded result bytes reconstructed from the result stream.
-  // For "llm.chat", the client should interpret this as a UTF-8 string.
+  // For "openai.chat_completions.v1", the client should interpret this as raw JSON bytes.
   bytes result = 2;
 
   // If status=OK, these fields reflect the validated result stream metadata.
@@ -331,9 +297,11 @@ message LCPTaskTemplate {
   oneof params_template {
     option (buf.validate.oneof).required = true;
 
-    LLMChatParams llm_chat = 2;
     OpenAIChatCompletionsV1Params openai_chat_completions_v1 = 3;
   }
+
+  reserved 2;
+  reserved "llm_chat";
 }
 
 // -----------------------------------------------------------------------------

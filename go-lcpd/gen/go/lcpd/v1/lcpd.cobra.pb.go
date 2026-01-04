@@ -148,30 +148,6 @@ func _LCPDServiceRequestQuoteCommand(cfg *client.Config) *cobra.Command {
 
 	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID (Pubkey).")
 	_Task := &Task{}
-	_Task_LlmChat := &LLMChatTaskSpec{}
-	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task LlmChat"), false, "")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task LlmChat"), func() { req.Task = _Task; _Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat} })
-	cmd.PersistentFlags().StringVar(&_Task_LlmChat.Prompt, cfg.FlagNamer("Task LlmChat Prompt"), "", "The prompt text to be processed.")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task LlmChat Prompt"), func() { req.Task = _Task; _Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat} })
-	_Task_LlmChat_Params := &LLMChatParams{}
-	cmd.PersistentFlags().StringVar(&_Task_LlmChat_Params.Profile, cfg.FlagNamer("Task LlmChat Params Profile"), "", "\"profile\" (TLV type 1).\n Identifier for the model or routing (e.g., \"gpt-5.2\").")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task LlmChat Params Profile"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat}
-		_Task_LlmChat.Params = _Task_LlmChat_Params
-	})
-	cmd.PersistentFlags().Uint32Var(&_Task_LlmChat_Params.TemperatureMilli, cfg.FlagNamer("Task LlmChat Params TemperatureMilli"), 0, "\"temperature_milli\" (TLV type 2).\n Scaled by 1000 (e.g., 700 = 0.7).")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task LlmChat Params TemperatureMilli"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat}
-		_Task_LlmChat.Params = _Task_LlmChat_Params
-	})
-	cmd.PersistentFlags().Uint32Var(&_Task_LlmChat_Params.MaxOutputTokens, cfg.FlagNamer("Task LlmChat Params MaxOutputTokens"), 0, "\"max_output_tokens\" (TLV type 3).")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task LlmChat Params MaxOutputTokens"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_LlmChat{LlmChat: _Task_LlmChat}
-		_Task_LlmChat.Params = _Task_LlmChat_Params
-	})
 	_Task_OpenaiChatCompletionsV1 := &OpenAIChatCompletionsV1TaskSpec{}
 	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task OpenaiChatCompletionsV1"), false, "")
 	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1"), func() {

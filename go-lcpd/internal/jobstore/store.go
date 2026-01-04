@@ -190,10 +190,6 @@ func cloneJob(job Job) Job {
 			paramsCopy := append([]byte(nil), (*reqCopy.ParamsBytes)...)
 			reqCopy.ParamsBytes = &paramsCopy
 		}
-		if reqCopy.LLMChatParams != nil {
-			llmCopy := *reqCopy.LLMChatParams
-			reqCopy.LLMChatParams = &llmCopy
-		}
 		job.QuoteRequest = &reqCopy
 	}
 	if job.InputStream != nil {

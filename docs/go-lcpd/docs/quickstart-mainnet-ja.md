@@ -99,7 +99,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 ```
 
-## 6) Provider が対応するプロファイルを確認（任意）
+## 6) Provider が対応する model を確認（任意）
 
 別ターミナルで:
 
@@ -108,11 +108,11 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50051 -o prettyjson
 ```
 
-`peers[].remoteManifest.supportedTasks[].llmChat.profile` に Provider のプロファイル（広告されている場合）が入っています。
+`peers[].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` に Provider の model（広告されている場合）が入っています。
 
 注意:
 
-- `supportedTasks` は `lcp_manifest` の任意フィールドです。Provider が `llm.chat_profiles` を設定していない（または Provider モードが disabled）場合、`supported_tasks` を広告しません。
+- `supportedTasks` は `lcp_manifest` の任意フィールドです。Provider が `llm.models` を設定していない（または Provider モードが disabled）場合、`supported_tasks` を広告しません。
 - `-o prettyjson` は空フィールドを省略するため、仕様上フィールドが absent であっても `supportedTasks` が見えない場合があります。
 
 ## 7) ジョブを 1 回実行（Quote → Pay → Result）
@@ -128,7 +128,7 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
   -server-addr 127.0.0.1:50051 \
   -peer-id "$PROVIDER_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word." \
   -timeout 60s
 ```
@@ -146,12 +146,12 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
   -server-addr 127.0.0.1:50051 \
   -peer-id "$PROVIDER_PUBKEY" \
   -pay-invoice \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -chat
 ```
 
 ## トラブルシューティング
 
 - `peer is not ready for lcp`: `lnd` が Provider に接続できているか（`lncli listpeers`）確認し、`lcpdctl list-lcp-peers` でも見えることを確認してください。
-- `lcp_error code=2: unsupported profile ...`: `-profile` を Provider がサポートする値にしてください（手順 6 を参照）。
+- `lcp_error code=2: unsupported model ...`: `-model` を Provider がサポートする値にしてください（手順 6 を参照）。
 - `payment failed`: チャネル / ルート / 流動性が不足している可能性があります。`lncli walletbalance` と `lncli listchannels` を確認してください。

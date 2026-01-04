@@ -33,7 +33,7 @@ These constraints are system invariants.
 - Manifest-gated job messages: go-lcpd MUST NOT send any job-scope messages until it has (1) sent `lcp_manifest` and (2) received the peer's `lcp_manifest`. Rationale: required by `protocol/protocol.md` and needed to learn peer limits (`max_payload_bytes`, etc.).
 - Preserve TLV stream canonical form: Encode TLVs as `bigsize(type)` → `bigsize(length)` → `value`. Sort by type. Do not duplicate types. Rationale: byte-exact `terms_hash` and forward compatibility.
 - Do not disconnect on unknown TLVs: Unknown TLVs MUST NOT cause disconnection. Continue decoding. Rationale: forward compatibility.
-- `llm_chat_params_tlvs` is strict: Providers MUST reject unknown param types with `lcp_error(code=unsupported_params)`. Rationale: fixed interpretation of typed params.
+- `openai_chat_completions_v1_params_tlvs` is strict: Providers MUST reject unknown param types with `lcp_error(code=unsupported_params)`. Rationale: fixed interpretation of typed params.
 
 - Always include job-scope envelope TLVs: All LCP messages except `lcp_manifest` MUST include `job_id`, `msg_id`, and `expiry` per `protocol/protocol.md`. Rationale: replay safety and idempotency.
 - Deterministic chunk `msg_id`: For `lcp_stream_chunk`, `msg_id` MUST be `SHA256(stream_id || u32be(seq))` per `protocol/protocol.md`. Rationale: bounded replay state for large streams.
@@ -99,24 +99,26 @@ Operational Principle:
 ### LCPTasks
 Purpose: Provide strict task definitions from `go-lcpd/proto/lcpd/v1/lcpd.proto` and pin down the mapping to the wire format.
 Domain Model:
-* `LCPTaskKind`: `LCP_TASK_KIND_UNSPECIFIED` | `LCP_TASK_KIND_LLM_CHAT`
-* `Task`: `oneof spec` (currently only `LLMChatTaskSpec`)
-* `LLMChatTaskSpec`: prompt(string), params(LLMChatParams)
-* `LLMChatParams`: profile(string), temperature_milli(uint32), max_output_tokens(uint32)
+* `LCPTaskKind`: `LCP_TASK_KIND_UNSPECIFIED` | `LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1`
+* `Task`: `oneof spec` (currently only `OpenAIChatCompletionsV1TaskSpec`)
+* `OpenAIChatCompletionsV1TaskSpec`: request_json([]byte), params(OpenAIChatCompletionsV1Params)
+* `OpenAIChatCompletionsV1Params`: model(string)
 Actions:
 * `validate_task(task) -> ok | error`
 * `to_wire_quote_request_task(task) -> task_kind(string), params_bytes(*[]byte) | error`
 * `to_wire_input_stream(task) -> decoded_bytes([]byte), content_type(string), content_encoding(string) | error`
 Operational Principle:
-* This implementation supports only `llm.chat` and MUST reject everything else.
-* `LLMChatTaskSpec.prompt` MUST NOT be empty.
-* `LLMChatParams.profile` MUST NOT be empty.
+* This implementation supports only `openai.chat_completions.v1` and MUST reject everything else.
+* `OpenAIChatCompletionsV1TaskSpec.request_json` MUST be non-empty valid JSON.
+* `OpenAIChatCompletionsV1Params.model` MUST NOT be empty.
+* `request_json.model` MUST be present and MUST match `params.model`.
+* `request_json.messages` MUST be present and MUST be non-empty.
+* `request_json.stream` MUST be omitted or false (streaming is not supported yet).
 * Wire mapping (`protocol/protocol.md`):
-  * `task_kind = "llm.chat"`
-  * input stream decoded bytes = UTF-8(prompt)
-  * input stream metadata: `content_type = "text/plain; charset=utf-8"`, `content_encoding = "identity"`
-  * `params = llm_chat_params_tlvs` (must include at least `profile`)
-* In proto, `temperature_milli` / `max_output_tokens` treat 0 as "unset". On the wire, omit those TLVs from `llm_chat_params_tlvs` (to align with proto3 presence semantics).
+  * `task_kind = "openai.chat_completions.v1"`
+  * input stream decoded bytes = raw `request_json` bytes (UTF-8 JSON)
+  * input stream metadata: `content_type = "application/json; charset=utf-8"`, `content_encoding = "identity"`
+  * `params = openai_chat_completions_v1_params_tlvs` (must include at least `model`)
 
 ### LCPWire
 Purpose: Encode/decode the LCP wire messages (TLV streams) defined in `protocol/protocol.md`.
@@ -124,8 +126,8 @@ Domain Model:
 * `MessageType`: `lcp_manifest(42081)` / `lcp_quote_request(42083)` / `lcp_quote_response(42085)` / `lcp_result(42087)` / `lcp_stream_begin(42089)` / `lcp_stream_chunk(42091)` / `lcp_stream_end(42093)` / `lcp_cancel(42095)` / `lcp_error(42097)`
 * `JobEnvelope`: protocol_version(uint16), job_id(32 bytes), msg_id(32 bytes), expiry(uint64)
 * `Manifest`: protocol_version, max_payload_bytes(uint32), max_stream_bytes(uint64), max_job_bytes(uint64), max_inflight_jobs(*uint16), supported_tasks([]TaskTemplate)
-* `TaskTemplate`: task_kind(string), params_bytes(*[]byte), llm_chat_params(*LLMChatParams)
-* `QuoteRequest`: envelope, task_kind(string), params_bytes(*[]byte), llm_chat_params(*LLMChatParams)
+* `TaskTemplate`: task_kind(string), params_bytes(*[]byte)
+* `QuoteRequest`: envelope, task_kind(string), params_bytes(*[]byte)
 * `QuoteResponse`: envelope, price_msat(uint64), quote_expiry(uint64), terms_hash(32 bytes), payment_request(string)
 * `StreamKind`: `input(1)` | `result(2)`
 * `StreamBegin`: envelope, stream_id(32 bytes), stream_kind(uint16), total_len(*uint64), sha256(*32 bytes), content_type(string), content_encoding(string)
@@ -135,7 +137,7 @@ Domain Model:
 * `ResultOK`: result_stream_id(32 bytes), result_hash(32 bytes), result_len(uint64), result_content_type(string), result_content_encoding(string)
 * `Cancel`: envelope, reason(*string)
 * `Error`: envelope, code(uint16), message(*string)
-* `LLMChatParams`: profile(string), temperature_milli(*uint32), max_output_tokens(*uint32), unknown(map[uint64][]byte)
+* `OpenAIChatCompletionsV1Params`: model(string), unknown(map[uint64][]byte)
 Actions:
 * `encode_manifest(m) -> payload_bytes | error`
 * `decode_manifest(payload_bytes) -> manifest | error`
@@ -155,13 +157,13 @@ Actions:
 * `decode_cancel(payload_bytes) -> cancel | error`
 * `encode_error(e) -> payload_bytes | error`
 * `decode_error(payload_bytes) -> lcp_error | error`
-* `encode_llm_chat_params(p) -> params_bytes | error`
-* `decode_llm_chat_params(params_bytes) -> params | error`
+* `encode_openai_chat_completions_v1_params(p) -> params_bytes | error`
+* `decode_openai_chat_completions_v1_params(params_bytes) -> params | error`
 Operational Principle:
 * Treat `lcp_manifest` as connection-scoped (do not include job envelope TLVs).
 * Job-scope messages (everything except `lcp_manifest`) MUST include `JobEnvelope` (`protocol_version`, `job_id`, `msg_id`, `expiry`).
 * `lcp_stream_chunk.msg_id` MUST be deterministic (`SHA256(stream_id || u32be(seq))`). `encode_stream_chunk` MUST compute it; `decode_stream_chunk` MUST verify it.
-* `llm_chat_params_tlvs` MUST preserve unknown TLVs in `unknown` and MUST NOT fail decoding solely due to unknown TLVs (forward compatibility).
+* `openai_chat_completions_v1_params_tlvs` MUST preserve unknown TLVs in `unknown` and MUST NOT fail decoding solely due to unknown TLVs (forward compatibility).
 
 ### LCPMessageRouter
 Purpose: Classify inbound custom messages into known LCP message types and apply the BOLT #1 parity rule for unknown message types.
@@ -209,7 +211,7 @@ Operational Principle:
 * Default bounds MUST be `DEFAULT_MAX_STORE_ENTRIES = 1024`.
 
 ### ComputeBackend
-Purpose: Execute `llm.chat` on the Provider side and produce output bytes.
+Purpose: Execute `openai.chat_completions.v1` on the Provider side and produce output bytes.
 Domain Model:
 * `Task`: task_kind(string), model(string), input_bytes([]byte), params_bytes([]byte)
 * `ExecutionResult`: output_bytes([]byte), usage
@@ -217,24 +219,25 @@ Actions:
 * `execute(ctx, task) -> execution_result | error`
 Operational Principle:
 * In integration tests, `execute` MUST be a deterministic stub/dummy implementation (connectivity and reproducibility come first).
-* For `task_kind="llm.chat"`, `input_bytes` is treated as a single UTF-8 prompt string.
-* For `task_kind="llm.chat"`, `task.model` is the backend model ID (resolved from the LCP `profile` via Provider config).
-* `output_bytes` SHOULD be returned as UTF-8 response text.
+* For `task_kind="openai.chat_completions.v1"`, `input_bytes` is treated as raw UTF-8 JSON request bytes for `POST /v1/chat/completions`.
+* For `task_kind="openai.chat_completions.v1"`, `task.model` is the upstream model ID (from `request_json.model` / `params.model`).
+* For `task_kind="openai.chat_completions.v1"`, `params_bytes` MUST be empty (request configuration is carried in `input_bytes`).
+* `output_bytes` MUST be returned as raw OpenAI-compatible non-streaming response body bytes (JSON).
 
 ### LLMExecutionPolicy
-Purpose: Control `llm.chat` execution parameters (especially max output tokens) to ensure DoS resistance and determinism.
+Purpose: Control `openai.chat_completions.v1` max output tokens for pricing, DoS resistance, and determinism.
 Domain Model:
 * `ExecutionPolicy`: max_output_tokens(uint32)
+* `ExecutionPolicyProvider`: `policy() -> ExecutionPolicy`
 Actions:
-* `apply(task) -> planned_task | error`
+* `policy() -> ExecutionPolicy`
 Operational Principle:
-* The Provider MUST NOT pass request `max_output_tokens` / `temperature_milli` directly to the backend (fixed by server-side policy).
-* `planned_task.params_bytes` MUST be UTF-8 JSON suitable for an OpenAI-compatible API and MUST include at least `{ "max_output_tokens": <value> }`.
-* `planned_task.params_bytes` MAY include additional OpenAI-compatible fields (e.g., `temperature`, `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, `seed`) sourced from Provider-side config.
-* `apply` MUST reject any request where `task.params_bytes` is already non-empty (policy is the sole request params source).
+* `policy.max_output_tokens` MUST be > 0.
+* If the request specifies an output-token cap (`max_completion_tokens` / `max_tokens` / `max_output_tokens`), the Provider MUST reject values that exceed `policy.max_output_tokens`.
+* If the request does not specify an output-token cap, the Provider MUST use `policy.max_output_tokens` for quote-time estimation.
 
 ### LLMUsageEstimator
-Purpose: Estimate `llm.chat` token usage during quoting to drive pricing decisions.
+Purpose: Estimate `openai.chat_completions.v1` token usage during quoting to drive pricing decisions.
 Domain Model:
 * `UsageEstimate`: input_tokens(uint64), max_output_tokens(uint64), total_tokens(uint64)
 * `Estimation`: usage, resources([]ResourceEstimate), estimator_id(string)
@@ -243,28 +246,28 @@ Actions:
 * `estimate(task, policy) -> estimation | error`
 Operational Principle:
 * Token estimation uses `approx.v1`: `input_tokens = ceil(len(input_bytes)/4)`, `max_output_tokens = policy.max_output_tokens`.
-* `task_kind!="llm.chat"` MUST be rejected.
+* `task_kind!="openai.chat_completions.v1"` MUST be rejected.
 
 ### LLMPricing
 Purpose: Compute `price_msat` from estimated token usage on the Provider side.
 Domain Model:
-* `PriceTableEntry`: profile(string), input_msat_per_mtok(uint64), cached_input_msat_per_mtok(*uint64), output_msat_per_mtok(uint64)
-* `PriceTable`: map[profile]PriceTableEntry
+* `PriceTableEntry`: model(string), input_msat_per_mtok(uint64), cached_input_msat_per_mtok(*uint64), output_msat_per_mtok(uint64)
+* `PriceTable`: map[model]PriceTableEntry
 * `PriceBreakdown`: input_tokens, cached_input_tokens, output_tokens, price_msat(uint64)
 Actions:
-* `quote_price(profile, usage_estimate, cached_input_tokens, price_table) -> price_breakdown | error`
+* `quote_price(model, usage_estimate, cached_input_tokens, price_table) -> price_breakdown | error`
 Operational Principle:
 * Prices are computed from a table in units of "msat per 1M tokens", rounding up (ceil).
-* Unknown profiles MUST be rejected.
+* Unknown models MUST be rejected.
 * Overflows MAY be treated as equivalent to `rate_limited`.
 
 ### LCPProvider
 Purpose: Act as an LCP v0.2 Provider: process job-scope messages and complete quote → payment → stream(result) → `lcp_result`.
 Domain Model:
-* `ProviderConfig`: enabled(bool), quote_ttl_seconds(uint64), llm_chat_profiles(map[profile]LLMChatProfile)
-* `ProviderRuntime`: execution_policy(ExecutionPolicy), usage_estimator(LLMUsageEstimator)
-* `LLMChatProfile`: backend_model(string), max_output_tokens(*uint32), price(PriceTableEntry), openai_params(OpenAIChatParams)
-* `OpenAIChatParams`: temperature(*float64), top_p(*float64), stop([]string), presence_penalty(*float64), frequency_penalty(*float64), seed(*int64)
+* `ProviderConfig`: enabled(bool), quote_ttl_seconds(uint64), pricing(InFlightSurge), models(map[model]ModelConfig)
+* `ProviderRuntime`: execution_policy(ExecutionPolicyProvider), usage_estimator(LLMUsageEstimator)
+* `InFlightSurge`: threshold(uint32), per_job_bps(uint32), max_multiplier_bps(uint32)
+* `ModelConfig`: max_output_tokens(*uint32), price(PriceTableEntry)
 Actions:
 * `handle_quote_request(peer_pubkey, quote_request, now) -> void`
 * `handle_stream_begin(peer_pubkey, stream_begin, now) -> void`
@@ -275,9 +278,14 @@ Operational Principle:
 * Provider mode MUST be explicitly enabled (`lcpd-grpcd` requires `enabled: true` in the YAML at `LCPD_PROVIDER_CONFIG_PATH`).
 * If Provider is disabled (or the compute backend is disabled), inbound `lcp_quote_request` MUST be rejected as `lcp_error(code=unsupported_task)` (do not create invoices or execute).
 * The Provider MUST decode job-scope messages and validate `protocol_version` and the task (unsupported cases return `lcp_error`).
-* `llm.chat` params are strict: if unknown TLV types are present, return `lcp_error(code=unsupported_params)`.
-* If `llm_chat_profiles` is non-empty, requests whose `profile` is not in the set MUST be rejected as `lcp_error(code=unsupported_task)`.
-* If `llm_chat_profiles` is empty, any `profile` MAY be accepted, but the manifest MUST NOT advertise `supported_tasks`.
+* `openai_chat_completions_v1_params_tlvs` are strict: if unknown TLV types are present, return `lcp_error(code=unsupported_params)`.
+* `openai.chat_completions.v1` inputs MUST be valid JSON and MUST satisfy:
+  * `request_json.model` is required.
+  * `request_json.messages` is required and must be non-empty.
+  * `request_json.stream` must be omitted or false.
+  * `params.model` is required and must match `request_json.model`.
+* If `models` is non-empty, requests whose `params.model` is not in the set MUST be rejected as `lcp_error(code=unsupported_task)`.
+* If `models` is empty, any `params.model` MAY be accepted, but the manifest MUST NOT advertise `supported_tasks`.
 * The Provider MUST de-duplicate inbound job-scope messages via `ReplayStore`, and drop messages where `expiry < now`.
   * For `lcp_stream_chunk`, de-duplication is performed by stream state (`seq < expected_seq` is ignored as a duplicate).
 * For multiple `lcp_quote_request` messages with the same `job_id`, the Provider SHOULD return the same `lcp_quote_response` within TTL once it has been issued (idempotency).
@@ -291,13 +299,13 @@ Operational Principle:
   * `seq` MUST start at 0 and increase by exactly 1; `seq < expected_seq` is ignored as a duplicate; `seq > expected_seq` MUST return `lcp_error(code=chunk_out_of_order)`.
   * The Provider MUST enforce local limits (`max_payload_bytes`, `max_stream_bytes`, `max_job_bytes`) for inbound streams.
   * Stream end validation failure MUST return `lcp_error(code=checksum_mismatch)`.
-* `price_msat` is computed after input stream validation via `LLMExecutionPolicy.apply` + `LLMUsageEstimator.estimate` + `LLMPricing.quote_price` (fixed at quote-time; do not recompute on settlement).
+* `price_msat` is computed after input stream validation via max-output-token planning + `LLMUsageEstimator.estimate` + `LLMPricing.quote_price` (fixed at quote-time; do not recompute on settlement).
 * The Provider MUST compute `terms_hash` and MUST set the BOLT11 invoice `description_hash` to exactly equal `terms_hash` (invoice swapping defense).
 * The Provider MUST NOT start execution before invoice settlement.
-* When executing, the Provider MUST map `profile -> backend_model` and pass `backend_model` to the compute backend.
+* When executing, the Provider MUST pass `params.model` to the compute backend as `task.model`.
 * Result delivery (v0.2):
-  * For `task_kind="llm.chat"`, output bytes MUST be treated as a UTF-8 string.
-  * The Provider SHOULD set `result_content_type = "text/plain; charset=utf-8"` and MUST use `result_content_encoding = "identity"`.
+  * For `task_kind="openai.chat_completions.v1"`, output bytes MUST be treated as raw OpenAI-compatible response body bytes (JSON).
+  * The Provider SHOULD set `result_content_type = "application/json; charset=utf-8"` and MUST use `result_content_encoding = "identity"`.
   * The Provider MUST send exactly one result stream (`stream_kind=result`) after invoice settlement and before `lcp_result(status=ok)`.
   * The Provider MUST include in `lcp_result(status=ok)` the metadata matching the validated result stream (`result_stream_id`, `result_hash`, `result_len`, `result_content_type`, `result_content_encoding`).
 * Outbound sizing:
@@ -501,7 +509,7 @@ Summary: Return local `node_id` and `manifest` via `GetLocalInfo`.
 When: `GRPCService.GetLocalInfo` is called.
 Then:
 1. Call `LightningRPC.get_info` and use `identity_pubkey` as `node_id`.
-2. Build `manifest` from local config (`protocol_version=2`, `max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES`, `max_stream_bytes=DEFAULT_MAX_STREAM_BYTES`, `max_job_bytes=DEFAULT_MAX_JOB_BYTES`). Include `supported_tasks` only when Provider is enabled and `llm_chat_profiles` is non-empty.
+2. Build `manifest` from local config (`protocol_version=2`, `max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES`, `max_stream_bytes=DEFAULT_MAX_STREAM_BYTES`, `max_job_bytes=DEFAULT_MAX_JOB_BYTES`). Include `supported_tasks` only when Provider is enabled and `models` is non-empty.
 3. Return `GetLocalInfoResponse{node_id, manifest}`.
 
 ### sync grpc_list_lcp_peers

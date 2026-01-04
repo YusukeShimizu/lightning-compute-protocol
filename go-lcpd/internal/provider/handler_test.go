@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -66,8 +67,8 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 	handler.newMsgIDFn = func() (lcpwire.MsgID, error) { return fixedMsgID(0x03), nil }
 
 	model := "gpt-5.2"
-	req := newLLMChatQuoteRequest(model)
-	inputBytes := []byte("prompt")
+	req := newOpenAIChatCompletionsV1QuoteRequest(model)
+	inputBytes := fmt.Appendf(nil, `{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`, model)
 	payload := mustEncodeQuoteRequest(t, req)
 
 	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
@@ -94,7 +95,7 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 		Kind:            lcpwire.StreamKindInput,
 		TotalLen:        &totalLen,
 		SHA256:          &inputHash,
-		ContentType:     contentTypeTextPlain,
+		ContentType:     contentTypeApplicationJSON,
 		ContentEncoding: "identity",
 	})
 
@@ -178,7 +179,7 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 	}, protocolcompat.TermsCommit{
 		TaskKind:             req.TaskKind,
 		Input:                inputBytes,
-		InputContentType:     contentTypeTextPlain,
+		InputContentType:     contentTypeApplicationJSON,
 		InputContentEncoding: "identity",
 		Params:               paramsBytes,
 	})
@@ -221,7 +222,7 @@ func TestHandler_CheckReplay_ClampsEnvelopeExpiryWindow(t *testing.T) {
 	}
 }
 
-func TestHandler_HandleQuoteRequest_RejectsUnsupportedProfile(t *testing.T) {
+func TestHandler_HandleQuoteRequest_RejectsUnsupportedModel(t *testing.T) {
 	t.Parallel()
 
 	clock := &fakeClock{now: time.Unix(1000, 0)}
@@ -244,10 +245,9 @@ func TestHandler_HandleQuoteRequest_RejectsUnsupportedProfile(t *testing.T) {
 		Config{
 			Enabled:         true,
 			QuoteTTLSeconds: 600,
-			LLMChatProfiles: map[string]LLMChatProfile{
+			Models: map[string]ModelConfig{
 				"gpt-5.2": {
-					BackendModel: "gpt-5.2",
-					Price:        llm.DefaultPriceTable()["gpt-5.2"],
+					Price: llm.DefaultPriceTable()["gpt-5.2"],
 				},
 			},
 		},
@@ -265,7 +265,7 @@ func TestHandler_HandleQuoteRequest_RejectsUnsupportedProfile(t *testing.T) {
 	handler.clock = clock
 	handler.newMsgIDFn = func() (lcpwire.MsgID, error) { return fixedMsgID(0x03), nil }
 
-	req := newLLMChatQuoteRequest("x")
+	req := newOpenAIChatCompletionsV1QuoteRequest("x")
 	payload, err := lcpwire.EncodeQuoteRequest(req)
 	if err != nil {
 		t.Fatalf("encode quote_request: %v", err)
@@ -299,14 +299,14 @@ func TestHandler_HandleQuoteRequest_RejectsUnsupportedProfile(t *testing.T) {
 	if gotErr.Message == nil {
 		t.Fatalf("error message is nil")
 	}
-	if !strings.Contains(*gotErr.Message, "unsupported profile") {
-		t.Fatalf("expected error message to mention unsupported profile, got %q", *gotErr.Message)
+	if !strings.Contains(*gotErr.Message, "unsupported model") {
+		t.Fatalf("expected error message to mention unsupported model, got %q", *gotErr.Message)
 	}
 	if !strings.Contains(*gotErr.Message, "x") {
-		t.Fatalf("expected error message to include requested profile, got %q", *gotErr.Message)
+		t.Fatalf("expected error message to include requested model, got %q", *gotErr.Message)
 	}
 	if !strings.Contains(*gotErr.Message, "gpt-5.2") {
-		t.Fatalf("expected error message to include supported profile, got %q", *gotErr.Message)
+		t.Fatalf("expected error message to include supported model, got %q", *gotErr.Message)
 	}
 }
 
@@ -326,8 +326,8 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
 	estimator := llm.NewApproxUsageEstimator()
 	model := "gpt-5.2"
-	req := newLLMChatQuoteRequest(model)
-	inputBytes := []byte("prompt")
+	req := newOpenAIChatCompletionsV1QuoteRequest(model)
+	inputBytes := fmt.Appendf(nil, `{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`, model)
 	price := mustQuotePriceForPrompt(t, policy, estimator, model, inputBytes).PriceMsat
 	quoteTTL := uint64(600)
 	quoteExpiry := uint64(clock.now.Unix()) + quoteTTL
@@ -343,7 +343,7 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 	}, protocolcompat.TermsCommit{
 		TaskKind:             req.TaskKind,
 		Input:                inputBytes,
-		InputContentType:     contentTypeTextPlain,
+		InputContentType:     contentTypeApplicationJSON,
 		InputContentEncoding: "identity",
 		Params:               paramsBytes,
 	})
@@ -418,199 +418,6 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 	if diff := cmp.Diff(quoteResp, gotResp); diff != "" {
 		t.Fatalf("quote_response mismatch (-want +got):\n%s", diff)
 	}
-}
-
-func TestHandler_RunJob_SettledSendsResult(t *testing.T) {
-	t.Parallel()
-
-	clock := &fakeClock{now: time.Unix(2000, 0)}
-	messenger := &fakeMessenger{}
-	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
-		PaymentRequest: "lnbcrt1settle",
-		PaymentHash:    mustHash32(0xCC),
-		AddIndex:       12,
-	}
-	jobs := jobstore.New()
-	backend := &fakeBackend{
-		result: computebackend.ExecutionResult{
-			OutputBytes: []byte("hello world"),
-		},
-	}
-	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
-	estimator := llm.NewApproxUsageEstimator()
-
-	handler := NewHandler(
-		Config{Enabled: true, QuoteTTLSeconds: 300},
-		DefaultValidator(),
-		messenger,
-		invoices,
-		backend,
-		policy,
-		estimator,
-		jobs,
-		replaystore.New(0),
-		manifestPeerDirectory(),
-		nil,
-	)
-	handler.clock = clock
-	handler.replay = nil
-
-	req := newLLMChatQuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
-		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
-	})
-	inputBytes := []byte("prompt")
-	payload := mustEncodeQuoteRequest(t, req)
-
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
-		PeerPubKey: "peer1",
-		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
-		Payload:    payload,
-	})
-	key := jobstore.Key{PeerPubKey: "peer1", JobID: req.Envelope.JobID}
-
-	inputStreamID := mustHash32(0x11)
-	inputTotalLen := uint64(len(inputBytes))
-	inputSum := sha256.Sum256(inputBytes)
-	inputHash := lcp.Hash32(inputSum)
-
-	beginPayload := mustEncodeStreamBegin(t, lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: req.Envelope.ProtocolVersion,
-			JobID:           req.Envelope.JobID,
-			MsgID:           fixedMsgID(0x04),
-			Expiry:          req.Envelope.Expiry,
-		},
-		StreamID:        inputStreamID,
-		Kind:            lcpwire.StreamKindInput,
-		TotalLen:        &inputTotalLen,
-		SHA256:          &inputHash,
-		ContentType:     contentTypeTextPlain,
-		ContentEncoding: "identity",
-	})
-
-	chunkPayload := mustEncodeStreamChunk(t, lcpwire.StreamChunk{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: req.Envelope.ProtocolVersion,
-			JobID:           req.Envelope.JobID,
-			Expiry:          req.Envelope.Expiry,
-		},
-		StreamID: inputStreamID,
-		Seq:      0,
-		Data:     inputBytes,
-	})
-
-	endPayload := mustEncodeStreamEnd(t, lcpwire.StreamEnd{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: req.Envelope.ProtocolVersion,
-			JobID:           req.Envelope.JobID,
-			MsgID:           fixedMsgID(0x05),
-			Expiry:          req.Envelope.Expiry,
-		},
-		StreamID: inputStreamID,
-		TotalLen: inputTotalLen,
-		SHA256:   inputHash,
-	})
-
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
-		PeerPubKey: "peer1",
-		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
-		Payload:    beginPayload,
-	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
-		PeerPubKey: "peer1",
-		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
-		Payload:    chunkPayload,
-	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
-		PeerPubKey: "peer1",
-		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
-		Payload:    endPayload,
-	})
-
-	if invoices.createCalls() == 0 {
-		t.Fatalf("expected invoice to be created")
-	}
-
-	// Release settlement to allow runJob to proceed.
-	invoices.Settle()
-
-	waitFor(t, 3*time.Second, func() bool { return len(messenger.messages()) >= 5 })
-	messages := messenger.messages()
-	wantTypes := []lcpwire.MessageType{
-		lcpwire.MessageTypeQuoteResponse,
-		lcpwire.MessageTypeStreamBegin,
-		lcpwire.MessageTypeStreamChunk,
-		lcpwire.MessageTypeStreamEnd,
-		lcpwire.MessageTypeResult,
-	}
-	for i, wantType := range wantTypes {
-		if got := messages[i].msgType; got != wantType {
-			t.Fatalf(
-				"unexpected msg_type at index=%d (-want +got):\n%s",
-				i,
-				cmp.Diff(wantType, got),
-			)
-		}
-	}
-
-	begin := mustDecodeStreamBegin(t, messages[1].payload)
-	if got, want := begin.Kind, lcpwire.StreamKindResult; got != want {
-		t.Fatalf("stream_begin.kind mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-
-	chunk := mustDecodeStreamChunk(t, messages[2].payload)
-	if got, want := chunk.StreamID, begin.StreamID; got != want {
-		t.Fatalf("stream_chunk.stream_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if got, want := chunk.Seq, uint32(0); got != want {
-		t.Fatalf("stream_chunk.seq mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if diff := cmp.Diff([]byte("hello world"), chunk.Data); diff != "" {
-		t.Fatalf("stream_chunk.data mismatch (-want +got):\n%s", diff)
-	}
-
-	end := mustDecodeStreamEnd(t, messages[3].payload)
-	if got, want := end.StreamID, begin.StreamID; got != want {
-		t.Fatalf("stream_end.stream_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-
-	gotResult := mustDecodeResult(t, messages[4].payload)
-	if got, want := gotResult.Status, lcpwire.ResultStatusOK; got != want {
-		t.Fatalf("result.status mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if gotResult.OK == nil {
-		t.Fatalf("result ok metadata is nil")
-	}
-	if got, want := gotResult.OK.ResultStreamID, begin.StreamID; got != want {
-		t.Fatalf("result.ok.result_stream_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if got, want := gotResult.OK.ResultContentType, contentTypeTextPlain; got != want {
-		t.Fatalf("result.ok.result_content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if got, want := gotResult.OK.ResultContentEncoding, "identity"; got != want {
-		t.Fatalf(
-			"result.ok.result_content_encoding mismatch (-want +got):\n%s",
-			cmp.Diff(want, got),
-		)
-	}
-
-	wantSum := sha256.Sum256([]byte("hello world"))
-	wantHash := lcp.Hash32(wantSum)
-	if got, want := end.SHA256, wantHash; got != want {
-		t.Fatalf("stream_end.sha256 mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if got, want := gotResult.OK.ResultHash, wantHash; got != want {
-		t.Fatalf("result.ok.result_hash mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-	if got, want := gotResult.OK.ResultLen, uint64(len([]byte("hello world"))); got != want {
-		t.Fatalf("result.ok.result_len mismatch (-want +got):\n%s", cmp.Diff(want, got))
-	}
-
-	waitFor(t, time.Second, func() bool {
-		job, ok := jobs.Get(key)
-		return ok && job.State == jobstore.StateDone
-	})
 }
 
 func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t *testing.T) {
@@ -806,10 +613,14 @@ func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
 	handler.clock = clock
 	handler.replay = nil
 
-	req := newLLMChatQuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
 		r.Envelope.Expiry = uint64(clock.now.Add(30 * time.Second).Unix())
 	})
-	inputBytes := []byte(promptText)
+	inputBytes := fmt.Appendf(
+		nil,
+		`{"model":"gpt-5.2","messages":[{"role":"user","content":%q}]}`,
+		promptText,
+	)
 	payload := mustEncodeQuoteRequest(t, req)
 
 	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
@@ -836,7 +647,7 @@ func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
 		Kind:            lcpwire.StreamKindInput,
 		TotalLen:        &inputTotalLen,
 		SHA256:          &inputHash,
-		ContentType:     contentTypeTextPlain,
+		ContentType:     contentTypeApplicationJSON,
 		ContentEncoding: "identity",
 	})
 
@@ -1159,13 +970,10 @@ func mustQuotePriceForPrompt(
 ) llm.PriceBreakdown {
 	t.Helper()
 
-	task, err := policy.Apply(computebackend.Task{
-		TaskKind:   "llm.chat",
+	task := computebackend.Task{
+		TaskKind:   taskKindOpenAIChatCompletionsV1,
 		Model:      model,
 		InputBytes: append([]byte(nil), input...),
-	})
-	if err != nil {
-		t.Fatalf("plan task: %v", err)
 	}
 
 	estimation, err := estimator.Estimate(task, policy.Policy())
@@ -1243,26 +1051,6 @@ func mustDecodeStreamBegin(t *testing.T, payload []byte) lcpwire.StreamBegin {
 		t.Fatalf("decode stream_begin: %v", err)
 	}
 	return begin
-}
-
-func mustDecodeStreamChunk(t *testing.T, payload []byte) lcpwire.StreamChunk {
-	t.Helper()
-
-	chunk, err := lcpwire.DecodeStreamChunk(payload)
-	if err != nil {
-		t.Fatalf("decode stream_chunk: %v", err)
-	}
-	return chunk
-}
-
-func mustDecodeStreamEnd(t *testing.T, payload []byte) lcpwire.StreamEnd {
-	t.Helper()
-
-	end, err := lcpwire.DecodeStreamEnd(payload)
-	if err != nil {
-		t.Fatalf("decode stream_end: %v", err)
-	}
-	return end
 }
 
 func mustDecodeResult(t *testing.T, payload []byte) lcpwire.Result {

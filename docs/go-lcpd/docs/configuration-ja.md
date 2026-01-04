@@ -64,7 +64,7 @@ Provider YAML の詳細と例は下の「Provider 設定（YAML）」で説明�
 - 未指定の場合、カレントディレクトリの `config.yaml` を使用します（存在する場合）
 - ファイルが空/欠落している場合はデフォルトが適用されます（Provider 無効、TTL=300s、`max_output_tokens=4096`、内蔵の価格表など）
 
-明示的にデフォルトを書いたサンプル: `../config.yaml`
+明示的にデフォルトを書いたサンプル: `go-lcpd/config.yaml.sample`（`go-lcpd/config.yaml` にコピーして使用）
 
 ### 例
 
@@ -84,25 +84,16 @@ pricing:
 
 llm:
   max_output_tokens: 4096
-  chat_profiles:
+  models:
     gpt-5.2:
-      # Optional: if omitted, backend_model defaults to the profile name.
-      # backend_model: gpt-5.2
-
-      # Optional: per-profile override for max output tokens.
+      # 任意: model ごとの max output tokens 上書き
       # max_output_tokens: 4096
 
-      # Required: pricing (msat per 1M tokens).
+      # 必須: pricing（msat / 100 万トークン）
       price:
         input_msat_per_mtok: 1750000
         cached_input_msat_per_mtok: 175000
         output_msat_per_mtok: 14000000
-
-      # Optional: OpenAI-compatible Chat Completions parameters (Provider-side defaults).
-      # openai:
-      #   temperature: 0.7
-      #   top_p: 1
-      #   stop: ["\\n\\n"]
 ```
 
 #### regtest 例
@@ -113,7 +104,7 @@ quote_ttl_seconds: 60
 
 llm:
   max_output_tokens: 512
-  chat_profiles:
+  models:
     gpt-5.2:
       max_output_tokens: 512
       price:
@@ -121,13 +112,14 @@ llm:
         output_msat_per_mtok: 1
 ```
 
-### モデル / プロファイル命名
+### モデル命名
 
-- `profile` は LCP wire の識別子（`llm_chat_params.profile`）です。以下に出現します:
-  - `lcp_manifest.supported_tasks[].llm_chat.profile`（広告）
-  - Provider 側の pricing lookup（invoice / terms binding）
-- `backend_model` は compute backend に渡す上流モデル ID（例: OpenAI 互換の `model`）です。
-- `profile` と `backend_model` は一致する必要はありません。`llm.chat_profiles.*.backend_model` でマッピングします。
+- `model` は OpenAI の model ID です。
+- 出現箇所:
+  - wire の `openai_chat_completions_v1_params_tlvs.model`（`params_bytes`）
+  - input stream bytes に入る OpenAI request JSON の `request_json.model`
+  - gRPC の `LCPManifest.supported_tasks[].openai_chat_completions_v1.model`（広告）
+- Provider は `model` を allowlist / pricing / backend routing に使います。
 
 ### フィールドリファレンス
 
@@ -137,35 +129,33 @@ llm:
   - `threshold`: surge を開始する in-flight job 数の閾値。
   - `per_job_bps`: `threshold` を超えた 1 job あたりの加算倍率（bps。10,000 = 1.0x）。`0` の場合は無効。
   - `max_multiplier_bps`: 総倍率の上限（bps）。`0` の場合は安全なデフォルト上限が使われます。
-- `llm.max_output_tokens`: Provider 全体の execution policy（`ExecutionPolicy`）のデフォルト。quote 時の推定と backend 実行の両方に適用します。デフォルト 4096。
-- `llm.chat_profiles`: 許可/広告する `llm.chat` プロファイルのマップ。空の場合、任意プロファイルを受け付けますが manifest では広告しません。
-  - `backend_model`: backend に渡す上流モデル ID。デフォルトはプロファイル名。
-  - `max_output_tokens`: 任意のプロファイルごとの上書き（0 より大きいこと）。
-  - `price`: プロファイルごとの価格（msat / 100 万トークン）。`input_msat_per_mtok` と `output_msat_per_mtok` は必須、`cached_input_msat_per_mtok` は任意。
-  - `openai`: 任意の OpenAI 互換 Chat Completions パラメータ（`temperature`、`top_p`、`stop`、`presence_penalty`、`frequency_penalty`、`seed`）。
+- `llm.max_output_tokens`: Provider 全体の max output tokens 上限。quote 時の推定と request validation に使います。デフォルト 4096。
+- `llm.models`: 許可/広告する `openai.chat_completions.v1` model ID のマップ。空の場合、任意の `model` を受け付けますが manifest では広告しません。
+  - `max_output_tokens`: 任意の model ごとの上書き（0 より大きいこと）。
+  - `price`: model ごとの価格（msat / 100 万トークン）。`input_msat_per_mtok` と `output_msat_per_mtok` は必須、`cached_input_msat_per_mtok` は任意。
 
 ### デフォルト価格表
 
 YAML がない場合、内蔵の価格表（msat / 100 万トークン）を使用します:
 - `gpt-5.2`: input 1,750,000 / cached 175,000 / output 14,000,000
 
-### Quote → Execute フロー（`llm.chat`）
+### Quote → Execute フロー（`openai.chat_completions.v1`）
 
-1. QuoteRequest を検証し、プロファイルが許可されているか確認します。
-2. `computebackend.Task` に ExecutionPolicy（`max_output_tokens`）を適用します。
-3. `UsageEstimator`（`approx.v1`: `ceil(len(bytes)/4)`）でトークン使用量を推定します。
-4. `QuotePrice(profile, estimate, cached=0, price_table)` で msat 価格を計算し、任意で `pricing.in_flight_surge` を適用してから TermsHash / invoice binding に埋め込みます。
-5. 支払いが確定したら、`profile -> backend_model` を解決し、backend でタスクを実行して `lcp_result` で返します。
+1. QuoteRequest を検証し、model が許可されているか確認します。
+2. input stream bytes を OpenAI request JSON として受信・検証します（`request_json.model` / `request_json.messages` / `request_json.stream=false`）。
+3. quote 時の推定に使う `max_output_tokens` を決定します:
+   - `llm.max_output_tokens`（任意で model ごとの上書き）を上限とする
+   - request が output token 上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`）を指定している場合、Provider 上限以下であることを検証し、その値で推定する
+4. `UsageEstimator`（`approx.v1`: `ceil(len(bytes)/4)`）でトークン使用量を推定します。
+5. `QuotePrice(model, estimate, cached=0, price_table)` で msat 価格を計算し、任意で `pricing.in_flight_surge` を適用してから TermsHash / invoice binding に埋め込みます。
+6. 支払いが確定したら、passthrough request を backend で実行し、result stream を返して `lcp_result` で完了します。
 
 ## backend に関する補足
 
 - `openai`: 外部 API を呼び出します（課金 / レート制限 / ネットワーク依存）。
   - OpenAI 互換 Chat Completions API（`POST /v1/chat/completions`）を使用します。
-  - `llm.chat` の `profile` は `llm.chat_profiles.*.backend_model` で上流 `model` にマッピングします（省略時は profile 名）。
-  - `params_bytes` JSON をサポートします:
-    - `max_output_tokens`（および旧 `max_tokens`）を `max_completion_tokens` として送信
-    - `temperature`、`top_p`、`stop`、`presence_penalty`、`frequency_penalty`、`seed`
-  - 単一の text user message を送信します（tools なし / multimodal なし / streaming なし）。
+  - LCP input stream の raw request body bytes をそのまま送信します（non-streaming）。
+  - OpenAI 互換の response body bytes をそのまま返します（non-streaming JSON）。
 - `deterministic`: 開発用の固定出力 backend（外部 API なし）。
 - `disabled`: 実行しません（Requester のみ運用で便利）。
 

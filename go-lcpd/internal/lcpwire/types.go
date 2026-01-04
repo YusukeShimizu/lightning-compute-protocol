@@ -46,12 +46,9 @@ type Manifest struct {
 type TaskTemplate struct {
 	TaskKind string
 
-	// ParamsBytes is task_kind dependent. If TaskKind == "llm.chat", this MUST
-	// be an encoded llm_chat_params_tlvs stream.
+	// ParamsBytes is task_kind dependent. For standardized kinds, this is a TLV
+	// stream as defined in `docs/protocol/protocol.md`.
 	ParamsBytes *[]byte
-
-	// LLMChatParams is set iff TaskKind == "llm.chat" and ParamsBytes is present.
-	LLMChatParams *LLMChatParams
 }
 
 type QuoteRequest struct {
@@ -59,12 +56,9 @@ type QuoteRequest struct {
 
 	TaskKind string
 
-	// ParamsBytes is task_kind dependent. If TaskKind == "llm.chat", this MUST
-	// be an encoded llm_chat_params_tlvs stream.
+	// ParamsBytes is task_kind dependent. For standardized kinds, this is a TLV
+	// stream as defined in `docs/protocol/protocol.md`.
 	ParamsBytes *[]byte
-
-	// LLMChatParams is set iff TaskKind == "llm.chat" and ParamsBytes is present.
-	LLMChatParams *LLMChatParams
 }
 
 type QuoteResponse struct {
@@ -166,16 +160,6 @@ type Error struct {
 
 	Code    ErrorCode
 	Message *string // UTF-8
-}
-
-type LLMChatParams struct {
-	Profile string
-
-	TemperatureMilli *uint32 // tu32
-	MaxOutputTokens  *uint32 // tu32
-
-	// Unknown contains unrecognized TLV values keyed by TLV type.
-	Unknown map[uint64][]byte
 }
 
 type OpenAIChatCompletionsV1Params struct {

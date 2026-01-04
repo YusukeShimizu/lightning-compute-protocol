@@ -250,7 +250,7 @@ func providerRuntime(
 		return provider.Config{}, nil, nil, err
 	}
 
-	chatProfiles, err := resolveProviderLLMChatProfiles(logger, providerYAML)
+	models, err := resolveProviderModels(logger, providerYAML)
 	if err != nil {
 		return provider.Config{}, nil, nil, err
 	}
@@ -265,7 +265,7 @@ func providerRuntime(
 				MaxMultiplierBps: providerYAML.Pricing.InFlightSurge.MaxMultiplierBps,
 			},
 		},
-		LLMChatProfiles: chatProfiles,
+		Models: models,
 	}
 	if cfgErr := validateProviderConfig(logger, providerCfg, backend, lndCfg); cfgErr != nil {
 		return provider.Config{}, nil, nil, cfgErr
@@ -302,11 +302,11 @@ func validateProviderConfig(
 			providerCfg.Pricing.InFlightSurge.MaxMultiplierBps,
 		)
 	}
-	if len(providerCfg.LLMChatProfiles) == 0 {
+	if len(providerCfg.Models) == 0 {
 		logger.Warnw(
-			"provider enabled but no supported profiles configured; lcp_manifest will not advertise profiles",
+			"provider enabled but no supported models configured; lcp_manifest will not advertise models",
 			"hint",
-			"set llm.chat_profiles in the provider YAML",
+			"set llm.models in the provider YAML",
 		)
 	}
 	return nil
@@ -361,11 +361,12 @@ func startAndWait(
 }
 
 type providerYAMLConfig struct {
-	Enabled                  *bool             `yaml:"enabled"`
-	QuoteTTLSeconds          *uint64           `yaml:"quote_ttl_seconds"`
-	SupportedLLMChatProfiles []string          `yaml:"supported_llm_chat_profiles"` // deprecated (use llm.chat_profiles)
-	Pricing                  pricingYAMLConfig `yaml:"pricing"`
-	LLM                      llmYAMLConfig     `yaml:"llm"`
+	Enabled               *bool             `yaml:"enabled"`
+	QuoteTTLSeconds       *uint64           `yaml:"quote_ttl_seconds"`
+	SupportedModels       []string          `yaml:"supported_models"`
+	SupportedLegacyModels []string          `yaml:"supported_llm_chat_profiles"` // deprecated (use supported_models or llm.models)
+	Pricing               pricingYAMLConfig `yaml:"pricing"`
+	LLM                   llmYAMLConfig     `yaml:"llm"`
 }
 
 type pricingYAMLConfig struct {
@@ -380,25 +381,16 @@ type inFlightSurgeYAMLConfig struct {
 
 type llmYAMLConfig struct {
 	MaxOutputTokens *uint32                        `yaml:"max_output_tokens"`
-	PriceTable      map[string]priceTableEntryYAML `yaml:"price_table"` // deprecated (use llm.chat_profiles.*.price)
-	ChatProfiles    map[string]llmChatProfileYAML  `yaml:"chat_profiles"`
+	PriceTable      map[string]priceTableEntryYAML `yaml:"price_table"` // deprecated (use llm.models.*.price)
+	Models          map[string]modelYAMLConfig     `yaml:"models"`
+	ChatProfiles    map[string]modelYAMLConfig     `yaml:"chat_profiles"` // deprecated (use llm.models)
 }
 
-type llmChatProfileYAML struct {
-	Profile         string               `yaml:"profile"`
-	BackendModel    string               `yaml:"backend_model"`
+type modelYAMLConfig struct {
+	Model           string               `yaml:"model"`
+	Profile         string               `yaml:"profile"` // deprecated alias for model
 	MaxOutputTokens *uint32              `yaml:"max_output_tokens"`
 	Price           *priceTableEntryYAML `yaml:"price"`
-	OpenAI          openAIProfileYAML    `yaml:"openai"`
-}
-
-type openAIProfileYAML struct {
-	Temperature      *float64 `yaml:"temperature"`
-	TopP             *float64 `yaml:"top_p"`
-	Stop             []string `yaml:"stop"`
-	PresencePenalty  *float64 `yaml:"presence_penalty"`
-	FrequencyPenalty *float64 `yaml:"frequency_penalty"`
-	Seed             *int64   `yaml:"seed"`
 }
 
 type priceTableEntryYAML struct {
@@ -446,141 +438,199 @@ func (c providerYAMLConfig) priceTable() (llm.PriceTable, error) {
 	return table, nil
 }
 
-func resolveProviderLLMChatProfiles(
+func resolveProviderModels(
 	logger *zap.SugaredLogger,
 	cfg providerYAMLConfig,
-) (map[string]provider.LLMChatProfile, error) {
+) (map[string]provider.ModelConfig, error) {
 	defaultPriceTable := llm.DefaultPriceTable()
 
-	if len(cfg.LLM.ChatProfiles) > 0 {
-		if logger != nil && len(cfg.SupportedLLMChatProfiles) > 0 {
-			logger.Warnw(
-				"provider YAML uses deprecated supported_llm_chat_profiles; ignoring because llm.chat_profiles is set",
-				"hint", "remove supported_llm_chat_profiles and configure llm.chat_profiles only",
-			)
-		}
+	if len(cfg.LLM.Models) > 0 {
+		warnDeprecatedProviderConfigWhenModelsSet(logger, cfg)
 
 		legacyPriceTable, err := cfg.priceTable()
 		if err != nil {
 			return nil, err
 		}
-		if logger != nil && len(legacyPriceTable) > 0 {
-			logger.Warnw(
-				"provider YAML uses deprecated llm.price_table; using it as a fallback for llm.chat_profiles.*.price",
-				"hint", "move pricing under llm.chat_profiles.*.price",
-			)
-		}
+		warnLegacyPriceTableFallback(logger, "llm.models.*.price", legacyPriceTable)
 
-		return chatProfilesFromYAML(cfg.LLM.ChatProfiles, legacyPriceTable, defaultPriceTable)
+		return modelsFromYAML(cfg.LLM.Models, legacyPriceTable, defaultPriceTable)
 	}
 
-	if len(cfg.SupportedLLMChatProfiles) == 0 {
+	if len(cfg.LLM.ChatProfiles) > 0 {
+		warnChatProfilesDeprecated(logger)
+
+		legacyPriceTable, err := cfg.priceTable()
+		if err != nil {
+			return nil, err
+		}
+		warnLegacyPriceTableFallback(logger, "llm.chat_profiles.*.price", legacyPriceTable)
+
+		return modelsFromYAML(cfg.LLM.ChatProfiles, legacyPriceTable, defaultPriceTable)
+	}
+
+	supportedModels := cfg.SupportedModels
+	usedLegacySupportedModels := false
+	if len(supportedModels) == 0 {
+		supportedModels = cfg.SupportedLegacyModels
+		usedLegacySupportedModels = len(supportedModels) > 0
+	}
+
+	if len(supportedModels) == 0 {
 		if len(cfg.LLM.PriceTable) > 0 {
 			return nil, errors.New(
-				"llm.price_table is set but no supported profiles are configured; migrate to llm.chat_profiles",
+				"llm.price_table is set but no supported models are configured; migrate to llm.models",
 			)
 		}
-		return map[string]provider.LLMChatProfile{}, nil
+		return map[string]provider.ModelConfig{}, nil
 	}
 
 	legacyPriceTable, err := cfg.priceTable()
 	if err != nil {
 		return nil, err
 	}
-	if logger != nil {
-		logger.Warnw(
-			"provider YAML uses deprecated supported_llm_chat_profiles/llm.price_table; migrate to llm.chat_profiles",
-			"hint", "define llm.chat_profiles.<profile>.price and remove supported_llm_chat_profiles",
-		)
-	}
+	warnSupportedModelsDeprecated(logger, usedLegacySupportedModels)
 
-	return chatProfilesFromLegacy(cfg.SupportedLLMChatProfiles, legacyPriceTable, defaultPriceTable)
+	return modelsFromLegacy(supportedModels, legacyPriceTable, defaultPriceTable)
 }
 
-func chatProfilesFromYAML(
-	cfg map[string]llmChatProfileYAML,
+func warnDeprecatedProviderConfigWhenModelsSet(logger *zap.SugaredLogger, cfg providerYAMLConfig) {
+	if logger == nil {
+		return
+	}
+
+	if len(cfg.LLM.ChatProfiles) > 0 {
+		logger.Warnw(
+			"provider YAML uses deprecated llm.chat_profiles; ignoring because llm.models is set",
+			"hint", "remove llm.chat_profiles and configure llm.models only",
+		)
+	}
+	if len(cfg.SupportedLegacyModels) > 0 {
+		logger.Warnw(
+			"provider YAML uses deprecated supported_llm_chat_profiles; ignoring because llm.models is set",
+			"hint", "remove supported_llm_chat_profiles and configure llm.models only",
+		)
+	}
+	if len(cfg.SupportedModels) > 0 {
+		logger.Warnw(
+			"provider YAML uses deprecated supported_models; ignoring because llm.models is set",
+			"hint", "remove supported_models and configure llm.models only",
+		)
+	}
+}
+
+func warnChatProfilesDeprecated(logger *zap.SugaredLogger) {
+	if logger == nil {
+		return
+	}
+	logger.Warnw(
+		"provider YAML uses deprecated llm.chat_profiles; migrate to llm.models",
+		"hint", "rename llm.chat_profiles to llm.models",
+	)
+}
+
+func warnLegacyPriceTableFallback(
+	logger *zap.SugaredLogger,
+	fallbackPath string,
+	legacyPriceTable llm.PriceTable,
+) {
+	if logger == nil || len(legacyPriceTable) == 0 {
+		return
+	}
+	logger.Warnw(
+		"provider YAML uses deprecated llm.price_table; using it as a fallback for "+fallbackPath,
+		"hint", "move pricing under llm.models.*.price",
+	)
+}
+
+func warnSupportedModelsDeprecated(logger *zap.SugaredLogger, usedLegacy bool) {
+	if logger == nil {
+		return
+	}
+	if usedLegacy {
+		logger.Warnw(
+			"provider YAML uses deprecated supported_llm_chat_profiles; migrate to supported_models or llm.models",
+			"hint", "define llm.models.<model>.price and remove supported_llm_chat_profiles",
+		)
+		return
+	}
+	logger.Warnw(
+		"provider YAML uses deprecated supported_models; migrate to llm.models",
+		"hint", "define llm.models.<model>.price and remove supported_models",
+	)
+}
+
+func modelsFromYAML(
+	cfg map[string]modelYAMLConfig,
 	legacyPriceTable llm.PriceTable,
 	defaultPriceTable llm.PriceTable,
-) (map[string]provider.LLMChatProfile, error) {
-	profiles := make(map[string]provider.LLMChatProfile, len(cfg))
+) (map[string]provider.ModelConfig, error) {
+	models := make(map[string]provider.ModelConfig, len(cfg))
 
 	for key, p := range cfg {
-		profile := strings.TrimSpace(p.Profile)
-		if profile == "" {
-			profile = strings.TrimSpace(key)
+		model := strings.TrimSpace(p.Model)
+		if model == "" {
+			model = strings.TrimSpace(p.Profile)
 		}
-		if profile == "" {
-			return nil, errors.New("llm.chat_profiles key/profile must be non-empty")
+		if model == "" {
+			model = strings.TrimSpace(key)
 		}
-		if _, exists := profiles[profile]; exists {
-			return nil, fmt.Errorf("llm.chat_profiles defines duplicate profile %q", profile)
+		if model == "" {
+			return nil, errors.New("llm.models key/model must be non-empty")
 		}
-
-		backendModel := strings.TrimSpace(p.BackendModel)
-		if backendModel == "" {
-			backendModel = profile
+		if _, exists := models[model]; exists {
+			return nil, fmt.Errorf("llm.models defines duplicate model %q", model)
 		}
 
 		maxOutputTokens := p.MaxOutputTokens
 		if maxOutputTokens != nil && *maxOutputTokens == 0 {
-			return nil, fmt.Errorf("llm.chat_profiles[%s].max_output_tokens must be > 0", profile)
+			return nil, fmt.Errorf("llm.models[%s].max_output_tokens must be > 0", model)
 		}
 
-		price, err := resolveProfilePrice(profile, p.Price, legacyPriceTable, defaultPriceTable)
+		price, err := resolveModelPrice(model, p.Price, legacyPriceTable, defaultPriceTable)
 		if err != nil {
 			return nil, err
 		}
 
-		profiles[profile] = provider.LLMChatProfile{
-			BackendModel:    backendModel,
+		models[model] = provider.ModelConfig{
 			MaxOutputTokens: maxOutputTokens,
 			Price:           price,
-			OpenAI: provider.OpenAIChatParams{
-				Temperature:      p.OpenAI.Temperature,
-				TopP:             p.OpenAI.TopP,
-				Stop:             append([]string(nil), p.OpenAI.Stop...),
-				PresencePenalty:  p.OpenAI.PresencePenalty,
-				FrequencyPenalty: p.OpenAI.FrequencyPenalty,
-				Seed:             p.OpenAI.Seed,
-			},
 		}
 	}
 
-	return profiles, nil
+	return models, nil
 }
 
-func chatProfilesFromLegacy(
-	supportedProfiles []string,
+func modelsFromLegacy(
+	supportedModels []string,
 	legacyPriceTable llm.PriceTable,
 	defaultPriceTable llm.PriceTable,
-) (map[string]provider.LLMChatProfile, error) {
-	profiles := make(map[string]provider.LLMChatProfile, len(supportedProfiles))
+) (map[string]provider.ModelConfig, error) {
+	models := make(map[string]provider.ModelConfig, len(supportedModels))
 
-	for _, raw := range supportedProfiles {
-		profile := strings.TrimSpace(raw)
-		if profile == "" {
-			return nil, errors.New("supported_llm_chat_profiles contains an empty profile")
+	for _, raw := range supportedModels {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			return nil, errors.New("supported_models contains an empty model")
 		}
-		if _, exists := profiles[profile]; exists {
-			return nil, fmt.Errorf("supported_llm_chat_profiles contains duplicate profile %q", profile)
+		if _, exists := models[model]; exists {
+			return nil, fmt.Errorf("supported_models contains duplicate model %q", model)
 		}
 
-		price, err := resolveProfilePrice(profile, nil, legacyPriceTable, defaultPriceTable)
+		price, err := resolveModelPrice(model, nil, legacyPriceTable, defaultPriceTable)
 		if err != nil {
 			return nil, err
 		}
 
-		profiles[profile] = provider.LLMChatProfile{
-			BackendModel: profile,
-			Price:        price,
+		models[model] = provider.ModelConfig{
+			Price: price,
 		}
 	}
 
-	return profiles, nil
+	return models, nil
 }
 
-func resolveProfilePrice(
-	profile string,
+func resolveModelPrice(
+	model string,
 	explicit *priceTableEntryYAML,
 	legacyPriceTable llm.PriceTable,
 	defaultPriceTable llm.PriceTable,
@@ -588,12 +638,12 @@ func resolveProfilePrice(
 	if explicit != nil {
 		if explicit.InputMsatPerMTok == 0 || explicit.OutputMsatPerMTok == 0 {
 			return llm.PriceTableEntry{}, fmt.Errorf(
-				"llm.chat_profiles[%s].price must set input/output prices",
-				profile,
+				"llm.models[%s].price must set input/output prices",
+				model,
 			)
 		}
 		return llm.PriceTableEntry{
-			Model:                  profile,
+			Model:                  model,
 			InputMsatPerMTok:       explicit.InputMsatPerMTok,
 			CachedInputMsatPerMTok: explicit.CachedInputMsatPerMTok,
 			OutputMsatPerMTok:      explicit.OutputMsatPerMTok,
@@ -601,21 +651,21 @@ func resolveProfilePrice(
 	}
 
 	if legacyPriceTable != nil {
-		if entry, ok := legacyPriceTable[profile]; ok {
+		if entry, ok := legacyPriceTable[model]; ok {
 			return entry, nil
 		}
 	}
 
 	if defaultPriceTable != nil {
-		if entry, ok := defaultPriceTable[profile]; ok {
+		if entry, ok := defaultPriceTable[model]; ok {
 			return entry, nil
 		}
 	}
 
 	return llm.PriceTableEntry{}, fmt.Errorf(
-		"no price configured for profile %q (set llm.chat_profiles.%s.price)",
-		profile,
-		profile,
+		"no price configured for model %q (set llm.models.%s.price)",
+		model,
+		model,
 	)
 }
 
@@ -641,25 +691,38 @@ func localManifestForProvider(providerCfg provider.Config) *lcpwire.Manifest {
 		MaxJobBytes:     defaultMaxJobBytes,
 	}
 
-	if !providerCfg.Enabled || len(providerCfg.LLMChatProfiles) == 0 {
+	if !providerCfg.Enabled || len(providerCfg.Models) == 0 {
 		return manifest
 	}
 
-	profiles := make([]string, 0, len(providerCfg.LLMChatProfiles))
-	for profile := range providerCfg.LLMChatProfiles {
-		profiles = append(profiles, profile)
+	models := make([]string, 0, len(providerCfg.Models))
+	for model := range providerCfg.Models {
+		models = append(models, model)
 	}
-	slices.Sort(profiles)
+	slices.Sort(models)
 
 	manifest.SupportedTasks = make(
 		[]lcpwire.TaskTemplate,
 		0,
-		len(profiles),
+		len(models),
 	)
-	for _, profile := range profiles {
+	for _, modelKey := range models {
+		model := strings.TrimSpace(modelKey)
+		if model == "" {
+			continue
+		}
+
+		encodedParams, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+			lcpwire.OpenAIChatCompletionsV1Params{Model: model},
+		)
+		if err != nil {
+			continue
+		}
+		paramsBytes := encodedParams
+
 		manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
-			TaskKind:      "llm.chat",
-			LLMChatParams: &lcpwire.LLMChatParams{Profile: profile},
+			TaskKind:    "openai.chat_completions.v1",
+			ParamsBytes: &paramsBytes,
 		})
 	}
 	return manifest

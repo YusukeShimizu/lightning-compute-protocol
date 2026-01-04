@@ -11,20 +11,13 @@ import (
 )
 
 const (
-	TaskKindLLMChat                 = "llm.chat"
 	TaskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
 )
 
 var (
-	ErrTaskRequired           = errors.New("task is required")
-	ErrTaskSpecRequired       = errors.New("task spec is required")
-	ErrUnsupportedTask        = errors.New("unsupported task")
-	ErrLLMChatTaskRequired    = errors.New("llm_chat task is required")
-	ErrLLMChatPromptRequired  = errors.New("llm_chat.prompt is required")
-	ErrLLMChatPromptInvalid   = errors.New("llm_chat.prompt must be valid UTF-8")
-	ErrLLMChatParamsRequired  = errors.New("llm_chat.params is required")
-	ErrLLMChatProfileRequired = errors.New("llm_chat.params.profile is required")
-	ErrLLMChatProfileInvalid  = errors.New("llm_chat.params.profile must be valid UTF-8")
+	ErrTaskRequired     = errors.New("task is required")
+	ErrTaskSpecRequired = errors.New("task spec is required")
+	ErrUnsupportedTask  = errors.New("unsupported task")
 
 	ErrOpenAIChatCompletionsV1TaskRequired = errors.New(
 		"openai_chat_completions_v1 task is required",
@@ -61,8 +54,7 @@ var (
 type QuoteRequestTask struct {
 	TaskKind string
 
-	ParamsBytes   []byte
-	LLMChatParams *lcpwire.LLMChatParams
+	ParamsBytes []byte
 }
 
 type InputStream struct {
@@ -86,8 +78,6 @@ func ValidateTask(task *lcpdv1.Task) error {
 	switch spec := task.GetSpec().(type) {
 	case nil:
 		return ErrTaskSpecRequired
-	case *lcpdv1.Task_LlmChat:
-		return validateLLMChat(spec.LlmChat)
 	case *lcpdv1.Task_OpenaiChatCompletionsV1:
 		return validateOpenAIChatCompletionsV1(spec.OpenaiChatCompletionsV1)
 	default:
@@ -103,30 +93,6 @@ func ToWireQuoteRequestTask(task *lcpdv1.Task) (QuoteRequestTask, error) {
 	}
 
 	switch spec := task.GetSpec().(type) {
-	case *lcpdv1.Task_LlmChat:
-		llmChat := spec.LlmChat
-		params := llmChat.GetParams()
-
-		llmParams := lcpwire.LLMChatParams{
-			Profile: params.GetProfile(),
-		}
-		if v := params.GetTemperatureMilli(); v != 0 {
-			llmParams.TemperatureMilli = &v
-		}
-		if v := params.GetMaxOutputTokens(); v != 0 {
-			llmParams.MaxOutputTokens = &v
-		}
-
-		paramsBytes, err := lcpwire.EncodeLLMChatParams(llmParams)
-		if err != nil {
-			return QuoteRequestTask{}, fmt.Errorf("encode llm_chat params: %w", err)
-		}
-
-		return QuoteRequestTask{
-			TaskKind:      TaskKindLLMChat,
-			ParamsBytes:   paramsBytes,
-			LLMChatParams: &llmParams,
-		}, nil
 	case *lcpdv1.Task_OpenaiChatCompletionsV1:
 		openaiTask := spec.OpenaiChatCompletionsV1
 		model := openaiTask.GetParams().GetModel()
@@ -154,13 +120,6 @@ func ToWireInputStream(task *lcpdv1.Task) (InputStream, error) {
 	}
 
 	switch spec := task.GetSpec().(type) {
-	case *lcpdv1.Task_LlmChat:
-		llmChat := spec.LlmChat
-		return InputStream{
-			DecodedBytes:    []byte(llmChat.GetPrompt()),
-			ContentType:     ContentTypeTextPlainUTF8,
-			ContentEncoding: ContentEncodingIdentity,
-		}, nil
 	case *lcpdv1.Task_OpenaiChatCompletionsV1:
 		openaiTask := spec.OpenaiChatCompletionsV1
 		reqBytes := append([]byte(nil), openaiTask.GetRequestJson()...)
@@ -172,31 +131,6 @@ func ToWireInputStream(task *lcpdv1.Task) (InputStream, error) {
 	default:
 		return InputStream{}, ErrUnsupportedTask
 	}
-}
-
-func validateLLMChat(spec *lcpdv1.LLMChatTaskSpec) error {
-	if spec == nil {
-		return ErrLLMChatTaskRequired
-	}
-	if spec.GetPrompt() == "" {
-		return ErrLLMChatPromptRequired
-	}
-	if !utf8.ValidString(spec.GetPrompt()) {
-		return ErrLLMChatPromptInvalid
-	}
-
-	params := spec.GetParams()
-	if params == nil {
-		return ErrLLMChatParamsRequired
-	}
-	if params.GetProfile() == "" {
-		return ErrLLMChatProfileRequired
-	}
-	if !utf8.ValidString(params.GetProfile()) {
-		return ErrLLMChatProfileInvalid
-	}
-
-	return nil
 }
 
 func validateOpenAIChatCompletionsV1(spec *lcpdv1.OpenAIChatCompletionsV1TaskSpec) error {

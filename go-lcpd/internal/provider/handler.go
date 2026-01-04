@@ -187,7 +187,7 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 		return
 	}
 
-	if h.rejectQuoteRequestIfUnsupportedProfile(ctx, msg.PeerPubKey, req) {
+	if h.rejectQuoteRequestIfUnsupportedModel(ctx, msg.PeerPubKey, req) {
 		return
 	}
 
@@ -779,36 +779,48 @@ func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
 	return false
 }
 
-func (h *Handler) rejectQuoteRequestIfUnsupportedProfile(
+func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 	ctx context.Context,
 	peerPubKey string,
 	req lcpwire.QuoteRequest,
 ) bool {
-	if req.TaskKind != taskKindLLMChat {
+	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
 		return false
 	}
-	if len(h.cfg.LLMChatProfiles) == 0 {
+	if len(h.cfg.Models) == 0 {
 		return false
 	}
-	if req.LLMChatParams == nil {
+	if req.ParamsBytes == nil {
 		h.sendError(
 			ctx,
 			peerPubKey,
 			req.Envelope,
 			lcpwire.ErrorCodeUnsupportedParams,
-			"llm.chat params are required",
+			"openai.chat_completions.v1 params are required",
 		)
 		return true
 	}
 
-	if _, ok := h.cfg.LLMChatProfiles[req.LLMChatParams.Profile]; ok {
+	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+	if err != nil {
+		h.sendError(
+			ctx,
+			peerPubKey,
+			req.Envelope,
+			lcpwire.ErrorCodeUnsupportedParams,
+			"openai.chat_completions.v1 params must be a valid TLV stream",
+		)
+		return true
+	}
+
+	if _, ok := h.cfg.Models[params.Model]; ok {
 		return false
 	}
 
-	msg := fmt.Sprintf("unsupported profile: %q", req.LLMChatParams.Profile)
-	supported := make([]string, 0, len(h.cfg.LLMChatProfiles))
-	for profile := range h.cfg.LLMChatProfiles {
-		supported = append(supported, profile)
+	msg := fmt.Sprintf("unsupported model: %q", params.Model)
+	supported := make([]string, 0, len(h.cfg.Models))
+	for model := range h.cfg.Models {
+		supported = append(supported, model)
 	}
 	slices.Sort(supported)
 	msg = fmt.Sprintf("%s (supported: %s)", msg, strings.Join(supported, ", "))
@@ -1091,18 +1103,16 @@ func (h *Handler) runJob(
 	defer h.forgetJob(key)
 
 	jobID := quoteResp.Envelope.JobID.String()
-	profile := modelFromRequest(req)
-	backendModel := h.backendModelForProfile(profile)
+	model := modelFromRequest(req)
 	inputBytes := len(input.Buf)
 	meta := jobLogMeta{
-		peerPubKey:   key.PeerPubKey,
-		jobID:        jobID,
-		taskKind:     req.TaskKind,
-		profile:      profile,
-		backendModel: backendModel,
-		inputBytes:   inputBytes,
-		priceMsat:    quoteResp.PriceMsat,
-		termsHash:    quoteResp.TermsHash.String(),
+		peerPubKey: key.PeerPubKey,
+		jobID:      jobID,
+		taskKind:   req.TaskKind,
+		model:      model,
+		inputBytes: inputBytes,
+		priceMsat:  quoteResp.PriceMsat,
+		termsHash:  quoteResp.TermsHash.String(),
 	}
 
 	settleStart := time.Now()
@@ -1891,8 +1901,6 @@ func validateInputStream(
 
 func inputContentTypeForTaskKind(taskKind string) string {
 	switch taskKind {
-	case taskKindLLMChat:
-		return contentTypeTextPlain
 	case taskKindOpenAIChatCompletionsV1:
 		return contentTypeApplicationJSON
 	default:
@@ -1904,18 +1912,23 @@ func resultContentTypeForTaskKind(taskKind string) string {
 	switch taskKind {
 	case taskKindOpenAIChatCompletionsV1:
 		return contentTypeApplicationJSON
-	case taskKindLLMChat:
-		return contentTypeTextPlain
 	default:
 		return contentTypeTextPlain
 	}
 }
 
 func modelFromRequest(req lcpwire.QuoteRequest) string {
-	if req.LLMChatParams != nil {
-		return req.LLMChatParams.Profile
+	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
+		return ""
 	}
-	return ""
+	if req.ParamsBytes == nil {
+		return ""
+	}
+	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+	if err != nil {
+		return ""
+	}
+	return params.Model
 }
 
 func computeErrorCode(err error) lcpwire.ErrorCode {
@@ -1974,14 +1987,13 @@ func safeErrMessage(err error) string {
 }
 
 type jobLogMeta struct {
-	peerPubKey   string
-	jobID        string
-	taskKind     string
-	profile      string
-	backendModel string
-	inputBytes   int
-	priceMsat    uint64
-	termsHash    string
+	peerPubKey string
+	jobID      string
+	taskKind   string
+	model      string
+	inputBytes int
+	priceMsat  uint64
+	termsHash  string
 }
 
 func (h *Handler) logJobExecutionFailed(
@@ -1996,8 +2008,7 @@ func (h *Handler) logJobExecutionFailed(
 		"peer_pub_key", meta.peerPubKey,
 		"job_id", meta.jobID,
 		"task_kind", meta.taskKind,
-		"profile", meta.profile,
-		"backend_model", meta.backendModel,
+		"model", meta.model,
 		"input_bytes", meta.inputBytes,
 		"price_msat", meta.priceMsat,
 		"terms_hash", meta.termsHash,
@@ -2027,8 +2038,7 @@ func (h *Handler) logJobCompleted(
 		"peer_pub_key", meta.peerPubKey,
 		"job_id", meta.jobID,
 		"task_kind", meta.taskKind,
-		"profile", meta.profile,
-		"backend_model", meta.backendModel,
+		"model", meta.model,
 		"input_bytes", meta.inputBytes,
 		"output_bytes", outputBytes,
 		"price_msat", meta.priceMsat,
@@ -2042,31 +2052,14 @@ func (h *Handler) logJobCompleted(
 	)
 }
 
-func (h *Handler) backendModelForProfile(profile string) string {
-	if profile == "" {
-		return ""
-	}
-
-	profileCfg, ok := h.cfg.LLMChatProfiles[profile]
-	if !ok {
-		return profile
-	}
-
-	backendModel := strings.TrimSpace(profileCfg.BackendModel)
-	if backendModel == "" {
-		return profile
-	}
-	return backendModel
-}
-
-func (h *Handler) maxOutputTokensForProfile(profile string) (uint32, error) {
+func (h *Handler) maxOutputTokensForModel(model string) (uint32, error) {
 	maxOutputTokens := h.policy.Policy().MaxOutputTokens
 
-	if profileCfg, ok := h.cfg.LLMChatProfiles[profile]; ok && profileCfg.MaxOutputTokens != nil {
-		if *profileCfg.MaxOutputTokens == 0 {
-			return 0, errors.New("profile max_output_tokens must be > 0")
+	if modelCfg, ok := h.cfg.Models[model]; ok && modelCfg.MaxOutputTokens != nil {
+		if *modelCfg.MaxOutputTokens == 0 {
+			return 0, errors.New("model max_output_tokens must be > 0")
 		}
-		maxOutputTokens = *profileCfg.MaxOutputTokens
+		maxOutputTokens = *modelCfg.MaxOutputTokens
 	}
 
 	if maxOutputTokens == 0 {
@@ -2080,8 +2073,6 @@ func (h *Handler) planTask(
 	inputBytes []byte,
 ) (computebackend.Task, llm.ExecutionPolicy, string, error) {
 	switch req.TaskKind {
-	case taskKindLLMChat:
-		return h.planLLMChatTask(req, inputBytes)
 	case taskKindOpenAIChatCompletionsV1:
 		return h.planOpenAIChatCompletionsV1Task(req, inputBytes)
 	default:
@@ -2091,87 +2082,6 @@ func (h *Handler) planTask(
 			req.TaskKind,
 		)
 	}
-}
-
-func (h *Handler) planLLMChatTask(
-	req lcpwire.QuoteRequest,
-	inputBytes []byte,
-) (computebackend.Task, llm.ExecutionPolicy, string, error) {
-	profile := modelFromRequest(req)
-	if strings.TrimSpace(profile) == "" {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: llm.chat profile is required",
-			computebackend.ErrInvalidTask,
-		)
-	}
-
-	backendModel := h.backendModelForProfile(profile)
-	if strings.TrimSpace(backendModel) == "" {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: backend model is required",
-			computebackend.ErrInvalidTask,
-		)
-	}
-
-	maxOutputTokens, err := h.maxOutputTokensForProfile(profile)
-	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: invalid max_output_tokens for profile %q: %s",
-			computebackend.ErrInvalidTask,
-			profile,
-			err.Error(),
-		)
-	}
-
-	policy, err := llm.NewFixedExecutionPolicy(maxOutputTokens)
-	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: create execution policy failed: %s",
-			computebackend.ErrInvalidTask,
-			err.Error(),
-		)
-	}
-
-	task := computebackend.Task{
-		TaskKind:   req.TaskKind,
-		Model:      backendModel,
-		InputBytes: append([]byte(nil), inputBytes...),
-	}
-
-	planned, err := policy.Apply(task)
-	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", err
-	}
-
-	if profileCfg, ok := h.cfg.LLMChatProfiles[profile]; ok {
-		paramsBytes, marshalErr := json.Marshal(struct {
-			MaxOutputTokens  uint32   `json:"max_output_tokens"`
-			Temperature      *float64 `json:"temperature,omitempty"`
-			TopP             *float64 `json:"top_p,omitempty"`
-			Stop             []string `json:"stop,omitempty"`
-			PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
-			FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
-			Seed             *int64   `json:"seed,omitempty"`
-		}{
-			MaxOutputTokens:  maxOutputTokens,
-			Temperature:      profileCfg.OpenAI.Temperature,
-			TopP:             profileCfg.OpenAI.TopP,
-			Stop:             profileCfg.OpenAI.Stop,
-			PresencePenalty:  profileCfg.OpenAI.PresencePenalty,
-			FrequencyPenalty: profileCfg.OpenAI.FrequencyPenalty,
-			Seed:             profileCfg.OpenAI.Seed,
-		})
-		if marshalErr != nil {
-			return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-				"%w: marshal backend params: %s",
-				computebackend.ErrInvalidTask,
-				marshalErr.Error(),
-			)
-		}
-		planned.ParamsBytes = paramsBytes
-	}
-
-	return planned, policy.Policy(), profile, nil
 }
 
 func (h *Handler) planOpenAIChatCompletionsV1Task(
@@ -2228,11 +2138,12 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 		)
 	}
 
-	providerMaxOutputTokens := h.policy.Policy().MaxOutputTokens
-	if providerMaxOutputTokens == 0 {
+	providerMaxOutputTokens, err := h.maxOutputTokensForModel(params.Model)
+	if err != nil {
 		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: provider max_output_tokens must be > 0",
+			"%w: provider max_output_tokens invalid: %s",
 			computebackend.ErrInvalidTask,
+			err.Error(),
 		)
 	}
 
@@ -2263,15 +2174,15 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 }
 
 func (h *Handler) priceTable() llm.PriceTable {
-	if len(h.cfg.LLMChatProfiles) == 0 {
+	if len(h.cfg.Models) == 0 {
 		return llm.DefaultPriceTable()
 	}
 
-	table := make(llm.PriceTable, len(h.cfg.LLMChatProfiles))
-	for profile, cfg := range h.cfg.LLMChatProfiles {
+	table := make(llm.PriceTable, len(h.cfg.Models))
+	for model, cfg := range h.cfg.Models {
 		entry := cfg.Price
-		entry.Model = profile
-		table[profile] = entry
+		entry.Model = model
+		table[model] = entry
 	}
 	return table
 }
@@ -2280,7 +2191,7 @@ func (h *Handler) quotePrice(
 	req lcpwire.QuoteRequest,
 	inputBytes []byte,
 ) (llm.PriceBreakdown, error) {
-	planned, policy, profile, err := h.planTask(req, inputBytes)
+	planned, policy, model, err := h.planTask(req, inputBytes)
 	if err != nil {
 		return llm.PriceBreakdown{}, err
 	}
@@ -2291,7 +2202,7 @@ func (h *Handler) quotePrice(
 	}
 
 	base, err := llm.QuotePrice(
-		profile,
+		model,
 		estimation.Usage,
 		0, // cachedInputTokens
 		h.priceTable(),

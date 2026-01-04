@@ -2,32 +2,15 @@ package provider
 
 import "github.com/bruwbird/lcp/go-lcpd/internal/llm"
 
-// OpenAIChatParams configures OpenAI-compatible Chat Completions parameters.
-// These parameters are Provider-side defaults and are not sourced from request params.
-type OpenAIChatParams struct {
-	Temperature      *float64
-	TopP             *float64
-	Stop             []string
-	PresencePenalty  *float64
-	FrequencyPenalty *float64
-	Seed             *int64
-}
-
-// LLMChatProfile configures a single `llm.chat` profile.
-type LLMChatProfile struct {
-	// BackendModel is the upstream model identifier passed to the compute backend.
-	// If empty, the profile name is used.
-	BackendModel string
-
-	// MaxOutputTokens overrides the Provider-wide max output tokens for this profile.
+// ModelConfig configures a single OpenAI model used with
+// `openai.chat_completions.v1`.
+type ModelConfig struct {
+	// MaxOutputTokens overrides the Provider-wide max output tokens for this model.
 	// If nil, the Provider-wide default is used.
 	MaxOutputTokens *uint32
 
-	// Price defines msat pricing for this profile (msat per 1M tokens).
+	// Price defines msat pricing for this model (msat per 1M tokens).
 	Price llm.PriceTableEntry
-
-	// OpenAI defines per-profile OpenAI-compatible Chat Completions parameters.
-	OpenAI OpenAIChatParams
 }
 
 // InFlightSurgeConfig configures load-based surge pricing based on the current
@@ -64,10 +47,10 @@ type Config struct {
 
 	Pricing PricingConfig
 
-	// LLMChatProfiles restricts accepted/advertised `llm.chat` profile values.
+	// Models restrict accepted/advertised `openai.chat_completions.v1` model IDs.
 	//
-	// If empty, any profile is accepted and will be passed through to the compute
+	// If empty, any model is accepted and will be passed through to the compute
 	// backend as the upstream model ID. In this case the local manifest MUST NOT
 	// advertise `supported_tasks`.
-	LLMChatProfiles map[string]LLMChatProfile
+	Models map[string]ModelConfig
 }

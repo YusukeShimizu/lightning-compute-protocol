@@ -2,11 +2,18 @@ enabled: true
 quote_ttl_seconds: 300
 
 llm:
-  max_output_tokens: 512
-  chat_profiles:
+  max_output_tokens: 20000
+  max_total_tokens: 20000
+  models:
     gpt-5.2:
       price:
         # regtest example pricing (choose any policy you like)
         input_msat_per_mtok: 1750000
         cached_input_msat_per_mtok: 175000
         output_msat_per_mtok: 14000000
+    gpt-4o:
+      price:
+        # regtest example pricing (choose any policy you like)
+        input_msat_per_mtok: 100000
+        cached_input_msat_per_mtok: 100000
+        output_msat_per_mtok: 100000

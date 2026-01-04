@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -182,7 +183,7 @@ func TestRequestQuote_SuccessStoresQuote(t *testing.T) {
 	jobs := requesterjobstore.NewWithClock(clock.Now)
 	waiter := requesterwait.New(nil, nil)
 
-	inputBytes := []byte("hello")
+	inputBytes := openaiChatCompletionsRequestJSON("hello", "model-2")
 	const (
 		wantPriceMsat      = uint64(123)
 		wantPaymentRequest = "lnbc1dummy"
@@ -210,7 +211,7 @@ func TestRequestQuote_SuccessStoresQuote(t *testing.T) {
 
 	resp, err := svc.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   llmChatTask("hello", "model-2"),
+		Task:   openaiChatTask("hello", "model-2"),
 	})
 	if err != nil {
 		t.Fatalf("RequestQuote: %v", err)
@@ -247,7 +248,7 @@ func TestRequestQuote_RespectsRemoteMaxPayloadBytes(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   llmChatTask("hi", "model-1"),
+		Task:   openaiChatTask("hi", "model-1"),
 	})
 	assertStatusCode(t, err, codes.ResourceExhausted)
 	if got := len(messenger.messages()); got != 0 {
@@ -267,7 +268,7 @@ func TestRequestQuote_PeerNotFound(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: "02" + strings.Repeat("c", 64),
-		Task:   llmChatTask("hello", "model-1"),
+		Task:   openaiChatTask("hello", "model-1"),
 	})
 	assertStatusCode(t, err, codes.NotFound)
 }
@@ -289,7 +290,7 @@ func TestRequestQuote_PeerNotReady(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   llmChatTask("hello", "model-1"),
+		Task:   openaiChatTask("hello", "model-1"),
 	})
 	assertStatusCode(t, err, codes.FailedPrecondition)
 }
@@ -308,9 +309,12 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	}
 
 	quoteExpiry := uint64(clock.Now().Unix()) + 60
-	paramsBytes, err := lcpwire.EncodeLLMChatParams(lcpwire.LLMChatParams{Profile: "model-1"})
+	requestJSON := openaiChatCompletionsRequestJSON("hello", "model-1")
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-1"},
+	)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
@@ -318,9 +322,9 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "llm.chat",
-		Input:                []byte("hello"),
-		InputContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                requestJSON,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
 		InputContentEncoding: lcptasks.ContentEncodingIdentity,
 		Params:               paramsBytes,
 	})
@@ -337,7 +341,7 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		PaymentRequest:  "lnbc1dummy",
 	}
 
-	if putErr := jobs.PutQuote(peerID, llmChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -493,9 +497,12 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 	}
 
 	quoteExpiry := uint64(clock.Now().Unix()) + 60
-	paramsBytes, err := lcpwire.EncodeLLMChatParams(lcpwire.LLMChatParams{Profile: "model-1"})
+	requestJSON := openaiChatCompletionsRequestJSON("hello", "model-1")
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-1"},
+	)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
@@ -503,9 +510,9 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "llm.chat",
-		Input:                []byte("hello"),
-		InputContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                requestJSON,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
 		InputContentEncoding: lcptasks.ContentEncodingIdentity,
 		Params:               paramsBytes,
 	})
@@ -521,7 +528,7 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, llmChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -566,9 +573,12 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 	}
 
 	quoteExpiry := uint64(clock.Now().Unix()) + 60
-	paramsBytes, err := lcpwire.EncodeLLMChatParams(lcpwire.LLMChatParams{Profile: "model-1"})
+	requestJSON := openaiChatCompletionsRequestJSON("hello", "model-1")
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-1"},
+	)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
@@ -576,9 +586,9 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "llm.chat",
-		Input:                []byte("hello"),
-		InputContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                requestJSON,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
 		InputContentEncoding: lcptasks.ContentEncodingIdentity,
 		Params:               paramsBytes,
 	})
@@ -594,7 +604,7 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, llmChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -639,9 +649,12 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 	}
 
 	quoteExpiry := uint64(clock.Now().Unix()) + 60
-	paramsBytes, err := lcpwire.EncodeLLMChatParams(lcpwire.LLMChatParams{Profile: "model-1"})
+	requestJSON := openaiChatCompletionsRequestJSON("hello", "model-1")
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-1"},
+	)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
@@ -649,9 +662,9 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "llm.chat",
-		Input:                []byte("hello"),
-		InputContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                requestJSON,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
 		InputContentEncoding: lcptasks.ContentEncodingIdentity,
 		Params:               paramsBytes,
 	})
@@ -667,7 +680,7 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, llmChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -802,12 +815,22 @@ func assertStatusCode(t *testing.T, err error, want codes.Code) {
 	}
 }
 
-func llmChatTask(prompt, profile string) *lcpdv1.Task {
+func openaiChatCompletionsRequestJSON(prompt, model string) []byte {
+	return fmt.Appendf(
+		nil,
+		`{"model":%q,"messages":[{"role":"user","content":%q}]}`,
+		model,
+		prompt,
+	)
+}
+
+func openaiChatTask(prompt, model string) *lcpdv1.Task {
+	requestJSON := openaiChatCompletionsRequestJSON(prompt, model)
 	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: prompt,
-				Params: &lcpdv1.LLMChatParams{Profile: profile},
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
 			},
 		},
 	}
@@ -881,7 +904,7 @@ func respondToQuoteRequest(
 	}, protocolcompat.TermsCommit{
 		TaskKind:             req.TaskKind,
 		Input:                inputBytes,
-		InputContentType:     lcptasks.ContentTypeTextPlainUTF8,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
 		InputContentEncoding: lcptasks.ContentEncodingIdentity,
 		Params:               paramsBytes,
 	})
@@ -999,7 +1022,7 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	if begin.SHA256 == nil || *begin.SHA256 != wantInputHash {
 		t.Fatalf("stream_begin.sha256 mismatch (-want +got):\n%s", cmp.Diff(wantInputHash, begin.SHA256))
 	}
-	if got, want := begin.ContentType, lcptasks.ContentTypeTextPlainUTF8; got != want {
+	if got, want := begin.ContentType, lcptasks.ContentTypeApplicationJSONUTF8; got != want {
 		t.Fatalf("stream_begin.content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if got, want := begin.ContentEncoding, lcptasks.ContentEncodingIdentity; got != want {

@@ -263,7 +263,7 @@ Matching against `lcp_quote_request` (recommended):
 * If the Provider declares `supported_tasks`, and the received `lcp_quote_request` does not match at least one task template, the Provider SHOULD return `lcp_error(code=unsupported_task)`.
 * Task template matching:
   * `task_kind` MUST match as a string.
-  * `params` handling depends on `task_kind`. For standardized kinds (`llm.chat`, `openai.chat_completions.v1`), §5.2.1 MUST be followed.
+  * `params` handling depends on `task_kind`. For the standardized kind (`openai.chat_completions.v1`), §5.2.1 MUST be followed.
 
 ---
 
@@ -277,7 +277,7 @@ Input is NOT carried inline in v0.2. The Requester MUST send an input stream aft
 
 Required TLVs (minimum):
 
-* type: 20 (`task_kind`): [`byte`:`task_kind`] (UTF-8 string, e.g., `llm.chat`)
+* type: 20 (`task_kind`): [`byte`:`task_kind`] (UTF-8 string, e.g., `openai.chat_completions.v1`)
 
 Optional TLVs:
 
@@ -286,7 +286,7 @@ Optional TLVs:
 Meaning:
 
 * The Provider MAY reject unsupported tasks via `lcp_error`.
-* For standardized kinds (`llm.chat`, `openai.chat_completions.v1`), the sender MUST follow the encoding rules in §5.2.1.
+* For the standardized kind (`openai.chat_completions.v1`), the sender MUST follow the encoding rules in §5.2.1.
 * If the Provider declares `lcp_manifest.supported_tasks`, the Requester SHOULD choose matching `task_kind` / `params`.
 
 Input requirement (MUST):
@@ -300,38 +300,9 @@ Idempotency (recommended):
 
 ---
 
-### 5.2.1 Default `task_kind` (v0.2)
+### 5.2.1 Standardized `task_kind` (v0.2)
 
-LCP v0.2 standardizes at least the following `task_kind` values:
-
-#### `task_kind = "llm.chat"`
-
-Input stream interpretation:
-
-* The decoded input stream bytes MUST be a UTF-8 prompt string.
-
-`params` encoding:
-
-* `params` MUST be a TLV stream called `llm_chat_params_tlvs`.
-* The TLV encoding for `llm_chat_params_tlvs` is the same as the TLV stream in §4.
-* `llm_chat_params_tlvs` MUST include at least `profile`.
-
-`llm_chat_params_tlvs` (standard TLVs):
-
-* type: 1 (`profile`): [`byte`:`profile`] (UTF-8 string)
-  Meaning:
-  * `profile` MUST identify the execution target.
-  * It MAY represent more than a model name (for example routing or a deployment unit).
-* type: 2 (`temperature_milli`): [`tu32`:`temperature_milli`] (e.g., 700 means 0.7)
-* type: 3 (`max_output_tokens`): [`tu32`:`max_output_tokens`]
-
-Constraint (recommended):
-
-* Providers SHOULD reject `llm_chat_params_tlvs` containing unknown param types with `lcp_error(code=unsupported_params)`.
-
-Result:
-
-* The decoded result stream bytes MUST be a UTF-8 string.
+LCP v0.2 standardizes the following `task_kind` value:
 
 #### `task_kind = "openai.chat_completions.v1"`
 

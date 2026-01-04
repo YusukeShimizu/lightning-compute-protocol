@@ -177,7 +177,7 @@ func (m *chatTUIModel) updateTurnResult(msg chatTUITurnResultMsg) {
 
 func (m *chatTUIModel) View() string {
 	header := m.styles.header.Render("lcpd-oneshot chat") + " " +
-		m.styles.meta.Render(fmt.Sprintf("profile=%s", m.session.baseOpts.Profile))
+		m.styles.meta.Render(fmt.Sprintf("model=%s", m.session.baseOpts.Model))
 	peer := m.styles.meta.Render(fmt.Sprintf("peer_id=%s", m.session.baseOpts.PeerID))
 	help := m.styles.meta.Render("Enter: send • Ctrl-D/Ctrl-C/Esc: quit • /exit")
 

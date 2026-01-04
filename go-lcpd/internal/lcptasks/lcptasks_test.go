@@ -10,27 +10,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestValidateTask_LLMChat(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello",
-				Params: &lcpdv1.LLMChatParams{
-					Profile:          "profile-a",
-					TemperatureMilli: 700,
-					MaxOutputTokens:  256,
-				},
-			},
-		},
-	}
-
-	if err := lcptasks.ValidateTask(task); err != nil {
-		t.Fatalf("ValidateTask: %v", err)
-	}
-}
-
 func TestValidateTask_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
@@ -69,47 +48,6 @@ func TestValidateTask_Errors(t *testing.T) {
 			name:    "missing spec",
 			task:    &lcpdv1.Task{},
 			wantErr: lcptasks.ErrTaskSpecRequired,
-		},
-		{
-			name: "llm_chat spec nil",
-			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{},
-			},
-			wantErr: lcptasks.ErrLLMChatTaskRequired,
-		},
-		{
-			name: "prompt empty",
-			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Params: &lcpdv1.LLMChatParams{Profile: "profile-a"},
-					},
-				},
-			},
-			wantErr: lcptasks.ErrLLMChatPromptRequired,
-		},
-		{
-			name: "params nil",
-			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Prompt: "hello",
-					},
-				},
-			},
-			wantErr: lcptasks.ErrLLMChatParamsRequired,
-		},
-		{
-			name: "profile empty",
-			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_LlmChat{
-					LlmChat: &lcpdv1.LLMChatTaskSpec{
-						Prompt: "hello",
-						Params: &lcpdv1.LLMChatParams{},
-					},
-				},
-			},
-			wantErr: lcptasks.ErrLLMChatProfileRequired,
 		},
 		{
 			name: "openai_chat_completions_v1 spec nil",
@@ -226,79 +164,6 @@ func TestValidateTask_Errors(t *testing.T) {
 	}
 }
 
-func TestToWireQuoteRequestTask_LLMChat(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello, world",
-				Params: &lcpdv1.LLMChatParams{
-					Profile:          "profile-a",
-					TemperatureMilli: 700,
-					MaxOutputTokens:  256,
-				},
-			},
-		},
-	}
-
-	got, err := lcptasks.ToWireQuoteRequestTask(task)
-	if err != nil {
-		t.Fatalf("ToWireQuoteRequestTask: %v", err)
-	}
-
-	tempMilli := uint32(700)
-	maxTokens := uint32(256)
-	wantParams := lcpwire.LLMChatParams{
-		Profile:          "profile-a",
-		TemperatureMilli: &tempMilli,
-		MaxOutputTokens:  &maxTokens,
-	}
-	wantParamsBytes, err := lcpwire.EncodeLLMChatParams(wantParams)
-	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
-	}
-
-	want := lcptasks.QuoteRequestTask{
-		TaskKind:      lcptasks.TaskKindLLMChat,
-		ParamsBytes:   wantParamsBytes,
-		LLMChatParams: &wantParams,
-	}
-
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("wire task mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestToWireInputStream_LLMChat(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "hello, world",
-				Params: &lcpdv1.LLMChatParams{
-					Profile: "profile-a",
-				},
-			},
-		},
-	}
-
-	got, err := lcptasks.ToWireInputStream(task)
-	if err != nil {
-		t.Fatalf("ToWireInputStream: %v", err)
-	}
-
-	want := lcptasks.InputStream{
-		DecodedBytes:    []byte("hello, world"),
-		ContentType:     lcptasks.ContentTypeTextPlainUTF8,
-		ContentEncoding: lcptasks.ContentEncodingIdentity,
-	}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("input stream mismatch (-want +got):\n%s", diff)
-	}
-}
-
 func TestToWireQuoteRequestTask_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
@@ -319,9 +184,6 @@ func TestToWireQuoteRequestTask_OpenAIChatCompletionsV1(t *testing.T) {
 
 	if diff := cmp.Diff(lcptasks.TaskKindOpenAIChatCompletionsV1, got.TaskKind); diff != "" {
 		t.Fatalf("TaskKind mismatch (-want +got):\n%s", diff)
-	}
-	if got.LLMChatParams != nil {
-		t.Fatalf("expected LLMChatParams to be nil for openai.chat_completions.v1")
 	}
 
 	decoded, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(got.ParamsBytes)
@@ -360,62 +222,5 @@ func TestToWireInputStream_OpenAIChatCompletionsV1(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("input stream mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestToWireQuoteRequestTask_OmitsZeroOptionalParams(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Prompt: "zero optional",
-				Params: &lcpdv1.LLMChatParams{
-					Profile: "profile-b",
-				},
-			},
-		},
-	}
-
-	got, err := lcptasks.ToWireQuoteRequestTask(task)
-	if err != nil {
-		t.Fatalf("ToWireQuoteRequestTask: %v", err)
-	}
-
-	if got.LLMChatParams == nil {
-		t.Fatalf("LLMChatParams is nil")
-	}
-
-	wantParams := lcpwire.LLMChatParams{
-		Profile: "profile-b",
-	}
-
-	if diff := cmp.Diff(wantParams, *got.LLMChatParams); diff != "" {
-		t.Fatalf("LLMChatParams mismatch (-want +got):\n%s", diff)
-	}
-
-	decoded, err := lcpwire.DecodeLLMChatParams(got.ParamsBytes)
-	if err != nil {
-		t.Fatalf("DecodeLLMChatParams: %v", err)
-	}
-	if diff := cmp.Diff(wantParams, decoded); diff != "" {
-		t.Fatalf("encoded params mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestToWireQuoteRequestTask_ValidationError(t *testing.T) {
-	t.Parallel()
-
-	task := &lcpdv1.Task{
-		Spec: &lcpdv1.Task_LlmChat{
-			LlmChat: &lcpdv1.LLMChatTaskSpec{
-				Params: &lcpdv1.LLMChatParams{Profile: "profile-c"},
-			},
-		},
-	}
-
-	_, err := lcptasks.ToWireQuoteRequestTask(task)
-	if !errors.Is(err, lcptasks.ErrLLMChatPromptRequired) {
-		t.Fatalf("expected prompt validation error, got %v", err)
 	}
 }

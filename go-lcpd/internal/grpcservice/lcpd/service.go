@@ -352,9 +352,8 @@ func (s *Service) buildQuoteRequestPayload(
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
-		TaskKind:      wireTask.TaskKind,
-		ParamsBytes:   &paramsBytes,
-		LLMChatParams: wireTask.LLMChatParams,
+		TaskKind:    wireTask.TaskKind,
+		ParamsBytes: &paramsBytes,
 	}
 
 	payload, err := lcpwire.EncodeQuoteRequest(quoteReq)
@@ -798,25 +797,22 @@ func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 	out.SupportedTasks = make([]*lcpdv1.LCPTaskTemplate, 0, len(m.SupportedTasks))
 	for _, tmpl := range m.SupportedTasks {
 		switch tmpl.TaskKind {
-		case taskKindLLMChat:
-			if tmpl.LLMChatParams == nil {
+		case lcptasks.TaskKindOpenAIChatCompletionsV1:
+			if tmpl.ParamsBytes == nil {
 				continue
 			}
 
-			llmChat := &lcpdv1.LLMChatParams{
-				Profile: tmpl.LLMChatParams.Profile,
-			}
-			if tmpl.LLMChatParams.TemperatureMilli != nil {
-				llmChat.TemperatureMilli = *tmpl.LLMChatParams.TemperatureMilli
-			}
-			if tmpl.LLMChatParams.MaxOutputTokens != nil {
-				llmChat.MaxOutputTokens = *tmpl.LLMChatParams.MaxOutputTokens
+			params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*tmpl.ParamsBytes)
+			if err != nil {
+				continue
 			}
 
 			out.SupportedTasks = append(out.SupportedTasks, &lcpdv1.LCPTaskTemplate{
-				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_LLM_CHAT,
-				ParamsTemplate: &lcpdv1.LCPTaskTemplate_LlmChat{
-					LlmChat: llmChat,
+				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
+				ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
+					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{
+						Model: params.Model,
+					},
 				},
 			})
 		default:

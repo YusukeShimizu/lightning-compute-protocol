@@ -27,11 +27,11 @@ func TestComputeTermsHash_MatchesSpecEncodingVector(t *testing.T) {
 	}
 
 	commit := protocolcompat.TermsCommit{
-		TaskKind:             "llm.chat",
-		Input:                []byte("hello"),
-		InputContentType:     "text/plain; charset=utf-8",
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                []byte(`{"model":"a","messages":[{"role":"user","content":"hi"}]}`),
+		InputContentType:     "application/json; charset=utf-8",
 		InputContentEncoding: "identity",
-		Params:               []byte{0x01, 0x01, 0x61}, // type=1(profile), len=1, value="a"
+		Params:               []byte{0x01, 0x01, 0x61}, // type=1(model), len=1, value="a"
 	}
 
 	inputHash := sha256.Sum256(commit.Input)
@@ -43,14 +43,17 @@ func TestComputeTermsHash_MatchesSpecEncodingVector(t *testing.T) {
 	expectedTLV = append(expectedTLV, bytes.Repeat([]byte{0x11}, 32)...)
 	expectedTLV = append(expectedTLV, 0x03, 0x02, 0x03, 0xE8)
 	expectedTLV = append(expectedTLV, 0x04, 0x02, 0x01, 0xF4)
-	expectedTLV = append(expectedTLV, 0x14, 0x08)
+	expectedTLV = append(expectedTLV, 0x14, 0x1a)
 	expectedTLV = append(expectedTLV, []byte(commit.TaskKind)...)
 	expectedTLV = append(expectedTLV, 0x32, 0x20)
 	expectedTLV = append(expectedTLV, inputHash[:]...)
 	expectedTLV = append(expectedTLV, 0x33, 0x20)
 	expectedTLV = append(expectedTLV, paramsHash[:]...)
-	expectedTLV = append(expectedTLV, 0x34, 0x01, 0x05)
-	expectedTLV = append(expectedTLV, 0x35, 0x19)
+	if len(commit.Input) == 0 || len(commit.Input) > 0xfc {
+		t.Fatalf("unexpected input length for test vector: %d", len(commit.Input))
+	}
+	expectedTLV = append(expectedTLV, 0x34, 0x01, byte(len(commit.Input)))
+	expectedTLV = append(expectedTLV, 0x35, 0x1f)
 	expectedTLV = append(expectedTLV, []byte(commit.InputContentType)...)
 	expectedTLV = append(expectedTLV, 0x36, 0x08)
 	expectedTLV = append(expectedTLV, []byte(commit.InputContentEncoding)...)

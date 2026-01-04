@@ -18,18 +18,12 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 		maxPayload uint32 = 16384
 		maxStream  uint64 = 4_194_304
 		maxJob     uint64 = 8_388_608
-		tempMilli  uint32 = 700
-		maxTokens  uint32 = 256
 	)
 
-	llmParams := lcpwire.LLMChatParams{
-		Profile:          "test-profile",
-		TemperatureMilli: &tempMilli,
-		MaxOutputTokens:  &maxTokens,
-	}
-	llmParamsBytes, err := lcpwire.EncodeLLMChatParams(llmParams)
+	openaiParams := lcpwire.OpenAIChatCompletionsV1Params{Model: "test-model"}
+	openaiParamsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(openaiParams)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 
 	customParams := []byte{0x01, 0x02, 0x03}
@@ -41,9 +35,8 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 		MaxJobBytes:     maxJob,
 		SupportedTasks: []lcpwire.TaskTemplate{
 			{
-				TaskKind:      "llm.chat",
-				ParamsBytes:   &llmParamsBytes,
-				LLMChatParams: &llmParams,
+				TaskKind:    "openai.chat_completions.v1",
+				ParamsBytes: &openaiParamsBytes,
 			},
 			{
 				TaskKind:    "custom.task",
@@ -67,7 +60,7 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestEncodeDecode_QuoteRequest_LLMChat_RoundTrip(t *testing.T) {
+func TestEncodeDecode_QuoteRequest_OpenAIChatCompletionsV1_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -82,19 +75,13 @@ func TestEncodeDecode_QuoteRequest_LLMChat_RoundTrip(t *testing.T) {
 	}
 
 	var (
-		expiry       uint64 = 1234
-		tempMilli    uint32 = 800
-		maxOutTokens uint32 = 64
+		expiry uint64 = 1234
 	)
 
-	llmParams := lcpwire.LLMChatParams{
-		Profile:          "profile-a",
-		TemperatureMilli: &tempMilli,
-		MaxOutputTokens:  &maxOutTokens,
-	}
-	llmParamsBytes, err := lcpwire.EncodeLLMChatParams(llmParams)
+	openaiParams := lcpwire.OpenAIChatCompletionsV1Params{Model: "model-a"}
+	openaiParamsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(openaiParams)
 	if err != nil {
-		t.Fatalf("EncodeLLMChatParams: %v", err)
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 
 	want := lcpwire.QuoteRequest{
@@ -104,9 +91,8 @@ func TestEncodeDecode_QuoteRequest_LLMChat_RoundTrip(t *testing.T) {
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
-		TaskKind:      "llm.chat",
-		ParamsBytes:   &llmParamsBytes,
-		LLMChatParams: &llmParams,
+		TaskKind:    "openai.chat_completions.v1",
+		ParamsBytes: &openaiParamsBytes,
 	}
 
 	encoded, err := lcpwire.EncodeQuoteRequest(want)
@@ -184,68 +170,5 @@ func TestDecodeManifest_ErrStreamNotCanonical(t *testing.T) {
 			"DecodeManifest error mismatch (-want +got):\n%s",
 			cmp.Diff(tlv.ErrStreamNotCanonical, err),
 		)
-	}
-}
-
-func TestDecodeQuoteRequest_LLMChat_MissingParams(t *testing.T) {
-	t.Parallel()
-
-	pv := lcpwire.ProtocolVersionV02
-	var jobID [32]byte
-	var msgID [32]byte
-	for i := range jobID {
-		jobID[i] = 0x11
-	}
-	for i := range msgID {
-		msgID[i] = 0x22
-	}
-
-	expiry := uint64(1)
-	sizeExpiry := func() uint64 { return tlv.SizeTUint64(expiry) }
-
-	taskKindBytes := []byte("llm.chat")
-
-	stream := tlv.MustNewStream(
-		tlv.MakePrimitiveRecord(1, &pv),
-		tlv.MakePrimitiveRecord(2, &jobID),
-		tlv.MakePrimitiveRecord(3, &msgID),
-		tlv.MakeDynamicRecord(4, &expiry, sizeExpiry, tlv.ETUint64, tlv.DTUint64),
-		tlv.MakePrimitiveRecord(20, &taskKindBytes),
-	)
-
-	var b bytes.Buffer
-	if err := stream.Encode(&b); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-
-	if _, err := lcpwire.DecodeQuoteRequest(b.Bytes()); err == nil {
-		t.Fatalf("DecodeQuoteRequest: expected error")
-	}
-}
-
-func TestDecodeLLMChatParams_CollectsUnknownTLVs(t *testing.T) {
-	t.Parallel()
-
-	profileBytes := []byte("p")
-	unknownValue := []byte{0x01}
-
-	stream := tlv.MustNewStream(
-		tlv.MakePrimitiveRecord(1, &profileBytes),
-		tlv.MakePrimitiveRecord(9, &unknownValue),
-	)
-
-	var b bytes.Buffer
-	if err := stream.Encode(&b); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-
-	got, err := lcpwire.DecodeLLMChatParams(b.Bytes())
-	if err != nil {
-		t.Fatalf("DecodeLLMChatParams: %v", err)
-	}
-
-	wantUnknown := map[uint64][]byte{9: unknownValue}
-	if diff := cmp.Diff(wantUnknown, got.Unknown); diff != "" {
-		t.Fatalf("unknown tlvs mismatch (-want +got):\n%s", diff)
 	}
 }

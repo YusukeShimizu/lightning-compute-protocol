@@ -32,7 +32,7 @@ GOBIN="$PWD/bin" go install ./tools/lcpd-grpcd ./tools/lcpdctl ./tools/lcpd-ones
 - `lcpd-grpcd` は plaintext gRPC（TLS なし / 認証なし）を提供します。`127.0.0.1` にバインドするか、遠隔アクセスが必要なら SSH/VPN/リバースプロキシ等で保護してください。
 - `AcceptAndExecute` は `lnd` を使って BOLT11 invoice を支払います。mainnet では実際に資金を消費します。regtest から始め、少額で試してください。
 - LCP メッセージングには Provider への Lightning ピア接続が必要であり、Provider 側が LCP（manifest 観測）をサポートしている必要があります。
-- サポートされるタスク種別は `llm.chat` のみです。
+- サポートされるタスク種別は `openai.chat_completions.v1` のみです（OpenAI 互換の request/response JSON bytes をそのまま運ぶ passthrough）。
 - Quote の実行は `terms.quoteExpiry` によって時間制限されます。expiry 後の呼び出しは失敗するのが想定挙動です。
 - LCP ピアメッセージングには payload 制限（manifest の `max_payload_bytes`）があります。`go-lcpd` のデフォルトは `16384` バイトです。
 - `job_id` の CLI フラグは base64（proto の `bytes`）で、protojson のエンコーディングに合わせています。
@@ -86,7 +86,7 @@ daemon 自体は起動しますが、LCP ピア操作（`ListLCPPeers` / `Reques
 
 デフォルト:
 - `server-addr=127.0.0.1:50051`
-- `profile=gpt-5.2`
+- `model=gpt-5.2`
 - `timeout=30s`
 
 制約:
@@ -101,7 +101,7 @@ daemon 自体は起動しますが、LCP ピア操作（`ListLCPPeers` / `Reques
 cd go-lcpd
 ./bin/lcpd-oneshot \
   -peer-id "<provider_pubkey_hex>" \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -prompt "Say hello in one word."
 ```
 
@@ -123,7 +123,7 @@ JSON 出力が欲しい場合は `--json` を使ってください。
 cd go-lcpd
 ./bin/lcpd-oneshot \
   -peer-id "<provider_pubkey_hex>" \
-  -profile gpt-5.2 \
+  -model gpt-5.2 \
   -pay-invoice \
   -chat
 ```

@@ -24,12 +24,8 @@ func EncodeQuoteRequest(q QuoteRequest) ([]byte, error) {
 	records := append([]tlv.Record(nil), envelopeRecords...)
 	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(tlvTypeTaskKind), &taskKindBytes))
 
-	paramsBytesPtr, err := taskParamsBytes(q.TaskKind, q.ParamsBytes, q.LLMChatParams)
-	if err != nil {
-		return nil, err
-	}
-	if paramsBytesPtr != nil {
-		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(tlvTypeParams), paramsBytesPtr))
+	if q.ParamsBytes != nil {
+		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(tlvTypeParams), q.ParamsBytes))
 	}
 
 	return encodeTLVStream(records)
@@ -63,22 +59,9 @@ func DecodeQuoteRequest(payload []byte) (QuoteRequest, error) {
 		paramsPtr = ptrCopyBytes(b)
 	}
 
-	var llmChatParams *LLMChatParams
-	if taskKind == taskKindLLMChat {
-		if paramsPtr == nil {
-			return QuoteRequest{}, errors.New("params is required for task_kind=llm.chat")
-		}
-		decoded, decodeErr := DecodeLLMChatParams(*paramsPtr)
-		if decodeErr != nil {
-			return QuoteRequest{}, decodeErr
-		}
-		llmChatParams = &decoded
-	}
-
 	return QuoteRequest{
-		Envelope:      env,
-		TaskKind:      taskKind,
-		ParamsBytes:   paramsPtr,
-		LLMChatParams: llmChatParams,
+		Envelope:    env,
+		TaskKind:    taskKind,
+		ParamsBytes: paramsPtr,
 	}, nil
 }

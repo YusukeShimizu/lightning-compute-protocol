@@ -40,7 +40,7 @@ func (e ApproxUsageEstimator) Estimate(
 	task computebackend.Task,
 	policy ExecutionPolicy,
 ) (Estimation, error) {
-	if task.TaskKind != "llm.chat" && task.TaskKind != "openai.chat_completions.v1" {
+	if task.TaskKind != "openai.chat_completions.v1" {
 		return Estimation{}, fmt.Errorf(
 			"%w: %q",
 			computebackend.ErrUnsupportedTaskKind,

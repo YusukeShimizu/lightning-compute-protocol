@@ -133,7 +133,7 @@ func TestChatSession_Turn_Success(t *testing.T) {
 
 	opts := runOptions{
 		PeerID:           "aa",
-		Profile:          "gpt-5.2",
+		Model:            "gpt-5.2",
 		PayInvoice:       true,
 		Timeout:          time.Second,
 		MaxPromptBytes:   0,
@@ -180,7 +180,7 @@ func TestChatSession_Turn_RollbackOnError(t *testing.T) {
 
 	opts := runOptions{
 		PeerID:         "aa",
-		Profile:        "gpt-5.2",
+		Model:          "gpt-5.2",
 		PayInvoice:     true,
 		Timeout:        time.Second,
 		MaxPromptBytes: 0,
@@ -210,7 +210,7 @@ func TestChatSession_Turn_ReportsTrimmed(t *testing.T) {
 
 	opts := runOptions{
 		PeerID:         "aa",
-		Profile:        "gpt-5.2",
+		Model:          "gpt-5.2",
 		PayInvoice:     true,
 		Timeout:        time.Second,
 		MaxPromptBytes: 19,

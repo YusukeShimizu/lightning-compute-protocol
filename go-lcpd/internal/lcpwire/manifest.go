@@ -215,12 +215,8 @@ func EncodeTaskTemplate(t TaskTemplate) ([]byte, error) {
 
 	records := []tlv.Record{tlv.MakePrimitiveRecord(tlv.Type(tlvTypeTaskKind), &taskKindBytes)}
 
-	paramsBytes, err := taskParamsBytes(t.TaskKind, t.ParamsBytes, t.LLMChatParams)
-	if err != nil {
-		return nil, err
-	}
-	if paramsBytes != nil {
-		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(tlvTypeParams), paramsBytes))
+	if t.ParamsBytes != nil {
+		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(tlvTypeParams), t.ParamsBytes))
 	}
 
 	return encodeTLVStream(records)
@@ -249,53 +245,8 @@ func DecodeTaskTemplate(payload []byte) (TaskTemplate, error) {
 		paramsPtr = ptrCopyBytes(b)
 	}
 
-	var llmChatParams *LLMChatParams
-	if taskKind == taskKindLLMChat {
-		if paramsPtr == nil {
-			return TaskTemplate{}, errors.New("params is required for task_kind=llm.chat")
-		}
-		decoded, decodeErr := DecodeLLMChatParams(*paramsPtr)
-		if decodeErr != nil {
-			return TaskTemplate{}, decodeErr
-		}
-		llmChatParams = &decoded
-	}
-
 	return TaskTemplate{
-		TaskKind:      taskKind,
-		ParamsBytes:   paramsPtr,
-		LLMChatParams: llmChatParams,
+		TaskKind:    taskKind,
+		ParamsBytes: paramsPtr,
 	}, nil
-}
-
-func taskParamsBytes(
-	taskKind string,
-	paramsBytesPtr *[]byte,
-	llmChatParams *LLMChatParams,
-) (*[]byte, error) {
-	if taskKind != taskKindLLMChat {
-		if llmChatParams != nil {
-			return nil, fmt.Errorf("llm_chat_params set for non-llm task_kind=%q", taskKind)
-		}
-		return paramsBytesPtr, nil
-	}
-
-	if llmChatParams != nil {
-		encoded, err := EncodeLLMChatParams(*llmChatParams)
-		if err != nil {
-			return nil, err
-		}
-		return &encoded, nil
-	}
-
-	if paramsBytesPtr == nil {
-		return nil, errors.New("params is required for task_kind=llm.chat")
-	}
-
-	// Validate and normalize llm.chat params.
-	if _, decodeErr := DecodeLLMChatParams(*paramsBytesPtr); decodeErr != nil {
-		return nil, decodeErr
-	}
-
-	return paramsBytesPtr, nil
 }
