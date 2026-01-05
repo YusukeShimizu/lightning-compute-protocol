@@ -107,8 +107,8 @@ export OPENAI_SERVE_API_KEY="devkey1"
 codex --profile lcp "Say hello in Japanese."
 ```
 
-Note: `openai-serve` currently supports a strict subset of Chat Completions. If your client sends `tools`,
-`response_format`, or streaming-related fields, the request will be rejected.
+Note: this MVP rejects streaming requests (`stream=true`). Other fields are passed through; support depends on the
+selected Provider.
 
 ### LLM (`llm`)
 
@@ -132,10 +132,15 @@ llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
 
 ## Request/response behavior
 
-- JSON decoding is strict (`DisallowUnknownFields`): unknown request fields are rejected with `400`.
+- `openai-serve` is a passthrough gateway for the Chat Completions request/response JSON bytes.
+- Minimal validation is applied before routing:
+  - Body must be a valid JSON object.
+  - `model` must be present and non-empty.
+  - `messages` must be present and non-empty.
+  - `stream` must be omitted or `false` (non-streaming only).
+  - HTTP `Content-Encoding` must be omitted or `identity` (compressed request bodies are rejected).
 - Request body size is limited to 1 MiB.
-- Provider result bytes must be UTF-8 (non-UTF-8 results return `502`).
-- Token usage in responses is approximate (bytes/4 heuristic).
+- Provider result bytes are returned as-is; HTTP `Content-Type` is taken from the LCP result metadata.
 
 For configuration, routing rules, and safety knobs (max price, timeouts, model allowlists), see
 [Configuration](/openai-serve/configuration).

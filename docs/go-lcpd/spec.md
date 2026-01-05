@@ -382,7 +382,7 @@ Actions:
 * `send_custom_message(grpc_conn, peer_pubkey, msg_type, payload_bytes) -> ok | error`
 * `disconnect_peer(grpc_conn, peer_pubkey) -> ok | error`
 Operational Principle:
-* If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is unset or <= 0, `lcp_manifest` MUST be sent at most once per connection (to avoid infinite loops).
+* If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is unset or `<= 0`, `lcp_manifest` MUST be sent at most once per connection (to avoid infinite loops).
 * If `LCPD_LND_MANIFEST_RESEND_INTERVAL` is set to a positive duration, go-lcpd SHOULD periodically re-send `lcp_manifest` to connected peers on that interval.
 * If `lcp_manifest` is received and we have not sent ours yet, reply once (SHOULD). If we have already sent ours, do not reply.
 * Inbound messages are classified via `LCPMessageRouter`; manifests are decoded internally and applied to `PeerDirectory`.

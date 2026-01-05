@@ -108,8 +108,8 @@ export OPENAI_SERVE_API_KEY="devkey1"
 codex --profile lcp "Say hello in Japanese."
 ```
 
-注意: `openai-serve` は Chat Completions のサブセットのみ対応です。クライアントが `tools` / `response_format` /
-ストリーミング関連フィールドを送ると、リクエストは拒否されます。
+注意: この MVP はストリーミング（`stream=true`）を拒否します。それ以外のフィールドは基本的にパススルーし、
+サポート可否は選択された Provider に依存します。
 
 ### LLM（`llm`）
 
@@ -133,10 +133,15 @@ llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
 
 ## リクエスト/レスポンスの挙動
 
-- JSON は strict に decode します（`DisallowUnknownFields`）: 未知フィールドがあると `400` になります。
+- `openai-serve` は Chat Completions の request/response JSON bytes をそのまま運ぶパススルーゲートウェイです。
+- ルーティング前に最小限の検証のみ行います:
+  - body が JSON object であること
+  - `model` が存在し、空でないこと
+  - `messages` が存在し、空でないこと
+  - `stream` は省略または `false`（非ストリーミングのみ）
+  - HTTP `Content-Encoding` は省略または `identity`（圧縮されたリクエストボディは拒否）
 - リクエストボディは 1 MiB までです。
-- Provider の結果 bytes は UTF-8 必須です（UTF-8 でない場合は `502`）。
-- レスポンスの token usage は概算です（bytes/4 の簡易ヒューリスティック）。
+- Provider の結果 bytes はそのまま返し、HTTP の `Content-Type` は LCP result metadata から取得します。
 
 設定、ルーティング、Safety knobs（最大価格、タイムアウト、モデル allowlist）は
 [設定](/openai-serve/configuration-ja) を参照してください。

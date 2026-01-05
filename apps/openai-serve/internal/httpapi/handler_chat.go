@@ -36,12 +36,8 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	prompt, ok := s.buildPrompt(c, req.Messages)
-	if !ok {
-		return
-	}
-	promptBytes := len(prompt)
-	promptTokens := openai.ApproxTokensFromBytes(promptBytes)
+	requestBytes := len(reqBytes)
+	requestTokens := openai.ApproxTokensFromBytes(requestBytes)
 
 	model := strings.TrimSpace(req.Model)
 	peerID, ok := s.resolvePeerForModel(c, model)
@@ -82,8 +78,8 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		peerID,
 		jobID,
 		quote,
-		promptBytes,
-		promptTokens,
+		requestBytes,
+		requestTokens,
 		quoteLatency,
 		execLatency,
 		result,
@@ -93,6 +89,17 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 }
 
 func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
+	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
+	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
+		writeOpenAIError(
+			c,
+			http.StatusUnsupportedMediaType,
+			"invalid_request_error",
+			fmt.Sprintf("unsupported Content-Encoding: %q (only %q is supported)", enc, contentEncodingIdentity),
+		)
+		return nil, openai.ChatCompletionsRequest{}, false
+	}
+
 	body, readErr := readRequestBodyBytes(c)
 	if readErr != nil {
 		if isRequestBodyTooLarge(readErr) {
@@ -135,28 +142,6 @@ func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletion
 	}
 
 	return body, parsed, true
-}
-
-func (s *Server) buildPrompt(c *gin.Context, messages []openai.ChatMessage) (string, bool) {
-	prompt, err := openai.BuildPrompt(messages)
-	if err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return "", false
-	}
-	if s.cfg.MaxPromptBytes > 0 && len(prompt) > s.cfg.MaxPromptBytes {
-		writeOpenAIError(
-			c,
-			http.StatusBadRequest,
-			"invalid_request_error",
-			fmt.Sprintf(
-				"prompt exceeds max bytes: prompt_bytes=%d max_prompt_bytes=%d",
-				len(prompt),
-				s.cfg.MaxPromptBytes,
-			),
-		)
-		return "", false
-	}
-	return prompt, true
 }
 
 func (s *Server) resolvePeerForModel(
@@ -260,8 +245,8 @@ func (s *Server) logAndWriteChatCompletionResult(
 	peerID string,
 	jobID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
-	promptBytes int,
-	promptTokens int,
+	requestBytes int,
+	requestTokens int,
 	quoteLatency time.Duration,
 	execLatency time.Duration,
 	result *lcpdv1.Result,
@@ -274,7 +259,7 @@ func (s *Server) logAndWriteChatCompletionResult(
 	resultBytes := result.GetResult()
 	completionBytes := len(resultBytes)
 	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
-	totalTokens := promptTokens + completionTokens
+	totalTokens := requestTokens + completionTokens
 
 	jobIDHex := hex.EncodeToString(jobID)
 	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
@@ -287,9 +272,9 @@ func (s *Server) logAndWriteChatCompletionResult(
 		"job_id", jobIDHex,
 		"price_msat", price,
 		"terms_hash", termsHashHex,
-		"prompt_bytes", promptBytes,
+		"request_bytes", requestBytes,
 		"completion_bytes", completionBytes,
-		"prompt_tokens_approx", promptTokens,
+		"request_tokens_approx", requestTokens,
 		"completion_tokens_approx", completionTokens,
 		"total_tokens_approx", totalTokens,
 		"quote_ms", quoteLatency.Milliseconds(),

@@ -26,8 +26,6 @@ type Config struct {
 
 	MaxPriceMsat uint64
 
-	MaxPromptBytes int // if >0, reject prompts larger than this
-
 	TimeoutQuote   time.Duration
 	TimeoutExecute time.Duration
 
@@ -49,8 +47,6 @@ type envConfig struct {
 
 	MaxPriceMsat uint64 `env:"OPENAI_SERVE_MAX_PRICE_MSAT"`
 
-	MaxPromptBytes *int `env:"OPENAI_SERVE_MAX_PROMPT_BYTES"`
-
 	TimeoutQuote   time.Duration `env:"OPENAI_SERVE_TIMEOUT_QUOTE"`
 	TimeoutExecute time.Duration `env:"OPENAI_SERVE_TIMEOUT_EXECUTE"`
 }
@@ -59,8 +55,6 @@ const (
 	defaultHTTPAddr     = "127.0.0.1:8080"
 	defaultLCPDGRPCAddr = "127.0.0.1:50051"
 	defaultLogLevel     = "info"
-
-	defaultMaxPromptBytes = 60000
 
 	defaultTimeoutQuote   = 5 * time.Second
 	defaultTimeoutExecute = 120 * time.Second
@@ -83,7 +77,6 @@ func LoadFromEnv(ctx context.Context) (Config, error) {
 
 		AllowUnlistedModels: false,
 		MaxPriceMsat:        0,
-		MaxPromptBytes:      defaultMaxPromptBytes,
 
 		TimeoutQuote:   defaultTimeoutQuote,
 		TimeoutExecute: defaultTimeoutExecute,
@@ -130,10 +123,6 @@ func LoadFromEnv(ctx context.Context) (Config, error) {
 	cfg.AllowUnlistedModels = env.AllowUnlistedModels
 	cfg.MaxPriceMsat = env.MaxPriceMsat
 
-	if env.MaxPromptBytes != nil {
-		cfg.MaxPromptBytes = *env.MaxPromptBytes
-	}
-
 	if env.TimeoutQuote > 0 {
 		cfg.TimeoutQuote = env.TimeoutQuote
 	}
@@ -166,9 +155,6 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.TimeoutExecute <= 0 {
 		return errors.New("OPENAI_SERVE_TIMEOUT_EXECUTE must be > 0")
-	}
-	if cfg.MaxPromptBytes < 0 {
-		return errors.New("OPENAI_SERVE_MAX_PROMPT_BYTES must be >= 0")
 	}
 	return nil
 }
