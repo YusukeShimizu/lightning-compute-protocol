@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,8 +18,7 @@ import (
 )
 
 const (
-	cancelJobTimeout        = 2 * time.Second
-	contentEncodingIdentity = "identity"
+	cancelJobTimeout = 2 * time.Second
 
 	cancelReasonRequestCanceled        = "request canceled"
 	providerReturnedNoResultMessage    = "provider returned no result"
@@ -297,47 +295,12 @@ func (s *Server) logStreamResult(
 }
 
 func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
-	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
-	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
-		writeOpenAIError(
-			c,
-			http.StatusUnsupportedMediaType,
-			"invalid_request_error",
-			fmt.Sprintf("unsupported Content-Encoding: %q (only %q is supported)", enc, contentEncodingIdentity),
-		)
-		return nil, openai.ChatCompletionsRequest{}, false
-	}
-
-	body, readErr := readRequestBodyBytes(c)
-	if readErr != nil {
-		if isRequestBodyTooLarge(readErr) {
-			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", readErr.Error())
-			return nil, openai.ChatCompletionsRequest{}, false
-		}
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", readErr.Error())
-		return nil, openai.ChatCompletionsRequest{}, false
-	}
-
 	var parsed openai.ChatCompletionsRequest
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		msg := strings.TrimPrefix(err.Error(), "json: ")
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", msg)
+	body, ok := decodeJSONRequest(c, &parsed)
+	if !ok {
 		return nil, openai.ChatCompletionsRequest{}, false
 	}
-
-	model := parsed.Model
-	trimmedModel := strings.TrimSpace(model)
-	if trimmedModel == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
-		return nil, openai.ChatCompletionsRequest{}, false
-	}
-	if trimmedModel != model {
-		writeOpenAIError(
-			c,
-			http.StatusBadRequest,
-			"invalid_request_error",
-			"model must not have leading/trailing whitespace",
-		)
+	if !validateModelField(c, parsed.Model) {
 		return nil, openai.ChatCompletionsRequest{}, false
 	}
 	if len(parsed.Messages) == 0 {
@@ -488,10 +451,7 @@ func (s *Server) logAndWriteResult(
 		"total_ms", totalLatency.Milliseconds(),
 	)
 
-	c.Header("X-Lcp-Peer-Id", peerID)
-	c.Header("X-Lcp-Job-Id", jobIDHex)
-	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
-	c.Header("X-Lcp-Terms-Hash", termsHashHex)
+	writeLCPHeaders(c, peerID, jobID, quote)
 
 	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
 		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))

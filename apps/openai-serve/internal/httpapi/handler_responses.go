@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -42,47 +40,12 @@ func (s *Server) handleResponses(c *gin.Context) {
 }
 
 func decodeAndValidateResponsesRequest(c *gin.Context) ([]byte, openai.ResponsesRequest, bool) {
-	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
-	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
-		writeOpenAIError(
-			c,
-			http.StatusUnsupportedMediaType,
-			"invalid_request_error",
-			fmt.Sprintf("unsupported Content-Encoding: %q (only %q is supported)", enc, contentEncodingIdentity),
-		)
-		return nil, openai.ResponsesRequest{}, false
-	}
-
-	body, readErr := readRequestBodyBytes(c)
-	if readErr != nil {
-		if isRequestBodyTooLarge(readErr) {
-			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", readErr.Error())
-			return nil, openai.ResponsesRequest{}, false
-		}
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", readErr.Error())
-		return nil, openai.ResponsesRequest{}, false
-	}
-
 	var parsed openai.ResponsesRequest
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		msg := strings.TrimPrefix(err.Error(), "json: ")
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", msg)
+	body, ok := decodeJSONRequest(c, &parsed)
+	if !ok {
 		return nil, openai.ResponsesRequest{}, false
 	}
-
-	model := parsed.Model
-	trimmedModel := strings.TrimSpace(model)
-	if trimmedModel == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
-		return nil, openai.ResponsesRequest{}, false
-	}
-	if trimmedModel != model {
-		writeOpenAIError(
-			c,
-			http.StatusBadRequest,
-			"invalid_request_error",
-			"model must not have leading/trailing whitespace",
-		)
+	if !validateModelField(c, parsed.Model) {
 		return nil, openai.ResponsesRequest{}, false
 	}
 
