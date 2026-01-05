@@ -1,0 +1,17 @@
+enabled: true
+quote_ttl_seconds: 300
+
+llm:
+  models:
+    gpt-5.2:
+      price:
+        input_msat_per_mtok: 1750000
+        cached_input_msat_per_mtok: 175000
+        output_msat_per_mtok: 14000000
+
+# Optional: load-based surge pricing at quote-time.
+pricing:
+  in_flight_surge:
+    threshold: 2
+    per_job_bps: 500 # +5% per job above threshold
+    max_multiplier_bps: 30000 # 3.0x cap
