@@ -145,7 +145,7 @@ func (s *staticStreamClient) Recv() (*lcpdv1.AcceptAndExecuteStreamResponse, err
 	return resp, nil
 }
 
-func (s *staticStreamClient) Header() (metadata.MD, error) { return nil, nil }
+func (s *staticStreamClient) Header() (metadata.MD, error) { return metadata.MD{}, nil }
 func (s *staticStreamClient) Trailer() metadata.MD         { return nil }
 func (s *staticStreamClient) CloseSend() error             { return nil }
 func (s *staticStreamClient) Context() context.Context {

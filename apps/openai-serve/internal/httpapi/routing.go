@@ -67,48 +67,96 @@ func (s *Server) resolvePeerIDForTaskKind(
 ) (string, error) {
 	model = strings.TrimSpace(model)
 
-	if s.cfg.ModelMap != nil {
-		if peerID, ok := s.cfg.ModelMap[model]; ok {
-			if !peerInList(peersResp, peerID) {
-				return "", fmt.Errorf("peer_id for model %q is not connected/LCP-ready: %s", model, peerID)
-			}
-			return peerID, nil
-		}
+	if peerID, ok, err := s.resolvePeerIDFromModelMap(model, peersResp); ok || err != nil {
+		return peerID, err
 	}
 
-	if strings.TrimSpace(s.cfg.DefaultPeerID) != "" {
-		if !peerInList(peersResp, s.cfg.DefaultPeerID) {
-			return "", fmt.Errorf("OPENAI_SERVE_DEFAULT_PEER_ID is not connected/LCP-ready: %s", s.cfg.DefaultPeerID)
-		}
-		return s.cfg.DefaultPeerID, nil
+	if peerID, ok, err := s.resolvePeerIDFromDefaultPeer(peersResp); ok || err != nil {
+		return peerID, err
 	}
 
-	// Prefer peers that advertise the model in supported_tasks.
-	for _, p := range peersResp.GetPeers() {
-		manifest := p.GetRemoteManifest()
-		for _, tmpl := range manifest.GetSupportedTasks() {
-			if tmpl.GetKind() != taskKind {
-				continue
-			}
-			switch taskKind {
-			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
-				if tmpl.GetOpenaiChatCompletionsV1().GetModel() == model {
-					return p.GetPeerId(), nil
-				}
-			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
-				if tmpl.GetOpenaiResponsesV1().GetModel() == model {
-					return p.GetPeerId(), nil
-				}
-			}
-		}
+	if peerID, ok := resolvePeerIDFromSupportedTasks(peersResp, taskKind, model); ok {
+		return peerID, nil
 	}
 
 	// Fallback: any connected LCP peer.
-	if peers := peersResp.GetPeers(); len(peers) > 0 {
-		return peers[0].GetPeerId(), nil
+	if peerID, ok := resolvePeerIDFromAnyPeer(peersResp); ok {
+		return peerID, nil
 	}
 
 	return "", errors.New("no connected LCP peers available")
+}
+
+func (s *Server) resolvePeerIDFromModelMap(
+	model string,
+	peersResp *lcpdv1.ListLCPPeersResponse,
+) (string, bool, error) {
+	if s.cfg.ModelMap == nil {
+		return "", false, nil
+	}
+
+	peerID, ok := s.cfg.ModelMap[model]
+	if !ok {
+		return "", false, nil
+	}
+	if !peerInList(peersResp, peerID) {
+		return "", true, fmt.Errorf("peer_id for model %q is not connected/LCP-ready: %s", model, peerID)
+	}
+	return peerID, true, nil
+}
+
+func (s *Server) resolvePeerIDFromDefaultPeer(
+	peersResp *lcpdv1.ListLCPPeersResponse,
+) (string, bool, error) {
+	defaultPeerID := strings.TrimSpace(s.cfg.DefaultPeerID)
+	if defaultPeerID == "" {
+		return "", false, nil
+	}
+	if !peerInList(peersResp, defaultPeerID) {
+		return "", true, fmt.Errorf("OPENAI_SERVE_DEFAULT_PEER_ID is not connected/LCP-ready: %s", defaultPeerID)
+	}
+	return defaultPeerID, true, nil
+}
+
+func resolvePeerIDFromSupportedTasks(
+	peersResp *lcpdv1.ListLCPPeersResponse,
+	taskKind lcpdv1.LCPTaskKind,
+	model string,
+) (string, bool) {
+	for _, p := range peersResp.GetPeers() {
+		for _, tmpl := range p.GetRemoteManifest().GetSupportedTasks() {
+			if tmpl.GetKind() != taskKind {
+				continue
+			}
+			if advertisedModel := modelFromTaskTemplate(taskKind, tmpl); strings.TrimSpace(advertisedModel) == model {
+				return p.GetPeerId(), true
+			}
+		}
+	}
+	return "", false
+}
+
+func resolvePeerIDFromAnyPeer(peersResp *lcpdv1.ListLCPPeersResponse) (string, bool) {
+	if peers := peersResp.GetPeers(); len(peers) > 0 {
+		return peers[0].GetPeerId(), true
+	}
+	return "", false
+}
+
+func modelFromTaskTemplate(kind lcpdv1.LCPTaskKind, tmpl *lcpdv1.LCPTaskTemplate) string {
+	if tmpl == nil {
+		return ""
+	}
+
+	switch kind {
+	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_UNSPECIFIED:
+		return ""
+	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
+		return tmpl.GetOpenaiChatCompletionsV1().GetModel()
+	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
+		return tmpl.GetOpenaiResponsesV1().GetModel()
+	}
+	return ""
 }
 
 func collectModelsFromPeersForKinds(resp *lcpdv1.ListLCPPeersResponse, kinds []lcpdv1.LCPTaskKind) map[string]struct{} {
@@ -141,17 +189,7 @@ func collectModelsFromPeersForKind(resp *lcpdv1.ListLCPPeersResponse, kind lcpdv
 				continue
 			}
 
-			var model string
-			switch kind {
-			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
-				model = tmpl.GetOpenaiChatCompletionsV1().GetModel()
-			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
-				model = tmpl.GetOpenaiResponsesV1().GetModel()
-			default:
-				continue
-			}
-
-			model = strings.TrimSpace(model)
+			model := strings.TrimSpace(modelFromTaskTemplate(kind, tmpl))
 			if model == "" {
 				continue
 			}

@@ -2,12 +2,10 @@ package httpapi
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,131 +27,18 @@ func (s *Server) handleResponses(c *gin.Context) {
 		return
 	}
 
-	requestBytes := len(reqBytes)
-	requestTokens := openai.ApproxTokensFromBytes(requestBytes)
 	streaming := req.Stream != nil && *req.Stream
-
 	model := strings.TrimSpace(req.Model)
-	peerID, ok := s.resolvePeerForTaskKindAndModel(
+	s.handleOpenAIPassthrough(
 		c,
+		started,
 		lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
 		model,
-	)
-	if !ok {
-		return
-	}
-
-	task, ok := s.buildLCPOpenAIResponsesV1Task(c, model, reqBytes)
-	if !ok {
-		return
-	}
-
-	quoteStart := time.Now()
-	quote, ok := s.requestQuoteAndValidatePrice(c, peerID, task)
-	if !ok {
-		return
-	}
-	quoteLatency := time.Since(quoteStart)
-
-	jobID := copyBytes(quote.GetTerms().GetJobId())
-
-	if streaming {
-		execStart := time.Now()
-		grpcStream, cancel, err := s.acceptAndExecuteStream(c, peerID, jobID)
-		if err != nil {
-			cancel()
-			if shouldCancelAfterExecuteError(c, err) {
-				s.cancelJobAsync(peerID, jobID, "request canceled")
-			}
-			writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
-			return
-		}
-		defer cancel()
-
-		price := quote.GetTerms().GetPriceMsat()
-		jobIDHex := hex.EncodeToString(jobID)
-		termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
-		c.Header("X-Lcp-Peer-Id", peerID)
-		c.Header("X-Lcp-Job-Id", jobIDHex)
-		c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
-		c.Header("X-Lcp-Terms-Hash", termsHashHex)
-
-		streamed, streamErr := s.writeLCPStreamToHTTP(c, grpcStream)
-		execLatency := time.Since(execStart)
-
-		if streamErr != nil {
-			if shouldCancelAfterExecuteError(c, streamErr) {
-				s.cancelJobAsync(peerID, jobID, "request canceled")
-			}
-			if !streamed.wroteBody {
-				writeOpenAIError(c, httpStatusFromGRPC(streamErr), "server_error", grpcErrMessage(streamErr))
-			}
-			return
-		}
-
-		if streamed.terminalResult == nil {
-			if !streamed.wroteBody {
-				writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no result")
-			}
-			return
-		}
-
-		if streamed.terminalResult.GetStatus() != lcpdv1.Result_STATUS_OK {
-			msg := strings.TrimSpace(streamed.terminalResult.GetMessage())
-			if msg == "" {
-				msg = "provider returned non-ok status"
-			}
-			if !streamed.wroteBody {
-				writeOpenAIError(c, http.StatusBadGateway, "server_error", msg)
-			}
-			return
-		}
-
-		s.logStreamResult(
-			c,
-			"response (stream)",
-			started,
-			model,
-			peerID,
-			jobID,
-			quote,
-			requestBytes,
-			requestTokens,
-			quoteLatency,
-			execLatency,
-			streamed.bytesWritten,
-		)
-		return
-	}
-
-	execStart := time.Now()
-	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, jobID)
-	if !ok {
-		return
-	}
-	execLatency := time.Since(execStart)
-
-	result, ok := validateResult(c, execResp)
-	if !ok {
-		return
-	}
-
-	if !s.logAndWriteResult(
-		c,
+		reqBytes,
+		streaming,
+		s.buildLCPOpenAIResponsesV1Task,
 		"response",
-		started,
-		model,
-		peerID,
-		jobID,
-		quote,
-		requestBytes,
-		requestTokens,
-		quoteLatency,
-		execLatency,
-		result,
-	) {
-		return
-	}
+	)
 }
 
 func decodeAndValidateResponsesRequest(c *gin.Context) ([]byte, openai.ResponsesRequest, bool) {

@@ -74,7 +74,7 @@ type ChatCompletionsRequest struct {
 }
 
 type ResponsesRequest struct {
-	Model string `json:"model"`
+	Model string          `json:"model"`
 	Input json.RawMessage `json:"input"`
 
 	Stream *bool `json:"stream,omitempty"`

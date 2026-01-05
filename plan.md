@@ -25,9 +25,10 @@ OpenAI 互換クライアントが `apps/openai-serve/` に対して以下の AP
 - [x] (2026-01-04 23:44Z) 現状調査（chat completions の非ストリーミング実装、LCP stream 仕様、必要な変更点）と、本 ExecPlan の作成を完了。
 - [x] (2026-01-05 00:08Z) `docs/protocol/protocol.md` に `task_kind="openai.responses.v1"` と streaming 仕様（chat + responses）を追記（日本語概要 `docs/protocol/protocol-ja.md` も追随）。
 - [x] (2026-01-05 00:08Z) `go-lcpd/proto/lcpd/v1/lcpd.proto` を拡張し、Responses 用 TaskSpec と server-streaming RPC を追加（`go-lcpd/gen/go/` と `proto-go/` を再生成）。
-- [ ] `go-lcpd/` で Requester/Provider の streaming 経路（Waiter → gRPC → openai-serve）を実装し、テストで観測可能にする。
-- [ ] `apps/openai-serve/` に `POST /v1/responses` と、両 endpoint の `stream:true` SSE 中継を実装する。
-- [ ] `go test` と lint を通す（`go-lcpd` / `apps/openai-serve`）。（completed: `make test`; remaining: `make lint`）
+- [x] (2026-01-05 02:10Z) `go-lcpd/` で Requester/Provider の streaming 経路（Waiter → gRPC → openai-serve）を実装し、テストで観測可能にした（regtest itest で検証）。
+- [x] (2026-01-05 02:10Z) `apps/openai-serve/` に `POST /v1/responses` と、両 endpoint の `stream:true` SSE 中継を実装。
+- [x] (2026-01-05 02:15Z) regtest itest を追加し、`stream`/`responses` の end-to-end が確実に通ることを確認（`cd go-lcpd && make test-regtest-openai-serve`）。
+- [x] (2026-01-05 03:44Z) `go test` と lint を通す（`go-lcpd` / `apps/openai-serve`）。（completed: `go-lcpd: make test lint test-regtest`; `apps/openai-serve: make test lint`）
 
 ## Surprises & Discoveries
 
@@ -39,6 +40,9 @@ OpenAI 互換クライアントが `apps/openai-serve/` に対して以下の AP
 
 - Observation: gRPC API に新しい server-streaming RPC を追加すると、`apps/openai-serve` のテスト用 mock が `LCPDServiceClient` を満たさずビルドが落ちる。
   Evidence: `apps/openai-serve/internal/httpapi/server_test.go` の `recordingLCPDClient` に `AcceptAndExecuteStream` を追加して修正。
+
+- Observation: `lcp_manifest` は “送信成功” でも相手側が `SubscribeCustomMessages` 未確立だと取りこぼす可能性があり、片側だけ LCP-ready になる（待ちが 3 分でタイムアウトする）ケースがある。
+  Fix: “最初の inbound manifest を観測したら（既に送信済みでも）一度だけ manifest を返信する” ことで handshake を自己修復する。
 
 ## Decision Log
 
@@ -238,6 +242,8 @@ HTTP 動作確認（手動）:
 - `apps/openai-serve/internal/httpapi/server_test.go` に以下がある:
   - chat completions: `stream:true` が 400 にならず、gRPC streaming RPC が呼ばれること。
   - responses: 非ストリーミング/ストリーミングの両方で 200 が返り、task spec が期待通りであること。
+- regtest itest として `go-lcpd/itest/e2e/regtest_openai_serve_test.go` があり、実プロセス（`lcpd-grpcd` + `openai-serve`）で end-to-end が通ること（`cd go-lcpd && make test-regtest-openai-serve`）。
+  - デバッグ用: `LCP_ITEST_TEE=1` を付けるとプロセス出力（stdout/stderr）を tee できる。
 
 安全性:
 
