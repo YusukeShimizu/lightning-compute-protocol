@@ -385,6 +385,36 @@ func TestChatCompletions_RejectsStreamTrue(t *testing.T) {
 	mustDiff(t, "stream=true is not supported", got.Error.Message)
 }
 
+func TestChatCompletions_RejectsNonIdentityContentEncoding(t *testing.T) {
+	client := &recordingLCPDClient{}
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": "gpt-5.2",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hi"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusUnsupportedMediaType, rec.Code)
+
+	var got openai.ErrorResponse
+	mustUnmarshalJSON(t, rec.Body.Bytes(), &got)
+	if !strings.Contains(got.Error.Message, "unsupported Content-Encoding") {
+		t.Fatalf("expected content encoding error, got %q", got.Error.Message)
+	}
+}
+
 func TestChatCompletions_RequestBodyTooLarge(t *testing.T) {
 	client := &recordingLCPDClient{}
 	cfg := config.Config{

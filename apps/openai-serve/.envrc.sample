@@ -22,7 +22,6 @@ export OPENAI_SERVE_LCPD_GRPC_ADDR="127.0.0.1:50051"
 
 # Optional: safety limits.
 # export OPENAI_SERVE_MAX_PRICE_MSAT="50000"
-# export OPENAI_SERVE_MAX_PROMPT_BYTES="60000"
 
 # Optional: timeouts.
 # export OPENAI_SERVE_TIMEOUT_QUOTE="5s"
@@ -30,4 +29,3 @@ export OPENAI_SERVE_LCPD_GRPC_ADDR="127.0.0.1:50051"
 
 # Optional: logging.
 # export OPENAI_SERVE_LOG_LEVEL="info"
-

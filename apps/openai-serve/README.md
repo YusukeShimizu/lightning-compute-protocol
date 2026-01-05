@@ -62,7 +62,6 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | If >0, reject quotes exceeding this |
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
-| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
 
 ## How it works
 
@@ -96,6 +95,7 @@ Unknown request fields are accepted and forwarded to Providers.
 - `model` must be present and non-empty.
 - `messages` must be present and non-empty.
 - `stream` must be omitted or `false` (streaming is not supported in this MVP).
+- HTTP `Content-Encoding` must be omitted or `identity` (compressed request bodies are not supported).
 
 ### Body/result constraints
 
