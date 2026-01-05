@@ -1,232 +1,290 @@
-# Add `openai.chat_completions.v1` passthrough over LCP v0.2
+# Add OpenAI Responses API + streaming passthrough over LCP v0.2
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-This repository defines ExecPlan requirements in `.agent/PLANS.md`. Maintain this document in accordance with that file.
+This repository defines ExecPlan requirements in `.codex/skills/lcp-execplan/references/PLANS.md`. Maintain this document in accordance with that file.
 
 ## Purpose / Big Picture
 
-Enable OpenAI-compatible clients to call `POST /v1/chat/completions` against `apps/openai-serve/` and have the exact HTTP request body JSON transported over LCP v0.2 to a Provider, executed, and returned as the exact OpenAI-compatible response body bytes.
+OpenAI 互換クライアントが `apps/openai-serve/` に対して以下の API を使えるようにする:
 
-After this change, `openai-serve` becomes a thin HTTP gateway instead of a strict schema decoder and prompt templater: it no longer rejects unknown request fields and it does not re-encode `tools`, `tool_choice`, `response_format`, etc. Those fields are treated as opaque JSON and are transported end-to-end.
+1) `POST /v1/chat/completions`（Chat Completions API）
+2) `POST /v1/responses`（Responses API）
 
-MVP scope is non-streaming only: `stream:true` is rejected at the HTTP edge with a 400, and the Provider also rejects it defensively if it is received through other clients.
+さらに、両方の API について `stream` の有無で次を選べるようにする:
+
+- 非ストリーミング: 通常の JSON レスポンス body を一括で返す
+- ストリーミング: `text/event-stream`（SSE）を HTTP で逐次返す
+
+本変更の中核は「HTTP の request/response body bytes を、LCP v0.2 の input/result stream の decoded bytes としてそのまま搬送する」こと。ゲートウェイ（`openai-serve`）も Provider も、SSE の event 内容を解釈/再エンコードせず、bytes を中継する。
+
+利用者が成功を確認する方法は、`curl -N` で SSE が逐次流れることを観測すること（体感として “レスポンスが途中から見える” 状態になる）。
 
 ## Progress
 
-- [x] (2026-01-02 05:52Z) Converted the draft `plan.md` into ExecPlan format aligned with `.agent/PLANS.md`.
-- [x] (2026-01-02 21:40Z) Surveyed the current `llm.chat` implementation end-to-end and identified edit points for adding a new task kind.
-- [x] (2026-01-02 21:40Z) Extended the wire protocol docs with `task_kind="openai.chat_completions.v1"` (English + Japanese).
-- [x] (2026-01-02 21:40Z) Extended `go-lcpd/proto/lcpd/v1/lcpd.proto` and regenerated protobuf outputs in both `go-lcpd/` and `apps/openai-serve/`.
-- [x] (2026-01-02 22:36Z) Implemented Requester support: task validation + quote/input construction for `openai.chat_completions.v1`.
-- [x] (2026-01-02 22:36Z) Implemented Provider support: validation, execution flow, and result metadata for passthrough JSON.
-- [x] (2026-01-02 23:47Z) Updated `apps/openai-serve` to passthrough request/response bytes, allow unknown fields, and updated tests/docs.
-- [x] (2026-01-02 23:47Z) Ran module tests + golangci-lint and confirmed acceptance criteria (completed: `go-lcpd`, `apps/openai-serve`).
+- [x] (2026-01-04 23:44Z) 現状調査（chat completions の非ストリーミング実装、LCP stream 仕様、必要な変更点）と、本 ExecPlan の作成を完了。
+- [x] (2026-01-05 00:08Z) `docs/protocol/protocol.md` に `task_kind="openai.responses.v1"` と streaming 仕様（chat + responses）を追記（日本語概要 `docs/protocol/protocol-ja.md` も追随）。
+- [x] (2026-01-05 00:08Z) `go-lcpd/proto/lcpd/v1/lcpd.proto` を拡張し、Responses 用 TaskSpec と server-streaming RPC を追加（`go-lcpd/gen/go/` と `proto-go/` を再生成）。
+- [ ] `go-lcpd/` で Requester/Provider の streaming 経路（Waiter → gRPC → openai-serve）を実装し、テストで観測可能にする。
+- [ ] `apps/openai-serve/` に `POST /v1/responses` と、両 endpoint の `stream:true` SSE 中継を実装する。
+- [ ] `go test` と lint を通す（`go-lcpd` / `apps/openai-serve`）。（completed: `make test`; remaining: `make lint`）
 
 ## Surprises & Discoveries
 
-- Observation: `docs/protocol/protocol-ja.md` is a Japanese v0.1 overview (not a full v0.2 translation).
-  Evidence: The doc header says “LCP v0.1 仕様（日本語概要）”; the normative v0.2 spec lives in `docs/protocol/protocol.md`.
+- Observation: LCP v0.2 の result stream は `lcp_stream_begin(stream_kind=result)` で `total_len` と `sha256` を省略できる（未知の場合）。ただし `lcp_stream_end` では必須。
+  Evidence: `docs/protocol/protocol.md` の “Result stream (`stream_kind = result`)” 記述。
+
+- Observation: `proto-go/` の生成は `go-lcpd` の Buf module 設定を使い、`buf generate --template ../proto-go/buf.gen.yaml` で更新する。
+  Evidence: `proto-go/README.md`。
+
+- Observation: gRPC API に新しい server-streaming RPC を追加すると、`apps/openai-serve` のテスト用 mock が `LCPDServiceClient` を満たさずビルドが落ちる。
+  Evidence: `apps/openai-serve/internal/httpapi/server_test.go` の `recordingLCPDClient` に `AcceptAndExecuteStream` を追加して修正。
 
 ## Decision Log
 
-- Decision: The MVP rejects `stream:true` at the HTTP boundary with status 400 and also rejects it in Provider-side validation for defense-in-depth.
-  Rationale: Keeps semantics simple while we define a future-compatible streaming encoding (SSE passthrough) without committing to chunk boundary validation now.
-  Date/Author: 2026-01-02 (Codex)
+- Decision: `openai.chat_completions.v1` は既存 task_kind を維持し、`request_json.stream=true` を許可して SSE bytes passthrough を行う。
+  Rationale: 既存の routing / supported_tasks / pricing の骨格を崩さず streaming 対応できる。
+  Date/Author: 2026-01-04 (Codex)
 
-- Decision: `openai-serve` and `go-lcpd` treat unknown JSON fields as opaque and never reject based on schema evolution.
-  Rationale: OpenAI request/response formats evolve frequently; passthrough keeps compatibility and avoids constant gateway updates.
-  Date/Author: 2026-01-02 (Codex)
+- Decision: Responses API は新しい `task_kind="openai.responses.v1"` として追加し、request/response bytes passthrough を行う。
+  Rationale: Chat Completions と Responses は endpoint/意味論が異なるため、LCP task_kind で明確に分離する。
+  Date/Author: 2026-01-04 (Codex)
 
-- Decision: For `task_kind="openai.chat_completions.v1"`, model discovery is represented as a TLV param `model` and Providers advertise supported models by emitting one `supported_tasks` template per model.
-  Rationale: LCP v0.2 `supported_tasks` is a list of `(task_kind, params_template)` pairs; repeating templates (one per model) fits the existing matching model without introducing a new “list-of-models” schema.
-  Date/Author: 2026-01-02 (Codex)
+- Decision: `stream:true` のとき、SSE の内容（event 名や JSON）を解釈しない。Provider と openai-serve は bytes を逐次中継する。
+  Rationale: OpenAI 互換ストリーム形式は進化が速く、パース/再エンコードは互換性を壊しやすい。
+  Date/Author: 2026-01-04 (Codex)
 
-- Decision: For `task_kind="openai.chat_completions.v1"`, `params.model` MUST match `request_json.model` (validated in both Requester and Provider).
-  Rationale: The Provider executes the raw request JSON; requiring a match prevents quoting/routing based on one model while executing another.
-  Date/Author: 2026-01-02 (Codex)
+- Decision: openai-serve が HTTP streaming を行うために、`lcpd-grpcd` の gRPC API に server-streaming RPC を追加する。
+  Rationale: 既存の `AcceptAndExecute` は完了まで待って bytes を一括返却するため、HTTP streaming を実現できない。
+  Date/Author: 2026-01-04 (Codex)
+
+- Decision: streaming の HTTP 応答は checksum 検証完了前から bytes を書き始める。終端で mismatch が発覚した場合は接続をエラー終了し、ログに記録する。
+  Rationale: streaming の価値は “先に見えること”。巻き戻しは不可能なので、最終検証失敗は接続エラーとして扱う。
+  Date/Author: 2026-01-04 (Codex)
+
+- Decision: Provider は同一 model に対して `openai.chat_completions.v1` と `openai.responses.v1` の両方を `supported_tasks` として広告する（可能な限り）。
+  Rationale: openai-serve の model 検証/peer 選択を単純化し、「片方だけ対応」の事故を減らす。
+  Date/Author: 2026-01-04 (Codex)
 
 ## Outcomes & Retrospective
 
-- Outcome: `apps/openai-serve` now forwards the raw `POST /v1/chat/completions` request JSON bytes over LCP v0.2 using `task_kind="openai.chat_completions.v1"` and returns the raw OpenAI-compatible response body bytes as-is.
-- Outcome: Unknown request fields (including `tools`, `tool_choice`, `response_format`, etc.) are accepted and preserved end-to-end; `stream:true` is rejected with HTTP 400.
-- Validation: `cd apps/openai-serve && go test ./...` and `make lint` pass.
+この ExecPlan が完了した時点で、以下が成立している:
+
+- `apps/openai-serve` が `POST /v1/chat/completions` と `POST /v1/responses` の両方を提供し、両方とも `stream` の有無で非ストリーミング/ストリーミングが選べる。
+- LCP では次が成立する:
+  - input stream `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+  - result stream:
+    - 非ストリーミング: `content_type="application/json; charset=utf-8"`
+    - ストリーミング: `content_type="text/event-stream; charset=utf-8"`
+- `go-lcpd` と `apps/openai-serve` の unit tests と lint が通る。
+- ログに raw prompt（`messages[].content` / `input` など）や raw model output（JSON/SSE 本体）を出さない。
 
 ## Context and Orientation
 
-LCP (Lightning Compute Protocol) v0.2 is an application-layer protocol over Lightning BOLT #1 custom messages. A Requester and Provider exchange `lcp_manifest`, then the Requester sends `lcp_quote_request`, streams input (`lcp_stream_*` with `stream_kind=input`), receives `lcp_quote_response` (including an invoice bound to the job terms), pays, then receives a result stream (`stream_kind=result`) and a terminal `lcp_result`.
+この ExecPlan における用語:
 
-In this repository:
+- “Chat Completions API”: `POST /v1/chat/completions`。request JSON は `model` と `messages` を持つ。
+- “Responses API”: `POST /v1/responses`。request JSON は通常 `model` と `input` を持つ（input は string または array を許容する）。
+- “ストリーミング”: request JSON の `stream:true` により、HTTP レスポンスが `text/event-stream`（SSE）で逐次返る状態。
+- “passthrough”: JSON を構造体にデコードして再エンコードせず、HTTP request/response body bytes をそのまま運ぶこと。
 
-- `docs/protocol/protocol.md` defines the LCP v0.2 wire protocol, including `task_kind="llm.chat"` (§5.2.1), `task_kind="openai.chat_completions.v1"` (§5.2.1), and the `supported_tasks` manifest field used for model discovery.
-- `docs/protocol/protocol-ja.md` is a Japanese overview; the English doc is the SSOT and normative specification.
-- `go-lcpd/` is the reference implementation. The gRPC daemon `go-lcpd/tools/lcpd-grpcd` is the local Requester component used by `apps/openai-serve`.
-- `apps/openai-serve/` is an OpenAI-compatible HTTP gateway that forwards requests to `lcpd-grpcd` over gRPC.
+現状の実装（出発点）:
 
-Current behavior (before this work):
+- `apps/openai-serve` は `POST /v1/chat/completions` をサポート（非ストリーミングのみ）し、HTTP body bytes を `openai.chat_completions.v1` として LCP へ転送する。
+  - `apps/openai-serve/internal/httpapi/handler_chat.go` は `stream:true` を 400 で拒否している。
+  - `apps/openai-serve/internal/httpapi/routing.go` は `supported_tasks` を見て model → peer を決める（現状は chat completions の task kind のみ）。
 
-- `apps/openai-serve/internal/httpapi/handler_chat.go` strictly decodes chat requests using `DisallowUnknownFields` (`apps/openai-serve/internal/httpapi/request_decode.go`), rejects many OpenAI fields (including `tools` and `response_format`), renders `messages` into a prompt string, and sends an `llm.chat` gRPC task (`lcpdv1.Task{llm_chat: ...}`).
-- The Provider executes `llm.chat` using `go-lcpd/internal/computebackend/openai` which calls an OpenAI-compatible `/v1/chat/completions` endpoint via the OpenAI Go SDK and returns only the assistant content as a UTF-8 string (not the full JSON response).
+- `go-lcpd` は Provider/Requester の両モードを持つ。
+  - Provider は upstream OpenAI 互換 HTTP（`/chat/completions`）へ proxy し、結果 body bytes を LCP result stream で返す（非ストリーミング read）。
+  - Requester は結果 stream を再構築してから gRPC `Result.result` に入れて返す（非ストリーミング）。
 
-This ExecPlan adds a new strict, typed gRPC task kind that transports the OpenAI request body JSON as bytes and returns the OpenAI response body bytes as-is.
+重要な制約:
 
-### Survey: current `llm.chat` edit points
-
-The existing `llm.chat` path is spread across `apps/openai-serve/` (HTTP gateway), `go-lcpd/` (Requester gRPC + wire encoding), and Provider execution code. These are the concrete edit points that must be extended or refactored to introduce a new task kind:
-
-In `apps/openai-serve/` (HTTP → gRPC task construction + routing):
-
-- `apps/openai-serve/internal/httpapi/handler_chat.go`: `handleChatCompletions`, `buildLCPChatTask`, `validateChatRequest`, and the response construction that assumes UTF-8 assistant text.
-- `apps/openai-serve/internal/httpapi/request_decode.go`: `decodeJSONBody` uses `dec.DisallowUnknownFields()` (strict decoding).
-- `apps/openai-serve/internal/httpapi/routing.go`: model discovery/routing via `supported_tasks` currently matches only `LCP_TASK_KIND_LLM_CHAT` with `tmpl.llm_chat.profile`.
-
-In `go-lcpd/` (gRPC service → wire quote + streams):
-
-- `go-lcpd/internal/grpcservice/lcpd/service.go`: `RequestQuote`, `buildQuoteRequestPayload` (calls `lcptasks.ToWireQuoteRequestTask` and `lcptasks.ToWireInputStream`), and `toProtoManifest` (translates wire `supported_tasks` into proto `LCPTaskTemplate`).
-- `go-lcpd/internal/lcptasks/lcptasks.go`: `ValidateTask`, `ToWireQuoteRequestTask`, and `ToWireInputStream` (currently only `llm.chat`).
-- `go-lcpd/internal/lcpwire/quote_request.go` and `go-lcpd/internal/lcpwire/manifest.go`: task_kind-dependent `params` handling and TLV encoding/decoding.
-
-In Provider mode (validation, quoting, execution, capability advertisement):
-
-- `go-lcpd/internal/provider/validation.go`: `DefaultValidator`, `ValidateQuoteRequest`, and `matchesTemplate` (task-kind-specific param validation/matching).
-- `go-lcpd/internal/provider/handler.go`: quote/execution planning and pricing (`planTask`, `quotePrice`, and `rejectQuoteRequestIfUnsupportedProfile`) assumes `llm.chat` semantics.
-- `go-lcpd/tools/lcpd-grpcd/main.go`: `localManifestForProvider` builds the local `supported_tasks` list from configured `llm.chat` profiles.
-- `go-lcpd/internal/llm/policy.go` and `go-lcpd/internal/llm/estimator.go`: enforce `task.TaskKind == "llm.chat"`.
-- `go-lcpd/internal/computebackend/openai/backend.go`: executes only `task.TaskKind == "llm.chat"` and returns only assistant content, not raw JSON.
+- `apps/openai-serve` / `go-lcpd` はログを機微情報として扱う。raw prompt / raw output をログに出してはいけない。
+- LCP v0.2 では stream は begin/chunk/end により bytes を運ぶ。result stream の begin は `total_len/sha256` を省略できるが、end では必須。
 
 ## Plan of Work
 
-First, extend the protocol documentation to define a new task kind:
+作業は「仕様 → 型（proto）→ go-lcpd（Requester/Provider）→ openai-serve（HTTP）」の順で行う。理由は、HTTP 側の streaming 実装は gRPC の streaming RPC が先に必要で、gRPC streaming は LCP result stream chunk を逐次受け取れる実装が先に必要だから。
 
-Define `task_kind = "openai.chat_completions.v1"` as “OpenAI Chat Completions v1 passthrough”. For this task kind, the decoded input stream bytes are the exact UTF-8 JSON bytes of the HTTP request body for `POST /v1/chat/completions`. The decoded result stream bytes are the exact bytes of the OpenAI-compatible HTTP response body (non-streaming JSON in the MVP).
+### 1) プロトコル仕様（docs）
 
-Next, extend the gRPC API in `go-lcpd/proto/lcpd/v1/lcpd.proto` so `apps/openai-serve` can submit the passthrough request to `lcpd-grpcd` without reinterpreting fields. Add:
+`docs/protocol/protocol.md` に、標準 task_kind として `openai.responses.v1` を追加する。加えて、`openai.chat_completions.v1` と `openai.responses.v1` の両方について `stream:true` の意味論を明文化する:
 
-- A new enum value `LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1` mapped to string `"openai.chat_completions.v1"`.
-- A new `Task` oneof case `openai_chat_completions_v1` holding `OpenAIChatCompletionsV1TaskSpec` with `bytes request_json` and required `OpenAIChatCompletionsV1Params params` (including `model`).
-- A new `LCPTaskTemplate` oneof case `openai_chat_completions_v1` containing `OpenAIChatCompletionsV1Params` (including `model`) for capability advertisement (one template per supported model ID).
+- input stream bytes: 対応する HTTP request body bytes（JSON）
+- result stream bytes:
+  - 非ストリーミング: HTTP response body bytes（JSON）
+  - ストリーミング: HTTP response body bytes（SSE, `text/event-stream`）
 
-Then, implement Requester-side conversions in `go-lcpd/internal/lcptasks`:
+### 2) proto / gRPC API（Requester が streaming できる形）
 
-- Validate that `request_json` is valid JSON, top-level object, contains `model` (string) and `messages` (array).
-- Reject `stream:true`.
-- Map to a wire `lcp_quote_request` with `task_kind="openai.chat_completions.v1"` and (optional) params TLVs.
-- Map the input stream metadata to `content_type="application/json; charset=utf-8"` and `content_encoding="identity"` and send the raw request bytes as the decoded bytes.
+`go-lcpd/proto/lcpd/v1/lcpd.proto` に以下を追加する:
 
-Then, implement Provider-side support in `go-lcpd/internal/provider`:
+- `LCPTaskKind` に `LCP_TASK_KIND_OPENAI_RESPONSES_V1`（文字列は `"openai.responses.v1"`）
+- `Task` に `openai_responses_v1`（`bytes request_json` と `params.model` を必須）
+- `LCPTaskTemplate` に `openai_responses_v1`（supported_tasks 用）
+- `AcceptAndExecuteStream` のような server-streaming RPC
+  - begin（content_type/encoding）, chunk（bytes）, terminal（Result）を送れる oneof event を定義する
 
-- Accept the new task kind in the Provider validator.
-- When handling the input stream, perform the minimal JSON validation above and reject `stream:true`.
-- Execute by proxying the input JSON to an upstream OpenAI-compatible HTTP endpoint at `POST /v1/chat/completions` and return the raw response body bytes as the result stream bytes with `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
+この変更により `apps/openai-serve` は “非ストリーミングなら既存 RPC、ストリーミングなら新 RPC” を選べるようになる。
 
-Finally, update `apps/openai-serve`:
+### 3) go-lcpd（Requester 側）
 
-- Replace strict decoding with raw-body passthrough (still with a 1 MiB body cap) and minimal JSON validation for `model`, `messages`, and `stream`.
-- Route by `model` using Provider discovery (`supported_tasks`) and send the raw request bytes via the new gRPC task kind.
-- Return the raw LCP result bytes as the HTTP response body (and set `Content-Type` from the LCP result metadata).
-- Update docs and tests to reflect that unknown fields and `tools` are accepted.
+Requester（`lcpd-grpcd`）は LCP result stream を再構築する現在の `requesterwait.Waiter` に “逐次購読” を追加する必要がある。具体的には:
+
+- `go-lcpd/internal/requesterwait/waiter.go` に “result stream begin/chunk/end/terminal” をイベントとして流す経路を追加する。
+- `go-lcpd/internal/grpcservice/lcpd/service.go` に `AcceptAndExecuteStream` を実装する。
+  - invoice verify/pay までは既存と同じ。
+  - result stream begin/chunk を受け取ったら gRPC stream に forward する。
+  - `lcp_result` を受け取ったら terminal event を送り、RPC を正常終了する。
+
+### 4) go-lcpd（Provider 側 + compute backend）
+
+Provider は upstream OpenAI 互換 HTTP からの非ストリーミング/ストリーミングを両方扱う必要がある。方針:
+
+- 非ストリーミングは既存通り “全 body を読み切って output bytes を返し、Provider が一括で result stream を送る”。
+- ストリーミングは “upstream の body を reader で読みながら、Provider が result stream chunk を逐次送る”。
+  - `lcp_stream_begin(stream_kind=result)` では `total_len/sha256` を省略し、終端で `lcp_stream_end(total_len, sha256)` を送る。
+
+これを実現するために:
+
+- `go-lcpd/internal/computebackend` に streaming 用のインターフェイス（例: `StreamingBackend`）を追加する。
+- `go-lcpd/internal/computebackend/openai/backend.go` を拡張し、次をサポートする:
+  - `openai.chat_completions.v1`（非ストリーミング/ストリーミング）
+  - `openai.responses.v1`（非ストリーミング/ストリーミング）
+- `go-lcpd/internal/provider/handler.go` の実行部を、backend が streaming を提供する場合に streaming 経路へ分岐させる。
+- `go-lcpd/internal/llm/estimator.go` は task kind チェックが `openai.chat_completions.v1` 固定なので、`openai.responses.v1` も許可する（pricing が落ちるのを防ぐ）。
+- Provider の supported_tasks 生成（`go-lcpd/tools/lcpd-grpcd/main.go`）と validator（`go-lcpd/internal/provider/validation.go`）を `openai.responses.v1` に対応させる。
+
+### 5) openai-serve（HTTP）
+
+`apps/openai-serve` は endpoint を 2 つ提供し、どちらも `stream` によって “非ストリーミング” と “ストリーミング” を切り替える:
+
+- `POST /v1/chat/completions`:
+  - `stream` omitted/false: 既存通り `AcceptAndExecute` で一括 bytes を返す。
+  - `stream:true`: `AcceptAndExecuteStream` を使って SSE bytes を逐次 `c.Writer` に書き込む。
+- `POST /v1/responses`:
+  - handler を新設し、同様に `stream` の有無で分岐する。
+
+ルーティングは `supported_tasks` の task kind（chat/responses）を見て peer を選べる必要があるため、`apps/openai-serve/internal/httpapi/routing.go` を “task kind を引数に取る” 形に拡張する。
 
 ## Concrete Steps
 
-All commands below assume the repository root as the working directory unless stated otherwise. This repository is multi-module Go; run Go commands from the module directories (`go-lcpd/` and `apps/openai-serve/`) rather than from the repo root.
+この repo は multi-module Go。コマンドは各 module ディレクトリで実行する。
 
-1) Update protocol docs:
+1) docs 更新
 
-    cd docs
-    # edit docs/protocol/protocol.md and docs/protocol/protocol-ja.md
+   - `docs/protocol/protocol.md` を編集して `openai.responses.v1` と streaming の意味論を追加する。
+   - `apps/openai-serve/README.md` と `docs/openai-serve/overview.mdx` を更新し、`/v1/responses` と `stream:true` の利用例（`curl -N`）を追加する。
 
-2) Update protobuf definitions and regenerate:
+2) proto 更新と再生成
 
-    cd go-lcpd
-    make gen  # preferred (Nix-first)
+   - `go-lcpd/proto/lcpd/v1/lcpd.proto` を更新する。
+   - 生成コードを更新する:
 
-    # If you cannot use Nix, you can run Buf directly (requires network access to fetch buf.build plugins):
-    # PATH="$(pwd)/.tools/bin:$PATH" buf generate
+       cd go-lcpd
+       make gen
+       buf generate --template ../proto-go/buf.gen.yaml
 
-    # Sync generated protobufs into openai-serve (this repo keeps a copy there).
-    cd ..
-    cp go-lcpd/gen/go/lcpd/v1/lcpd.pb.go apps/openai-serve/gen/go/lcpd/v1/lcpd.pb.go
-    cp go-lcpd/gen/go/lcpd/v1/lcpd_grpc.pb.go apps/openai-serve/gen/go/lcpd/v1/lcpd_grpc.pb.go
+3) go-lcpd 実装
 
-3) Implement Requester and Provider logic in `go-lcpd/` (code edits described in “Plan of Work”).
+   - `go-lcpd/internal/lcpwire`: `OpenAIResponsesV1Params` TLV の encode/decode を追加する（model TLV type=1 を踏襲）。
+   - `go-lcpd/internal/lcptasks`: `openai.responses.v1` TaskSpec の validate/to-wire を追加し、`openai.chat_completions.v1` の `stream:true` を許可する。
+   - `go-lcpd/internal/provider`: Responses task kind 対応、streaming 実行、result stream の streaming 送信に対応。
+   - `go-lcpd/internal/requesterwait`: result stream の逐次イベント購読に対応。
+   - `go-lcpd/internal/grpcservice/lcpd`: `AcceptAndExecuteStream` を追加。
+   - `go-lcpd/internal/llm/estimator.go`: `openai.responses.v1` を許可。
 
-4) Update openai-serve handlers/tests and README.
+4) openai-serve 実装
 
-5) Run tests and lint:
+   - `apps/openai-serve/internal/httpapi/server.go`: `POST /v1/responses` を追加。
+   - `apps/openai-serve/internal/httpapi/handler_chat.go`: `stream:true` を許可し streaming RPC を使う分岐を実装。
+   - `apps/openai-serve/internal/httpapi/handler_responses.go`: 新規追加。
+   - `apps/openai-serve/internal/httpapi/server_test.go`: 両 endpoint の streaming/non-streaming テストを追加。
 
-    cd go-lcpd
-    go test ./...
-    golangci-lint run -c .golangci.yml ./...
+5) テストと lint
 
-    cd ../apps/openai-serve
-    go test ./...
-    golangci-lint run $(go list -f '{{.Dir}}' ./...)
+   - `cd go-lcpd && make test lint`
+   - `cd apps/openai-serve && make test lint`
 
 ## Validation and Acceptance
 
-Behavioral acceptance (must hold):
+HTTP 動作確認（手動）:
 
-- `apps/openai-serve` accepts a `POST /v1/chat/completions` request containing fields like `tools`, `tool_choice`, and `response_format` without rejecting based on unknown fields.
-- `stream:true` is rejected with HTTP 400 and an OpenAI-style error JSON.
-- The raw HTTP request body bytes are sent over LCP input stream as `application/json; charset=utf-8` / `identity`.
-- The Provider returns the raw OpenAI-compatible response body bytes over the LCP result stream as `application/json; charset=utf-8` / `identity`.
-- `apps/openai-serve` returns those raw bytes as the HTTP response body (without re-encoding) and sets the HTTP `Content-Type` accordingly.
-- Provider discovery advertises supported model IDs in `supported_tasks`, and `openai-serve` uses those to validate `model` when possible.
+- `POST /v1/chat/completions`（ストリーミング）:
 
-Test acceptance:
+      curl -N http://127.0.0.1:8080/v1/chat/completions \
+        -H 'content-type: application/json' \
+        -H 'authorization: Bearer devkey1' \
+        -d '{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"Say hello."}]}'
 
-- `apps/openai-serve/internal/httpapi/server_test.go` is updated so that:
-  - unknown fields are accepted (previously a strict-JSON 400 test must be inverted),
-  - a request containing `tools` is accepted,
-  - `stream:true` returns 400,
-  - the gRPC `RequestQuote` task is the new `openai_chat_completions_v1` spec containing the raw request JSON bytes.
+  期待: `data:` 等を含む SSE bytes が逐次出力される（内容は passthrough のため固定しない）。
+
+- `POST /v1/responses`（ストリーミング）:
+
+      curl -N http://127.0.0.1:8080/v1/responses \
+        -H 'content-type: application/json' \
+        -H 'authorization: Bearer devkey1' \
+        -d '{"model":"gpt-5.2","stream":true,"input":"Say hello."}'
+
+  期待: SSE bytes が逐次出力される。
+
+非ストリーミングの受け入れ条件:
+
+- `stream` omitted/false のとき、両 endpoint は HTTP 200 + JSON body bytes を一括で返す（既存互換）。
+
+テスト受け入れ条件（回帰防止）:
+
+- `apps/openai-serve/internal/httpapi/server_test.go` に以下がある:
+  - chat completions: `stream:true` が 400 にならず、gRPC streaming RPC が呼ばれること。
+  - responses: 非ストリーミング/ストリーミングの両方で 200 が返り、task spec が期待通りであること。
+
+安全性:
+
+- openai-serve/go-lcpd のログに raw prompt / raw output（JSON/SSE 本体）を出さないこと。
 
 ## Idempotence and Recovery
 
-Regeneration and sync are safe to repeat:
+- protobuf 再生成は反復実行してよい:
+  - `cd go-lcpd && make gen`
+  - `cd go-lcpd && buf generate --template ../proto-go/buf.gen.yaml`
 
-- Re-running `cd go-lcpd && make gen` is idempotent and should only update `go-lcpd/gen/` if protobuf definitions changed.
-- Re-copying the generated protobuf Go files into `apps/openai-serve/gen/` is idempotent.
-
-If protobuf regeneration fails:
-
-- Ensure `buf` is installed and you have network access to fetch buf.build remote plugins (or use the Nix devshell to pin tool versions). In this repo, `go-lcpd/Makefile` can re-exec via `nix develop` to pin tool versions; if you have Nix installed, `make gen` is the preferred path.
+- streaming が “途中で切れる” 場合の切り分け:
+  - `OPENAI_SERVE_TIMEOUT_EXECUTE` と HTTP server の `WriteTimeout`（`cmd/openai-serve/main.go`）が短すぎないか確認する。
+  - LCP の `max_stream_bytes`（manifest）が小さすぎないか確認する。
 
 ## Artifacts and Notes
 
-Protocol identifiers introduced by this plan:
+wire-level の期待値（実装の共通理解）:
 
-- New task kind string: `openai.chat_completions.v1`
-- Input stream metadata (MVP): `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
-- Result stream metadata (MVP): `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+- `task_kind="openai.chat_completions.v1"`:
+  - input bytes: `POST /v1/chat/completions` request body bytes（JSON）
+  - result bytes:
+    - 非ストリーミング: response body bytes（JSON）
+    - ストリーミング: response body bytes（SSE）
 
-Future streaming compatibility (not implemented in MVP):
-
-- If/when `stream:true` is supported, the result stream bytes must be the raw OpenAI SSE body (`text/event-stream; charset=utf-8`) transported as-is.
-
-Plan revision note (2026-01-02 05:52Z): replaced the prior checklist-style draft with an ExecPlan document to comply with `.agent/PLANS.md` and the repository’s ExecPlans workflow.
-
-Plan revision note (2026-01-02 21:40Z): completed the initial survey + docs/proto scaffolding steps, updated the plan to match the chosen protobuf shapes (`OpenAIChatCompletionsV1*` messages) and the model discovery representation (one supported_tasks template per model), and documented the Japanese protocol doc’s scope.
-
-Plan revision note (2026-01-02 23:47Z): implemented the `apps/openai-serve` passthrough gateway changes (raw request/response bytes, unknown fields allowed, `stream:true` rejected), updated tests/docs, and validated with module tests + golangci-lint.
+- `task_kind="openai.responses.v1"`:
+  - input bytes: `POST /v1/responses` request body bytes（JSON）
+  - result bytes:
+    - 非ストリーミング: response body bytes（JSON）
+    - ストリーミング: response body bytes（SSE）
 
 ## Interfaces and Dependencies
 
-Wire protocol definitions (docs-only):
+完成時に存在するべき主要インターフェイス（高レベル）:
 
-- `task_kind="openai.chat_completions.v1"` defines how to interpret the LCP input/result streams as OpenAI Chat Completions HTTP body bytes.
-- `supported_tasks` is used for discovery; the Provider advertises a non-empty supported model list for this task kind.
+- `go-lcpd/proto/lcpd/v1/lcpd.proto`:
+  - `LCP_TASK_KIND_OPENAI_RESPONSES_V1`
+  - `OpenAIResponsesV1TaskSpec` / `OpenAIResponsesV1Params`
+  - `rpc AcceptAndExecuteStream(...) returns (stream ...)`
 
-Go interfaces that must exist at the end:
+- `go-lcpd/internal/computebackend`:
+  - streaming を表現する追加インターフェイス（例: `StreamingBackend`）
+  - Provider は `stream:true` のときに reader を読みながら LCP result chunk を送れること
 
-- In `go-lcpd/internal/lcptasks/lcptasks.go`, extend:
-  - `ValidateTask(*lcpdv1.Task) error` to accept the new task kind.
-  - `ToWireQuoteRequestTask(*lcpdv1.Task) (QuoteRequestTask, error)` to emit `TaskKind="openai.chat_completions.v1"`.
-  - `ToWireInputStream(*lcpdv1.Task) (InputStream, error)` to emit JSON content metadata and decoded bytes equal to the request body.
+- `apps/openai-serve/internal/httpapi`:
+  - `/v1/chat/completions` と `/v1/responses` の両方で `stream` の値によって gRPC 非ストリーミング/ストリーミングを切り替えること
 
-- In `go-lcpd/internal/provider`, extend validation/handling to accept the new task kind and to execute by proxying bytes to an OpenAI-compatible upstream.
+## Plan Maintenance Notes
 
-Libraries:
-
-- Prefer `net/http` for passthrough proxying so unknown JSON fields are preserved.
-- Continue using existing repository dependencies (Buf/protovalidate for protobuf validation and existing LCP wire/TLV helpers).
+(2026-01-05 00:08Z) `openai.responses.v1` と streaming の protocol spec 追記、および `lcpd.proto` の拡張と生成コード更新を反映するために `Progress` と `Surprises & Discoveries` を更新。

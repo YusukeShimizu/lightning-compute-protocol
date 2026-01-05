@@ -18,10 +18,20 @@ func (s *Server) discoverModels(ctx context.Context) (map[string]struct{}, error
 	if err != nil {
 		return nil, err
 	}
-	return collectModelsFromPeers(resp), nil
+	return collectModelsFromPeersForKinds(
+		resp,
+		[]lcpdv1.LCPTaskKind{
+			lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
+			lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
+		},
+	), nil
 }
 
-func (s *Server) validateModel(model string, peersResp *lcpdv1.ListLCPPeersResponse) error {
+func (s *Server) validateModelForTaskKind(
+	model string,
+	taskKind lcpdv1.LCPTaskKind,
+	peersResp *lcpdv1.ListLCPPeersResponse,
+) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return errors.New("model is required")
@@ -37,7 +47,7 @@ func (s *Server) validateModel(model string, peersResp *lcpdv1.ListLCPPeersRespo
 		)
 	}
 
-	discovered := collectModelsFromPeers(peersResp)
+	discovered := collectModelsFromPeersForKind(peersResp, taskKind)
 	if len(discovered) == 0 {
 		// Some providers do not advertise supported_tasks. If we have no allowlist
 		// and no discovery signal, skip validation to keep the gateway usable.
@@ -50,7 +60,11 @@ func (s *Server) validateModel(model string, peersResp *lcpdv1.ListLCPPeersRespo
 	return fmt.Errorf("model is not advertised by any connected LCP peer: %q", model)
 }
 
-func (s *Server) resolvePeerID(model string, peersResp *lcpdv1.ListLCPPeersResponse) (string, error) {
+func (s *Server) resolvePeerIDForTaskKind(
+	model string,
+	taskKind lcpdv1.LCPTaskKind,
+	peersResp *lcpdv1.ListLCPPeersResponse,
+) (string, error) {
 	model = strings.TrimSpace(model)
 
 	if s.cfg.ModelMap != nil {
@@ -73,11 +87,18 @@ func (s *Server) resolvePeerID(model string, peersResp *lcpdv1.ListLCPPeersRespo
 	for _, p := range peersResp.GetPeers() {
 		manifest := p.GetRemoteManifest()
 		for _, tmpl := range manifest.GetSupportedTasks() {
-			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 {
+			if tmpl.GetKind() != taskKind {
 				continue
 			}
-			if tmpl.GetOpenaiChatCompletionsV1().GetModel() == model {
-				return p.GetPeerId(), nil
+			switch taskKind {
+			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
+				if tmpl.GetOpenaiChatCompletionsV1().GetModel() == model {
+					return p.GetPeerId(), nil
+				}
+			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
+				if tmpl.GetOpenaiResponsesV1().GetModel() == model {
+					return p.GetPeerId(), nil
+				}
 			}
 		}
 	}
@@ -90,7 +111,25 @@ func (s *Server) resolvePeerID(model string, peersResp *lcpdv1.ListLCPPeersRespo
 	return "", errors.New("no connected LCP peers available")
 }
 
-func collectModelsFromPeers(resp *lcpdv1.ListLCPPeersResponse) map[string]struct{} {
+func collectModelsFromPeersForKinds(resp *lcpdv1.ListLCPPeersResponse, kinds []lcpdv1.LCPTaskKind) map[string]struct{} {
+	if resp == nil {
+		return nil
+	}
+
+	out := make(map[string]struct{})
+	for _, kind := range kinds {
+		for model := range collectModelsFromPeersForKind(resp, kind) {
+			out[model] = struct{}{}
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func collectModelsFromPeersForKind(resp *lcpdv1.ListLCPPeersResponse, kind lcpdv1.LCPTaskKind) map[string]struct{} {
 	if resp == nil {
 		return nil
 	}
@@ -98,10 +137,21 @@ func collectModelsFromPeers(resp *lcpdv1.ListLCPPeersResponse) map[string]struct
 	out := make(map[string]struct{})
 	for _, p := range resp.GetPeers() {
 		for _, tmpl := range p.GetRemoteManifest().GetSupportedTasks() {
-			if tmpl.GetKind() != lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 {
+			if tmpl.GetKind() != kind {
 				continue
 			}
-			model := strings.TrimSpace(tmpl.GetOpenaiChatCompletionsV1().GetModel())
+
+			var model string
+			switch kind {
+			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
+				model = tmpl.GetOpenaiChatCompletionsV1().GetModel()
+			case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
+				model = tmpl.GetOpenaiResponsesV1().GetModel()
+			default:
+				continue
+			}
+
+			model = strings.TrimSpace(model)
 			if model == "" {
 				continue
 			}

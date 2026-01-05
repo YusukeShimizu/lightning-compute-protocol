@@ -9,6 +9,7 @@ import (
 	cobra "github.com/spf13/cobra"
 	grpc "google.golang.org/grpc"
 	proto "google.golang.org/protobuf/proto"
+	io "io"
 )
 
 func LCPDServiceClientCommand(options ...client.Option) *cobra.Command {
@@ -24,6 +25,7 @@ func LCPDServiceClientCommand(options ...client.Option) *cobra.Command {
 		_LCPDServiceGetLocalInfoCommand(cfg),
 		_LCPDServiceRequestQuoteCommand(cfg),
 		_LCPDServiceAcceptAndExecuteCommand(cfg),
+		_LCPDServiceAcceptAndExecuteStreamCommand(cfg),
 		_LCPDServiceCancelJobCommand(cfg),
 	)
 	return cmd
@@ -166,6 +168,24 @@ func _LCPDServiceRequestQuoteCommand(cfg *client.Config) *cobra.Command {
 		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
 		_Task_OpenaiChatCompletionsV1.Params = _Task_OpenaiChatCompletionsV1_Params
 	})
+	_Task_OpenaiResponsesV1 := &OpenAIResponsesV1TaskSpec{}
+	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task OpenaiResponsesV1"), false, "")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
+	})
+	flag.BytesBase64Var(cmd.PersistentFlags(), &_Task_OpenaiResponsesV1.RequestJson, cfg.FlagNamer("Task OpenaiResponsesV1 RequestJson"), "Raw HTTP request body bytes for `POST /v1/responses`.")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1 RequestJson"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
+	})
+	_Task_OpenaiResponsesV1_Params := &OpenAIResponsesV1Params{}
+	cmd.PersistentFlags().StringVar(&_Task_OpenaiResponsesV1_Params.Model, cfg.FlagNamer("Task OpenaiResponsesV1 Params Model"), "", "\"model\" (TLV type 1).\n Identifier for the execution target (for example, an OpenAI model ID).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1 Params Model"), func() {
+		req.Task = _Task
+		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
+		_Task_OpenaiResponsesV1.Params = _Task_OpenaiResponsesV1_Params
+	})
 
 	return cmd
 }
@@ -202,6 +222,62 @@ func _LCPDServiceAcceptAndExecuteCommand(cfg *client.Config) *cobra.Command {
 				}
 
 				return out(res)
+
+			})
+		},
+	}
+
+	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID.")
+	flag.BytesBase64Var(cmd.PersistentFlags(), &req.JobId, cfg.FlagNamer("JobId"), "The job_id to execute (must match a previously received Quote).")
+	cmd.PersistentFlags().BoolVar(&req.PayInvoice, cfg.FlagNamer("PayInvoice"), false, "Authorization to pay the invoice.")
+
+	return cmd
+}
+
+func _LCPDServiceAcceptAndExecuteStreamCommand(cfg *client.Config) *cobra.Command {
+	req := &AcceptAndExecuteRequest{}
+
+	cmd := &cobra.Command{
+		Use:   cfg.CommandNamer("AcceptAndExecuteStream"),
+		Short: "AcceptAndExecuteStream RPC client",
+		Long:  "AcceptAndExecuteStream pays the invoice associated with the quote and streams\n the decoded result stream bytes as they arrive.\n\n The stream ends with a terminal `Result` event that indicates the final job\n status and (when available) the validated stream metadata (hash/len).\n\n Errors follow the same model as `AcceptAndExecute`, but note that streaming\n responses may have already delivered partial bytes before an error is\n detected (for example, checksum validation failure at stream end).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfg.UseEnvVars {
+				if err := flag.SetFlagsFromEnv(cmd.Parent().PersistentFlags(), true, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService"); err != nil {
+					return err
+				}
+				if err := flag.SetFlagsFromEnv(cmd.PersistentFlags(), false, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService", "AcceptAndExecuteStream"); err != nil {
+					return err
+				}
+			}
+			return client.RoundTrip(cmd.Context(), cfg, func(cc grpc.ClientConnInterface, in iocodec.Decoder, out iocodec.Encoder) error {
+				cli := NewLCPDServiceClient(cc)
+				v := &AcceptAndExecuteRequest{}
+
+				if err := in(v); err != nil {
+					return err
+				}
+				proto.Merge(v, req)
+
+				stm, err := cli.AcceptAndExecuteStream(cmd.Context(), v)
+
+				if err != nil {
+					return err
+				}
+
+				for {
+					res, err := stm.Recv()
+					if err != nil {
+						if err == io.EOF {
+							break
+						}
+						return err
+					}
+					if err = out(res); err != nil {
+						return err
+					}
+				}
+				return nil
 
 			})
 		},

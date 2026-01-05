@@ -48,13 +48,18 @@ LCP v0.1 は BOLT #1 の odd type のカスタムメッセージを使います�
 - 同一 type の重複はしません
 - unknown TLV は無視します（forward compatibility）
 
-## LCP v0.2 の `task_kind`: `openai.chat_completions.v1`（概要）
+## LCP v0.2 の `task_kind`（概要）
 
-LCP v0.2 では `task_kind="openai.chat_completions.v1"` を定義し、OpenAI 互換の `POST /v1/chat/completions` の HTTP body（JSON）を LCP の input/result stream の bytes としてそのまま運びます。
+LCP v0.2 では以下の `task_kind` を定義し、OpenAI 互換 API の HTTP request/response body bytes（JSON / SSE）を LCP の input/result stream の decoded bytes としてそのまま運びます（中身は解釈しません）。
+
+* `task_kind="openai.chat_completions.v1"`（`POST /v1/chat/completions`）
+* `task_kind="openai.responses.v1"`（`POST /v1/responses`）
 
 - input stream: `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
-- `params` は TLV stream（`openai_chat_completions_v1_params_tlvs`）で、少なくとも `model` を含みます
-- result stream（non-streaming）: `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+- `params` は TLV stream で、少なくとも `model` を含みます
+- result stream:
+  - `stream` omitted/false（non-streaming）: `content_type="application/json; charset=utf-8"`, `content_encoding="identity"`
+  - `stream:true`（streaming）: `content_type="text/event-stream; charset=utf-8"`, `content_encoding="identity"`（SSE bytes をそのまま搬送）
 
 詳細・正規（normative）な仕様は英語版 `docs/protocol/protocol.md` の §5.2.1 を参照してください。
 

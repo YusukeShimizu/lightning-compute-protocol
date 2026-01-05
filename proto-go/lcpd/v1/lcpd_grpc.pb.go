@@ -33,11 +33,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LCPDService_ListLCPPeers_FullMethodName     = "/lcpd.v1.LCPDService/ListLCPPeers"
-	LCPDService_GetLocalInfo_FullMethodName     = "/lcpd.v1.LCPDService/GetLocalInfo"
-	LCPDService_RequestQuote_FullMethodName     = "/lcpd.v1.LCPDService/RequestQuote"
-	LCPDService_AcceptAndExecute_FullMethodName = "/lcpd.v1.LCPDService/AcceptAndExecute"
-	LCPDService_CancelJob_FullMethodName        = "/lcpd.v1.LCPDService/CancelJob"
+	LCPDService_ListLCPPeers_FullMethodName           = "/lcpd.v1.LCPDService/ListLCPPeers"
+	LCPDService_GetLocalInfo_FullMethodName           = "/lcpd.v1.LCPDService/GetLocalInfo"
+	LCPDService_RequestQuote_FullMethodName           = "/lcpd.v1.LCPDService/RequestQuote"
+	LCPDService_AcceptAndExecute_FullMethodName       = "/lcpd.v1.LCPDService/AcceptAndExecute"
+	LCPDService_AcceptAndExecuteStream_FullMethodName = "/lcpd.v1.LCPDService/AcceptAndExecuteStream"
+	LCPDService_CancelJob_FullMethodName              = "/lcpd.v1.LCPDService/CancelJob"
 )
 
 // LCPDServiceClient is the client API for LCPDService service.
@@ -117,6 +118,16 @@ type LCPDServiceClient interface {
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: Outcome may be unknown if failure happened after payment settlement.
 	AcceptAndExecute(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (*AcceptAndExecuteResponse, error)
+	// AcceptAndExecuteStream pays the invoice associated with the quote and streams
+	// the decoded result stream bytes as they arrive.
+	//
+	// The stream ends with a terminal `Result` event that indicates the final job
+	// status and (when available) the validated stream metadata (hash/len).
+	//
+	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
+	// responses may have already delivered partial bytes before an error is
+	// detected (for example, checksum validation failure at stream end).
+	AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error)
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -185,6 +196,25 @@ func (c *lCPDServiceClient) AcceptAndExecute(ctx context.Context, in *AcceptAndE
 	}
 	return out, nil
 }
+
+func (c *lCPDServiceClient) AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &LCPDService_ServiceDesc.Streams[0], LCPDService_AcceptAndExecuteStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AcceptAndExecuteRequest, AcceptAndExecuteStreamResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type LCPDService_AcceptAndExecuteStreamClient = grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse]
 
 func (c *lCPDServiceClient) CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -273,6 +303,16 @@ type LCPDServiceServer interface {
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: Outcome may be unknown if failure happened after payment settlement.
 	AcceptAndExecute(context.Context, *AcceptAndExecuteRequest) (*AcceptAndExecuteResponse, error)
+	// AcceptAndExecuteStream pays the invoice associated with the quote and streams
+	// the decoded result stream bytes as they arrive.
+	//
+	// The stream ends with a terminal `Result` event that indicates the final job
+	// status and (when available) the validated stream metadata (hash/len).
+	//
+	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
+	// responses may have already delivered partial bytes before an error is
+	// detected (for example, checksum validation failure at stream end).
+	AcceptAndExecuteStream(*AcceptAndExecuteRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -313,6 +353,9 @@ func (UnimplementedLCPDServiceServer) RequestQuote(context.Context, *RequestQuot
 }
 func (UnimplementedLCPDServiceServer) AcceptAndExecute(context.Context, *AcceptAndExecuteRequest) (*AcceptAndExecuteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptAndExecute not implemented")
+}
+func (UnimplementedLCPDServiceServer) AcceptAndExecuteStream(*AcceptAndExecuteRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method AcceptAndExecuteStream not implemented")
 }
 func (UnimplementedLCPDServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelJob not implemented")
@@ -410,6 +453,17 @@ func _LCPDService_AcceptAndExecute_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LCPDService_AcceptAndExecuteStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(AcceptAndExecuteRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(LCPDServiceServer).AcceptAndExecuteStream(m, &grpc.GenericServerStream[AcceptAndExecuteRequest, AcceptAndExecuteStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type LCPDService_AcceptAndExecuteStreamServer = grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]
+
 func _LCPDService_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelJobRequest)
 	if err := dec(in); err != nil {
@@ -456,6 +510,12 @@ var LCPDService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _LCPDService_CancelJob_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "AcceptAndExecuteStream",
+			Handler:       _LCPDService_AcceptAndExecuteStream_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "lcpd/v1/lcpd.proto",
 }

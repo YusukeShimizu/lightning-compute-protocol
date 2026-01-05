@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 )
 
 var (
@@ -42,6 +43,15 @@ type Backend interface {
 	Execute(ctx context.Context, task Task) (ExecutionResult, error)
 }
 
+type StreamingExecutionResult struct {
+	Output io.ReadCloser
+	Usage  Usage
+}
+
+type StreamingBackend interface {
+	ExecuteStreaming(ctx context.Context, task Task) (StreamingExecutionResult, error)
+}
+
 // Disabled is a compute backend that always fails. It is the default backend when no backend is configured.
 type Disabled struct{}
 
@@ -51,4 +61,8 @@ func NewDisabled() *Disabled {
 
 func (b *Disabled) Execute(context.Context, Task) (ExecutionResult, error) {
 	return ExecutionResult{}, fmt.Errorf("%w: compute backend is disabled", ErrBackendUnavailable)
+}
+
+func (b *Disabled) ExecuteStreaming(context.Context, Task) (StreamingExecutionResult, error) {
+	return StreamingExecutionResult{}, fmt.Errorf("%w: compute backend is disabled", ErrBackendUnavailable)
 }

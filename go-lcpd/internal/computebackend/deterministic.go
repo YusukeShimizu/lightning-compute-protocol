@@ -1,10 +1,12 @@
 package computebackend
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -36,5 +38,11 @@ func NewDeterministicFromBase64(b64 string) (*Deterministic, error) {
 func (b *Deterministic) Execute(context.Context, Task) (ExecutionResult, error) {
 	return ExecutionResult{
 		OutputBytes: append([]byte(nil), b.Output...),
+	}, nil
+}
+
+func (b *Deterministic) ExecuteStreaming(context.Context, Task) (StreamingExecutionResult, error) {
+	return StreamingExecutionResult{
+		Output: io.NopCloser(bytes.NewReader(b.Output)),
 	}, nil
 }

@@ -124,7 +124,11 @@ func (s *Service) logResultReceived(
 	resultBytes := 0
 	if res != nil {
 		contentType = res.GetContentType()
-		resultBytes = len(res.GetResult())
+		if res.GetStatus() == lcpdv1.Result_STATUS_OK && res.GetResultLen() != 0 {
+			resultBytes = int(res.GetResultLen())
+		} else {
+			resultBytes = len(res.GetResult())
+		}
 	}
 
 	s.logger.Infow(

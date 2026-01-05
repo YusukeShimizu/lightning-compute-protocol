@@ -56,6 +56,7 @@ func (s *Server) newRouter() *gin.Engine {
 	v1.GET("/models", s.handleModels)
 	v1.HEAD("/models", s.handleModels)
 	v1.POST("/chat/completions", s.handleChatCompletions)
+	v1.POST("/responses", s.handleResponses)
 
 	return r
 }

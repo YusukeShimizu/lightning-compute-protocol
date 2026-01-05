@@ -93,6 +93,14 @@ func (c *recordingLCPDClient) AcceptAndExecute(
 	return c.acceptResp, c.acceptErr
 }
 
+func (c *recordingLCPDClient) AcceptAndExecuteStream(
+	_ context.Context,
+	_ *lcpdv1.AcceptAndExecuteRequest,
+	_ ...grpc.CallOption,
+) (lcpdv1.LCPDService_AcceptAndExecuteStreamClient, error) {
+	panic("AcceptAndExecuteStream was called but not expected")
+}
+
 func (c *recordingLCPDClient) CancelJob(
 	_ context.Context,
 	in *lcpdv1.CancelJobRequest,

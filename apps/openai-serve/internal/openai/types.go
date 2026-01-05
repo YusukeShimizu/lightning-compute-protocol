@@ -73,6 +73,13 @@ type ChatCompletionsRequest struct {
 	User json.RawMessage `json:"user,omitempty"`
 }
 
+type ResponsesRequest struct {
+	Model string `json:"model"`
+	Input json.RawMessage `json:"input"`
+
+	Stream *bool `json:"stream,omitempty"`
+}
+
 type ChatCompletionsResponse struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"` // "chat.completion"

@@ -672,6 +672,178 @@ func (s *Service) AcceptAndExecute(
 	return &lcpdv1.AcceptAndExecuteResponse{Result: res}, nil
 }
 
+func (s *Service) AcceptAndExecuteStream(
+	req *lcpdv1.AcceptAndExecuteRequest,
+	stream lcpdv1.LCPDService_AcceptAndExecuteStreamServer,
+) error {
+	if req == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	if err := s.validate(req); err != nil {
+		return err
+	}
+
+	ctx := stream.Context()
+
+	peerID := strings.TrimSpace(req.GetPeerId())
+
+	if !req.GetPayInvoice() {
+		return status.Error(codes.InvalidArgument, "pay_invoice must be true")
+	}
+
+	jobID, err := toJobID(req.GetJobId())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	if s.lightning == nil {
+		return status.Error(codes.Unavailable, "lightning rpc not configured")
+	}
+
+	started := time.Now()
+
+	terms, err := s.jobs.GetTerms(peerID, jobID)
+	if err != nil {
+		return grpcStatusFromJobStoreError(err)
+	}
+
+	summary := s.summarizeStoredTask(peerID, jobID)
+
+	s.markJobState(peerID, jobID, requesterjobstore.StatePaying)
+	failed := true
+	defer func() {
+		if failed {
+			s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
+		}
+	}()
+
+	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms)
+	if verifyErr != nil {
+		return s.acceptAndExecuteVerifyError(peerID, jobID, summary, verifyErr)
+	}
+
+	// Subscribe before paying to avoid missing early result stream bytes.
+	events, unsubscribe, subErr := s.waiter.SubscribeResultStream(ctx, peerID, jobID)
+	if subErr != nil {
+		return status.Error(codes.FailedPrecondition, subErr.Error())
+	}
+	defer unsubscribe()
+
+	payStart := time.Now()
+	_, payErr := s.lightning.PayInvoice(ctx, terms.GetPaymentRequest())
+	if payErr != nil {
+		return s.acceptAndExecuteLightningError(ctx, peerID, jobID, summary, payErr)
+	}
+	payDuration := time.Since(payStart)
+
+	s.markJobState(peerID, jobID, requesterjobstore.StateAwaitingResult)
+
+	type waiterResult struct {
+		outcome requesterwait.ResultOutcome
+		err     error
+	}
+
+	waitStart := time.Now()
+	waitCh := make(chan waiterResult, 1)
+	go func() {
+		outcome, waitErr := s.waiter.WaitResult(ctx, peerID, jobID)
+		waitCh <- waiterResult{outcome: outcome, err: waitErr}
+	}()
+
+	sendStreamEvent := func(ev requesterwait.ResultStreamEvent) error {
+		switch ev.Kind {
+		case requesterwait.ResultStreamEventKindBegin:
+			return stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
+					ResultBegin: &lcpdv1.ResultStreamBegin{
+						ContentType:     ev.ContentType,
+						ContentEncoding: ev.ContentEncoding,
+					},
+				},
+			})
+		case requesterwait.ResultStreamEventKindChunk:
+			if len(ev.Data) == 0 {
+				return nil
+			}
+			return stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
+					ResultChunk: &lcpdv1.ResultStreamChunk{Data: ev.Data},
+				},
+			})
+		default:
+			return nil
+		}
+	}
+
+	for {
+		select {
+		case ev := <-events:
+			if sendErr := sendStreamEvent(ev); sendErr != nil {
+				return sendErr
+			}
+		case waited := <-waitCh:
+			waitDuration := time.Since(waitStart)
+
+			if waited.err != nil {
+				return s.acceptAndExecuteWaiterError(ctx, peerID, jobID, summary, waited.err)
+			}
+			if waited.outcome.Error != nil {
+				return s.acceptAndExecuteLCPError(peerID, jobID, summary, waited.outcome.Error)
+			}
+			if waited.outcome.Result == nil {
+				return status.Error(codes.Internal, "result waiter returned empty outcome")
+			}
+
+			// Drain any buffered stream events so the client receives all bytes
+			// before the terminal Result event.
+			for {
+				select {
+				case ev := <-events:
+					if sendErr := sendStreamEvent(ev); sendErr != nil {
+						return sendErr
+					}
+				default:
+					goto drained
+				}
+			}
+
+		drained:
+			res, err := protoResultFromTerminalMetadataOnly(*waited.outcome.Result)
+			if err != nil {
+				return err
+			}
+
+			if res.GetStatus() == lcpdv1.Result_STATUS_OK {
+				if sendErr := stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultEnd{
+						ResultEnd: &lcpdv1.ResultStreamEnd{
+							ResultHash: res.GetResultHash(),
+							ResultLen:  res.GetResultLen(),
+						},
+					},
+				}); sendErr != nil {
+					return sendErr
+				}
+			}
+
+			if sendErr := stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{Result: res},
+			}); sendErr != nil {
+				return sendErr
+			}
+
+			s.markJobState(peerID, jobID, requesterjobstore.StateDone)
+			failed = false
+
+			s.logResultReceived(peerID, jobID, summary, terms, payDuration, waitDuration, res, started)
+
+			return nil
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		}
+	}
+}
+
 func protoResultFromTerminal(
 	terminal lcpwire.Result,
 	resultBytes []byte,
@@ -684,6 +856,36 @@ func protoResultFromTerminal(
 			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_result")
 		}
 		res.Result = append([]byte(nil), resultBytes...)
+		res.ResultHash = append([]byte(nil), terminal.OK.ResultHash[:]...)
+		res.ResultLen = terminal.OK.ResultLen
+		res.ContentType = terminal.OK.ResultContentType
+		res.ContentEncoding = terminal.OK.ResultContentEncoding
+	case lcpwire.ResultStatusFailed:
+		res.Status = lcpdv1.Result_STATUS_FAILED
+		if terminal.Message != nil {
+			res.Message = *terminal.Message
+		}
+	case lcpwire.ResultStatusCancelled:
+		res.Status = lcpdv1.Result_STATUS_CANCELLED
+		if terminal.Message != nil {
+			res.Message = *terminal.Message
+		}
+	default:
+		return nil, status.Error(codes.Internal, "unknown lcp_result status")
+	}
+	return res, nil
+}
+
+func protoResultFromTerminalMetadataOnly(
+	terminal lcpwire.Result,
+) (*lcpdv1.Result, error) {
+	res := &lcpdv1.Result{}
+	switch terminal.Status {
+	case lcpwire.ResultStatusOK:
+		res.Status = lcpdv1.Result_STATUS_OK
+		if terminal.OK == nil {
+			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_result")
+		}
 		res.ResultHash = append([]byte(nil), terminal.OK.ResultHash[:]...)
 		res.ResultLen = terminal.OK.ResultLen
 		res.ContentType = terminal.OK.ResultContentType
@@ -811,6 +1013,24 @@ func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
 				ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
 					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{
+						Model: params.Model,
+					},
+				},
+			})
+		case lcptasks.TaskKindOpenAIResponsesV1:
+			if tmpl.ParamsBytes == nil {
+				continue
+			}
+
+			params, err := lcpwire.DecodeOpenAIResponsesV1Params(*tmpl.ParamsBytes)
+			if err != nil {
+				continue
+			}
+
+			out.SupportedTasks = append(out.SupportedTasks, &lcpdv1.LCPTaskTemplate{
+				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
+				ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
+					OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{
 						Model: params.Model,
 					},
 				},

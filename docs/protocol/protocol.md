@@ -263,7 +263,7 @@ Matching against `lcp_quote_request` (recommended):
 * If the Provider declares `supported_tasks`, and the received `lcp_quote_request` does not match at least one task template, the Provider SHOULD return `lcp_error(code=unsupported_task)`.
 * Task template matching:
   * `task_kind` MUST match as a string.
-  * `params` handling depends on `task_kind`. For the standardized kind (`openai.chat_completions.v1`), §5.2.1 MUST be followed.
+  * `params` handling depends on `task_kind`. For standardized kinds defined in §5.2.1, the peer MUST follow the encoding rules there.
 
 ---
 
@@ -286,7 +286,7 @@ Optional TLVs:
 Meaning:
 
 * The Provider MAY reject unsupported tasks via `lcp_error`.
-* For the standardized kind (`openai.chat_completions.v1`), the sender MUST follow the encoding rules in §5.2.1.
+* For standardized kinds defined in §5.2.1, the sender MUST follow the encoding rules there.
 * If the Provider declares `lcp_manifest.supported_tasks`, the Requester SHOULD choose matching `task_kind` / `params`.
 
 Input requirement (MUST):
@@ -302,7 +302,15 @@ Idempotency (recommended):
 
 ### 5.2.1 Standardized `task_kind` (v0.2)
 
-LCP v0.2 standardizes the following `task_kind` value:
+LCP v0.2 standardizes the following `task_kind` values:
+
+* `task_kind = "openai.chat_completions.v1"`
+* `task_kind = "openai.responses.v1"`
+
+The standardized kinds in this section define only how bytes are carried over LCP:
+
+* LCP does not interpret, validate, or re-encode the HTTP bodies (JSON or SSE). They are treated as opaque bytes.
+* Result stream chunk boundaries have no semantic meaning (they do not align with JSON tokens nor SSE events).
 
 #### `task_kind = "openai.chat_completions.v1"`
 
@@ -330,12 +338,48 @@ Constraint (recommended):
 Result:
 
 * The decoded result stream bytes MUST be the exact HTTP response body bytes for the corresponding OpenAI-compatible `POST /v1/chat/completions` call.
-* The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"` for non-streaming responses.
+* If the request JSON field `stream` is omitted or false (non-streaming):
+  * The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
+* If the request JSON field `stream` is true (streaming):
+  * The decoded result stream bytes MUST be the exact `text/event-stream` (SSE) response body bytes, without interpretation.
+  * The Provider MUST set the result stream `content_type="text/event-stream; charset=utf-8"` and `content_encoding="identity"`.
 
-Non-streaming constraint (recommended):
+Streaming note:
 
-* This specification defines only non-streaming semantics: the request JSON field `stream` MUST be omitted or false.
-* Providers SHOULD reject requests that enable streaming with `lcp_error(code=unsupported_params)` or with `lcp_result(status=failed)`.
+* In the streaming case, the Provider MAY omit `total_len` / `sha256` in `lcp_stream_begin` (if unknown) and MUST provide them in `lcp_stream_end`.
+* The Requester MAY consume or forward decoded bytes before validating `lcp_stream_end`. If validation fails, the Requester SHOULD treat the stream as invalid and SHOULD NOT treat the job as successful.
+
+#### `task_kind = "openai.responses.v1"`
+
+Input stream interpretation:
+
+* The decoded input stream bytes MUST be the exact HTTP request body bytes for an OpenAI-compatible `POST /v1/responses` call.
+* The Requester MUST set the input stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
+
+`params` encoding:
+
+* `params` MUST be a TLV stream called `openai_responses_v1_params_tlvs`.
+* The TLV encoding for `openai_responses_v1_params_tlvs` is the same as the TLV stream in §4.
+* `openai_responses_v1_params_tlvs` MUST include at least `model`.
+
+`openai_responses_v1_params_tlvs` (standard TLVs):
+
+* type: 1 (`model`): [`byte`:`model`] (UTF-8 string)
+  Meaning:
+  * `model` MUST identify the execution target (for example, an OpenAI model ID).
+
+Constraint (recommended):
+
+* Providers SHOULD reject `openai_responses_v1_params_tlvs` containing unknown param types with `lcp_error(code=unsupported_params)`.
+
+Result:
+
+* The decoded result stream bytes MUST be the exact HTTP response body bytes for the corresponding OpenAI-compatible `POST /v1/responses` call.
+* If the request JSON field `stream` is omitted or false (non-streaming):
+  * The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
+* If the request JSON field `stream` is true (streaming):
+  * The decoded result stream bytes MUST be the exact `text/event-stream` (SSE) response body bytes, without interpretation.
+  * The Provider MUST set the result stream `content_type="text/event-stream; charset=utf-8"` and `content_encoding="identity"`.
 
 Extensions:
 
