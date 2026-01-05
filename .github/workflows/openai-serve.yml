@@ -5,6 +5,8 @@ on:
     branches:
       - main
     paths:
+      - flake.nix
+      - flake.lock
       - apps/openai-serve/**
       - go-lcpd/proto/**
       - proto/**
@@ -12,6 +14,8 @@ on:
       - .github/workflows/openai-serve.yml
   pull_request:
     paths:
+      - flake.nix
+      - flake.lock
       - apps/openai-serve/**
       - go-lcpd/proto/**
       - proto/**
@@ -38,5 +42,4 @@ jobs:
           use-flakehub: false
 
       - name: Lint and test
-        run: nix develop ./go-lcpd -c make -C apps/openai-serve lint test
-
+        run: nix develop . -c make -C apps/openai-serve lint test

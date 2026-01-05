@@ -13,7 +13,7 @@ For the LCP wire protocol spec, see `../docs/protocol/` (e.g., `../docs/protocol
 
 Prerequisites:
 - Go 1.24.4+ (or a Go toolchain that supports module toolchain auto-download)
-- Optional: Nix (flakes enabled) + direnv for a pinned toolchain (`flake.nix`)
+- Optional: Nix (flakes enabled) + direnv for a pinned toolchain (repo root `../flake.nix`)
 
 If you use the optional Nix devShell, it includes Go / buf / golangci-lint v2 / and (when needed) bitcoind / lnd / jq.
 
@@ -34,7 +34,7 @@ Notes:
 
 ```sh
 cd go-lcpd
-nix develop
+nix develop ..
 
 make gen
 make test

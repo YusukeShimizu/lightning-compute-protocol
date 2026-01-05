@@ -2,10 +2,10 @@
 
 # direnv config for go-lcpd.
 #
-# - use the go-lcpd flake via `nix develop`
+# - use the repo root flake via `nix develop`
 # - run `direnv allow` once to enable auto-loading
 
-use flake .
+use flake ..
 
 # Optional: enable regtest integration tests (heavy).
 # export LCP_ITEST_REGTEST=1

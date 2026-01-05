@@ -1,5 +1,5 @@
 {
-  description = "go-lcpd dev environment (pinned toolchain + regtest devnet)";
+  description = "lightning-compute-protocol dev environment (pinned toolchain + regtest devnet)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -57,11 +57,12 @@
             export GOFLAGS="-buildvcs=false"
 
             echo "devshell ready"
-            echo "  test:    make test"
-            echo "  regtest: make test-regtest"
-            echo "  devnet:  ./scripts/devnet up"
+            echo "  test:    make -C go-lcpd test"
+            echo "  regtest: make -C go-lcpd test-regtest"
+            echo "  devnet:  go-lcpd/scripts/devnet up"
           '';
         };
       }
     );
 }
+

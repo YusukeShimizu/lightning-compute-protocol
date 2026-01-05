@@ -1,12 +1,12 @@
 .PHONY: test test-regtest test-regtest-custommsg test-regtest-grpc test-regtest-openai-serve lint tools gen fmt proto-deps devnet-up devnet-down devnet-status devnet-info
 
 # Nix-first workflow:
-# - All targets are meant to run inside the go-lcpd devShell (`nix develop`).
+# - All targets are meant to run inside the repo devShell (`nix develop` at repo root).
 # - If you invoke `make` outside the devShell, this Makefile re-execs itself via
-#   `nix develop -c make ...` so that tool versions are pinned by flake.lock.
+#   `nix develop .. -c make ...` so that tool versions are pinned by flake.lock.
 .DEFAULT_GOAL := test
 
-NIX_DEVELOP ?= nix develop
+NIX_DEVELOP ?= nix develop ..
 GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),$(.DEFAULT_GOAL))
 
 ifeq ($(strip $(IN_NIX_SHELL)),)

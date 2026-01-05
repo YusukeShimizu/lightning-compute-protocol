@@ -57,13 +57,13 @@ If you're unsure what to pick up, open an issue with what you want to do and we'
 
 ## Development setup
 
-This repo uses Nix flakes to keep the dev environment consistent.
+This repo uses Nix flakes to keep the dev environment consistent (see repo root `flake.nix`).
 
 Typical workflow:
 
 ```sh
-cd go-lcpd
 nix develop
+cd go-lcpd
 make test
 ```
 

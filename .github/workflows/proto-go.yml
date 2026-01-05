@@ -5,12 +5,16 @@ on:
     branches:
       - main
     paths:
+      - flake.nix
+      - flake.lock
       - go-lcpd/proto/**
       - proto/**
       - proto-go/**
       - .github/workflows/proto-go.yml
   pull_request:
     paths:
+      - flake.nix
+      - flake.lock
       - go-lcpd/proto/**
       - proto/**
       - proto-go/**
@@ -36,10 +40,9 @@ jobs:
           use-flakehub: false
 
       - name: Lint protos
-        run: nix develop ./go-lcpd -c sh -lc 'cd go-lcpd && buf lint'
+        run: nix develop . -c sh -lc 'cd go-lcpd && buf lint'
 
       - name: Verify proto-go generated code is up to date
         run: |
-          nix develop ./go-lcpd -c sh -lc 'cd go-lcpd && buf generate --template ../proto-go/buf.gen.yaml'
+          nix develop . -c sh -lc 'cd go-lcpd && buf generate --template ../proto-go/buf.gen.yaml'
           git diff --exit-code -- proto-go
-

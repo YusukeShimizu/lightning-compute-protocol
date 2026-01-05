@@ -52,7 +52,7 @@ Environment variables (optional):
 
 Notes:
   - Requires `bitcoind`, `bitcoin-cli`, `lnd`, and `lncli` on PATH.
-  - If you use the optional Nix devShell, you can run: `nix develop -c ./scripts/devnet up`
+  - If you use the optional Nix devShell, you can run: `nix develop .. -c ./scripts/devnet up`
   - All state is stored under ./.data/devnet/ (gitignored).
 EOF
 }
