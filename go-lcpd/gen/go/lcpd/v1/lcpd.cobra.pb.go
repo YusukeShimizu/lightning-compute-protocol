@@ -235,7 +235,7 @@ func _LCPDServiceAcceptAndExecuteCommand(cfg *client.Config) *cobra.Command {
 }
 
 func _LCPDServiceAcceptAndExecuteStreamCommand(cfg *client.Config) *cobra.Command {
-	req := &AcceptAndExecuteRequest{}
+	req := &AcceptAndExecuteStreamRequest{}
 
 	cmd := &cobra.Command{
 		Use:   cfg.CommandNamer("AcceptAndExecuteStream"),
@@ -252,7 +252,7 @@ func _LCPDServiceAcceptAndExecuteStreamCommand(cfg *client.Config) *cobra.Comman
 			}
 			return client.RoundTrip(cmd.Context(), cfg, func(cc grpc.ClientConnInterface, in iocodec.Decoder, out iocodec.Encoder) error {
 				cli := NewLCPDServiceClient(cc)
-				v := &AcceptAndExecuteRequest{}
+				v := &AcceptAndExecuteStreamRequest{}
 
 				if err := in(v); err != nil {
 					return err

@@ -1,3 +1,4 @@
+//nolint:dupl // Chat Completions and Responses params intentionally mirror each other.
 package lcpwire
 
 import (
@@ -62,4 +63,3 @@ func DecodeOpenAIResponsesV1Params(payload []byte) (OpenAIResponsesV1Params, err
 		Unknown: unknown,
 	}, nil
 }
-

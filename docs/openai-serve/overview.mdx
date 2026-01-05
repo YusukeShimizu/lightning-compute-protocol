@@ -36,9 +36,10 @@ Logs are treated as sensitive. `openai-serve` is designed to be diagnosable with
 - Logs include only operational metadata (model/peer/job ids, price, timings, and byte/token counts).
 - `OPENAI_SERVE_LOG_LEVEL=debug` enables more verbose request logging; keep `info` (default) for production unless needed.
 
-## Supported endpoints (MVP)
+## Supported endpoints
 
-- `POST /v1/chat/completions` (non-streaming only)
+- `POST /v1/chat/completions` (JSON or `stream:true` SSE passthrough)
+- `POST /v1/responses` (JSON or `stream:true` SSE passthrough)
 - `GET /v1/models`
 - `GET /healthz`
 
@@ -71,16 +72,31 @@ Test:
 curl -sS http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer devkey1' \
-  -d '{
-    "model": "gpt-5.2",
-    "messages": [{"role":"user","content":"Say hello in Japanese."}]
-  }'
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+Streaming (Chat Completions):
+
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+Streaming (Responses):
+
+```sh
+curl -N http://127.0.0.1:8080/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"input":"Say hello."}'
 ```
 
 ## Using from CLI tools
 
-`openai-serve` speaks the OpenAI **Chat Completions** API (non-streaming). Many OpenAI-compatible CLI tools can be
-pointed at it by configuring a custom `base_url` and API key.
+`openai-serve` speaks the OpenAI **Chat Completions** and **Responses** APIs (including `stream:true`). Many
+OpenAI-compatible CLI tools can be pointed at it by configuring a custom `base_url` and API key.
 
 ### Codex CLI
 
@@ -107,8 +123,7 @@ export OPENAI_SERVE_API_KEY="devkey1"
 codex --profile lcp "Say hello in Japanese."
 ```
 
-Note: `openai-serve` currently supports a strict subset of Chat Completions. If your client sends `tools`,
-`response_format`, or streaming-related fields, the request will be rejected.
+SSE streaming uses `stream:true` and is passed through byte-for-byte; field support depends on the selected Provider.
 
 ### LLM (`llm`)
 
@@ -119,7 +134,7 @@ Note: `openai-serve` currently supports a strict subset of Chat Completions. If 
 - model_id: lcp-gpt-5.2
   model_name: gpt-5.2
   api_base: http://127.0.0.1:8080/v1
-  can_stream: false
+  can_stream: true
   api_key_name: openai-serve
 ```
 
@@ -127,22 +142,28 @@ Then:
 
 ```sh
 llm keys set openai-serve
-llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
+llm -m lcp-gpt-5.2 "Say hello in Japanese."
 ```
 
 ## Request/response behavior
 
-- JSON decoding is strict (`DisallowUnknownFields`): unknown request fields are rejected with `400`.
+- `openai-serve` is a passthrough gateway for Chat Completions and Responses request/response bytes.
+- Minimal validation is applied before routing:
+  - Body must be a valid JSON object.
+  - `model` must be present and non-empty (no leading/trailing whitespace).
+  - `messages` (chat completions) or `input` (responses) must be present and non-empty.
+  - HTTP `Content-Encoding` must be omitted or `identity` (compressed request bodies are rejected).
+- `stream:true` delivers `text/event-stream` bytes as they arrive. Without `stream` (or `false`), the full JSON response
+  body is returned.
 - Request body size is limited to 1 MiB.
-- Provider result bytes must be UTF-8 (non-UTF-8 results return `502`).
-- Token usage in responses is approximate (bytes/4 heuristic).
+- Provider result bytes are returned as-is; HTTP `Content-Type`/`Content-Encoding` are taken from the LCP result metadata.
 
 For configuration, routing rules, and safety knobs (max price, timeouts, model allowlists), see
 [Configuration](/openai-serve/configuration).
 
 ## LCP metadata headers
 
-`POST /v1/chat/completions` responses include:
+`POST /v1/chat/completions` and `POST /v1/responses` responses include:
 
 - `X-Lcp-Peer-Id`: chosen Provider peer id
 - `X-Lcp-Job-Id`: job id (hex)

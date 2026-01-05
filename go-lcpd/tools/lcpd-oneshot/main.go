@@ -123,6 +123,7 @@ func realMain() int {
 	return 0
 }
 
+//nolint:funlen // CLI parsing is linear for readability.
 func parseArgs(args []string, stdin io.Reader) (runOptions, error) {
 	fs := flag.NewFlagSet("lcpd-oneshot", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

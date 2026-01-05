@@ -30,7 +30,7 @@ func (s *Server) acceptAndExecuteStream(
 	jobID []byte,
 ) (lcpdv1.LCPDService_AcceptAndExecuteStreamClient, context.CancelFunc, error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.TimeoutExecute)
-	stream, err := s.lcpd.AcceptAndExecuteStream(ctx, &lcpdv1.AcceptAndExecuteRequest{
+	stream, err := s.lcpd.AcceptAndExecuteStream(ctx, &lcpdv1.AcceptAndExecuteStreamRequest{
 		PeerId:     peerID,
 		JobId:      jobID,
 		PayInvoice: true,
@@ -128,4 +128,3 @@ func (s *Server) writeLCPStreamToHTTP(
 		}
 	}
 }
-

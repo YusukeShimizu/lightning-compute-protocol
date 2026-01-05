@@ -116,7 +116,7 @@ service LCPDService {
   // Errors follow the same model as `AcceptAndExecute`, but note that streaming
   // responses may have already delivered partial bytes before an error is
   // detected (for example, checksum validation failure at stream end).
-  rpc AcceptAndExecuteStream(AcceptAndExecuteRequest)
+  rpc AcceptAndExecuteStream(AcceptAndExecuteStreamRequest)
       returns (stream AcceptAndExecuteStreamResponse);
 
   // CancelJob sends an `lcp_cancel` message to the provider.
@@ -412,6 +412,27 @@ message RequestQuoteResponse {
 
 // AcceptAndExecuteRequest is the request message for `LCPDService.AcceptAndExecute`.
 message AcceptAndExecuteRequest {
+  // The target peer's Node ID.
+  string peer_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The job_id to execute (must match a previously received Quote).
+  bytes job_id = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).bytes.len = 32
+  ];
+
+  // Authorization to pay the invoice.
+  bool pay_invoice = 3 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+// AcceptAndExecuteStreamRequest is the request message for `LCPDService.AcceptAndExecuteStream`.
+message AcceptAndExecuteStreamRequest {
   // The target peer's Node ID.
   string peer_id = 1 [
     (google.api.field_behavior) = REQUIRED,

@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -45,6 +46,10 @@ type recordingLCPDClient struct {
 	acceptReq  *lcpdv1.AcceptAndExecuteRequest
 	acceptResp *lcpdv1.AcceptAndExecuteResponse
 	acceptErr  error
+
+	acceptStreamReq    *lcpdv1.AcceptAndExecuteStreamRequest
+	acceptStreamClient lcpdv1.LCPDService_AcceptAndExecuteStreamClient
+	acceptStreamErr    error
 
 	allowCancel bool
 	cancelCh    chan<- *lcpdv1.CancelJobRequest
@@ -95,10 +100,14 @@ func (c *recordingLCPDClient) AcceptAndExecute(
 
 func (c *recordingLCPDClient) AcceptAndExecuteStream(
 	_ context.Context,
-	_ *lcpdv1.AcceptAndExecuteRequest,
+	in *lcpdv1.AcceptAndExecuteStreamRequest,
 	_ ...grpc.CallOption,
 ) (lcpdv1.LCPDService_AcceptAndExecuteStreamClient, error) {
-	panic("AcceptAndExecuteStream was called but not expected")
+	c.acceptStreamReq = in
+	if c.acceptStreamClient == nil && c.acceptStreamErr == nil {
+		panic("AcceptAndExecuteStream was called but not configured")
+	}
+	return c.acceptStreamClient, c.acceptStreamErr
 }
 
 func (c *recordingLCPDClient) CancelJob(
@@ -114,6 +123,39 @@ func (c *recordingLCPDClient) CancelJob(
 	}
 	return &lcpdv1.CancelJobResponse{Success: true}, nil
 }
+
+type staticStreamClient struct {
+	ctx       context.Context
+	responses []*lcpdv1.AcceptAndExecuteStreamResponse
+	err       error
+}
+
+func (s *staticStreamClient) Recv() (*lcpdv1.AcceptAndExecuteStreamResponse, error) {
+	if len(s.responses) == 0 {
+		if s.err != nil {
+			return nil, s.err
+		}
+		return nil, io.EOF
+	}
+	resp := s.responses[0]
+	s.responses = s.responses[1:]
+	if resp == nil {
+		return nil, io.EOF
+	}
+	return resp, nil
+}
+
+func (s *staticStreamClient) Header() (metadata.MD, error) { return nil, nil }
+func (s *staticStreamClient) Trailer() metadata.MD         { return nil }
+func (s *staticStreamClient) CloseSend() error             { return nil }
+func (s *staticStreamClient) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+func (s *staticStreamClient) SendMsg(any) error { return nil }
+func (s *staticStreamClient) RecvMsg(any) error { return nil }
 
 func newTestHandler(
 	t *testing.T,
@@ -365,7 +407,287 @@ func TestChatCompletions_Passthrough_AllowsExtraFields(t *testing.T) {
 	}
 }
 
-func TestChatCompletions_RejectsStreamTrue(t *testing.T) {
+func TestChatCompletions_StreamSuccess(t *testing.T) {
+	const (
+		model    = "gpt-5.2"
+		peerID   = "021111111111111111111111111111111111111111111111111111111111111111"
+		jobIDStr = "job-456"
+		termsStr = "terms-hash-456"
+	)
+
+	chunk1 := []byte("data: first\n\n")
+	chunk2 := []byte("data: second\n\n")
+
+	client := &recordingLCPDClient{
+		listPeersResp: &lcpdv1.ListLCPPeersResponse{
+			Peers: []*lcpdv1.LCPPeer{
+				{
+					PeerId: peerID,
+					RemoteManifest: &lcpdv1.LCPManifest{
+						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+							{
+								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
+								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
+									OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
+			PeerId: peerID,
+			Terms: &lcpdv1.Terms{
+				JobId:     []byte(jobIDStr),
+				PriceMsat: priceMsat123,
+				TermsHash: []byte(termsStr),
+			},
+		},
+		acceptStreamClient: &staticStreamClient{
+			responses: []*lcpdv1.AcceptAndExecuteStreamResponse{
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
+						ResultBegin: &lcpdv1.ResultStreamBegin{
+							ContentType:     "text/event-stream; charset=utf-8",
+							ContentEncoding: "identity",
+						},
+					},
+				},
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
+						ResultChunk: &lcpdv1.ResultStreamChunk{Data: chunk1},
+					},
+				},
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
+						ResultChunk: &lcpdv1.ResultStreamChunk{Data: chunk2},
+					},
+				},
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{
+						Result: &lcpdv1.Result{Status: lcpdv1.Result_STATUS_OK},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{"role": "user", "content": "hi"},
+		},
+		"stream": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusOK, rec.Code)
+	mustDiff(t, "text/event-stream; charset=utf-8", rec.Header().Get("Content-Type"))
+	mustDiff(t, append(chunk1, chunk2...), rec.Body.Bytes())
+
+	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
+	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
+
+	if client.acceptStreamReq == nil {
+		t.Fatalf("expected AcceptAndExecuteStream to be called")
+	}
+	if client.acceptReq != nil {
+		t.Fatalf("unexpected AcceptAndExecute call")
+	}
+}
+
+func TestResponses_Success(t *testing.T) {
+	const (
+		model    = "gpt-5.2"
+		peerID   = "031111111111111111111111111111111111111111111111111111111111111111"
+		jobIDStr = "job-resp-1"
+		termsStr = "terms-resp-1"
+	)
+
+	wantRespBytes := mustJSON(t, map[string]any{
+		"id":      "resp-123",
+		"object":  "response",
+		"created": 321,
+		"model":   model,
+		"output":  []any{"hello"},
+	})
+
+	client := &recordingLCPDClient{
+		listPeersResp: &lcpdv1.ListLCPPeersResponse{
+			Peers: []*lcpdv1.LCPPeer{
+				{
+					PeerId: peerID,
+					RemoteManifest: &lcpdv1.LCPManifest{
+						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+							{
+								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
+								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
+									OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{Model: model},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
+			PeerId: peerID,
+			Terms: &lcpdv1.Terms{
+				JobId:     []byte(jobIDStr),
+				PriceMsat: priceMsat123,
+				TermsHash: []byte(termsStr),
+			},
+		},
+		acceptResp: &lcpdv1.AcceptAndExecuteResponse{
+			Result: &lcpdv1.Result{
+				Status:          lcpdv1.Result_STATUS_OK,
+				Result:          wantRespBytes,
+				ContentType:     "application/json; charset=utf-8",
+				ContentEncoding: "identity",
+			},
+		},
+	}
+
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": model,
+		"input": "Say hello.",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusOK, rec.Code)
+	mustDiff(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+	mustDiff(t, wantRespBytes, rec.Body.Bytes())
+
+	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
+	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
+
+	openaiTask := client.requestQuoteReq.GetTask().GetOpenaiResponsesV1()
+	if openaiTask == nil {
+		t.Fatalf("expected openai_responses_v1 task")
+	}
+	mustDiff(t, reqBody, openaiTask.GetRequestJson())
+}
+
+func TestResponses_StreamSuccess(t *testing.T) {
+	const (
+		model    = "gpt-5.2"
+		peerID   = "031111111111111111111111111111111111111111111111111111111111111111"
+		jobIDStr = "job-resp-stream"
+		termsStr = "terms-resp-stream"
+	)
+
+	streamData := []byte("data: streamed\n\n")
+
+	client := &recordingLCPDClient{
+		listPeersResp: &lcpdv1.ListLCPPeersResponse{
+			Peers: []*lcpdv1.LCPPeer{
+				{
+					PeerId: peerID,
+					RemoteManifest: &lcpdv1.LCPManifest{
+						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+							{
+								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
+								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
+									OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{Model: model},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
+			PeerId: peerID,
+			Terms: &lcpdv1.Terms{
+				JobId:     []byte(jobIDStr),
+				PriceMsat: priceMsat123,
+				TermsHash: []byte(termsStr),
+			},
+		},
+		acceptStreamClient: &staticStreamClient{
+			responses: []*lcpdv1.AcceptAndExecuteStreamResponse{
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
+						ResultBegin: &lcpdv1.ResultStreamBegin{
+							ContentType:     "text/event-stream; charset=utf-8",
+							ContentEncoding: "identity",
+						},
+					},
+				},
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
+						ResultChunk: &lcpdv1.ResultStreamChunk{Data: streamData},
+					},
+				},
+				{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{
+						Result: &lcpdv1.Result{Status: lcpdv1.Result_STATUS_OK},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model":  model,
+		"input":  "Say hello.",
+		"stream": true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusOK, rec.Code)
+	mustDiff(t, "text/event-stream; charset=utf-8", rec.Header().Get("Content-Type"))
+	mustDiff(t, streamData, rec.Body.Bytes())
+
+	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
+	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
+
+	if client.acceptStreamReq == nil {
+		t.Fatalf("expected AcceptAndExecuteStream to be called")
+	}
+	if client.acceptReq != nil {
+		t.Fatalf("unexpected AcceptAndExecute call")
+	}
+}
+
+func TestChatCompletions_RejectsNonIdentityContentEncoding(t *testing.T) {
 	client := &recordingLCPDClient{}
 	cfg := config.Config{
 		TimeoutQuote:   requestTimeout,
@@ -378,19 +700,49 @@ func TestChatCompletions_RejectsStreamTrue(t *testing.T) {
 		"messages": []map[string]any{
 			{"role": "user", "content": "hi"},
 		},
-		"stream": true,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	mustDiff(t, http.StatusBadRequest, rec.Code)
+	mustDiff(t, http.StatusUnsupportedMediaType, rec.Code)
 
 	var got openai.ErrorResponse
 	mustUnmarshalJSON(t, rec.Body.Bytes(), &got)
-	mustDiff(t, "stream=true is not supported", got.Error.Message)
+	if !strings.Contains(got.Error.Message, "unsupported Content-Encoding") {
+		t.Fatalf("expected content encoding error, got %q", got.Error.Message)
+	}
+}
+
+func TestResponses_RejectsNonIdentityContentEncoding(t *testing.T) {
+	client := &recordingLCPDClient{}
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": "gpt-5.2",
+		"input": "hi",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "br")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusUnsupportedMediaType, rec.Code)
+
+	var got openai.ErrorResponse
+	mustUnmarshalJSON(t, rec.Body.Bytes(), &got)
+	if !strings.Contains(got.Error.Message, "unsupported Content-Encoding") {
+		t.Fatalf("expected content encoding error, got %q", got.Error.Message)
+	}
 }
 
 func TestChatCompletions_RequestBodyTooLarge(t *testing.T) {
@@ -414,6 +766,30 @@ func TestChatCompletions_RequestBodyTooLarge(t *testing.T) {
 	var got openai.ErrorResponse
 	mustUnmarshalJSON(t, rec.Body.Bytes(), &got)
 	mustDiff(t, "request body too large", got.Error.Message)
+}
+
+func TestResponses_RejectsMissingInput(t *testing.T) {
+	client := &recordingLCPDClient{}
+	cfg := config.Config{
+		TimeoutQuote:   requestTimeout,
+		TimeoutExecute: requestTimeout,
+	}
+	h := newTestHandler(t, cfg, client, nil)
+
+	reqBody := mustJSON(t, map[string]any{
+		"model": "gpt-5.2",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	mustDiff(t, http.StatusBadRequest, rec.Code)
+
+	var got openai.ErrorResponse
+	mustUnmarshalJSON(t, rec.Body.Bytes(), &got)
+	mustDiff(t, "input is required", got.Error.Message)
 }
 
 func TestAuthMiddleware_ProtectsV1RoutesOnly(t *testing.T) {

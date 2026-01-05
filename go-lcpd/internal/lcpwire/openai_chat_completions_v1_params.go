@@ -1,3 +1,4 @@
+//nolint:dupl // Chat Completions and Responses params intentionally mirror each other.
 package lcpwire
 
 import (

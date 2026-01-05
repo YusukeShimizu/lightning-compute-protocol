@@ -63,4 +63,3 @@ func TestDecodeOpenAIResponsesV1Params_PreservesUnknown(t *testing.T) {
 		t.Fatalf("params mismatch (-want +got):\n%s", diff)
 	}
 }
-

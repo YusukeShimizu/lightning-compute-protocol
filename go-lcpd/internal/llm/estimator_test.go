@@ -14,7 +14,6 @@ func TestApproxUsageEstimator_Estimate_Deterministic(t *testing.T) {
 	estimator := llm.NewApproxUsageEstimator()
 
 	for _, taskKind := range []string{"openai.chat_completions.v1", "openai.responses.v1"} {
-		taskKind := taskKind
 		t.Run(taskKind, func(t *testing.T) {
 			t.Parallel()
 

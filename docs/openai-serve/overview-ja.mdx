@@ -37,9 +37,10 @@ lcpd-grpcd（Requester）  --- Lightning --- Provider peer（lcpd-grpcd Provider
 - ログは運用メタデータ（model/peer/job id、価格、時間、byte/token カウント）のみに寄せます。
 - `OPENAI_SERVE_LOG_LEVEL=debug` はリクエストログがより詳細になります。運用では（必要になるまで）デフォルトの `info` を推奨します。
 
-## 対応エンドポイント（MVP）
+## 対応エンドポイント
 
-- `POST /v1/chat/completions`（非ストリーミングのみ）
+- `POST /v1/chat/completions`（JSON または `stream:true` の SSE パススルー）
+- `POST /v1/responses`（JSON または `stream:true` の SSE パススルー）
 - `GET /v1/models`
 - `GET /healthz`
 
@@ -72,15 +73,30 @@ openai-serve
 curl -sS http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer devkey1' \
-  -d '{
-    "model": "gpt-5.2",
-    "messages": [{"role":"user","content":"Say hello in Japanese."}]
-  }'
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+ストリーミング（Chat Completions）:
+
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+ストリーミング（Responses）:
+
+```sh
+curl -N http://127.0.0.1:8080/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"input":"Say hello."}'
 ```
 
 ## CLI ツールから使う
 
-`openai-serve` は OpenAI **Chat Completions** API（非ストリーミング）互換です。
+`openai-serve` は OpenAI **Chat Completions** / **Responses** API（`stream:true` 含む）互換です。
 多くの OpenAI 互換 CLI ツールは、`base_url` と API key を設定することで `openai-serve` を利用できます。
 
 ### Codex CLI
@@ -108,8 +124,8 @@ export OPENAI_SERVE_API_KEY="devkey1"
 codex --profile lcp "Say hello in Japanese."
 ```
 
-注意: `openai-serve` は Chat Completions のサブセットのみ対応です。クライアントが `tools` / `response_format` /
-ストリーミング関連フィールドを送ると、リクエストは拒否されます。
+ストリーミング（`stream:true`）は SSE としてそのままパススルーします。フィールドのサポート可否は選択された
+Provider に依存します。
 
 ### LLM（`llm`）
 
@@ -120,7 +136,7 @@ codex --profile lcp "Say hello in Japanese."
 - model_id: lcp-gpt-5.2
   model_name: gpt-5.2
   api_base: http://127.0.0.1:8080/v1
-  can_stream: false
+  can_stream: true
   api_key_name: openai-serve
 ```
 
@@ -128,22 +144,29 @@ codex --profile lcp "Say hello in Japanese."
 
 ```sh
 llm keys set openai-serve
-llm --no-stream -m lcp-gpt-5.2 "Say hello in Japanese."
+llm -m lcp-gpt-5.2 "Say hello in Japanese."
 ```
 
 ## リクエスト/レスポンスの挙動
 
-- JSON は strict に decode します（`DisallowUnknownFields`）: 未知フィールドがあると `400` になります。
+- `openai-serve` は Chat Completions / Responses の request/response bytes をそのまま運ぶパススルーゲートウェイです。
+- ルーティング前に最小限の検証のみ行います:
+  - body が JSON object であること
+  - `model` が存在し、空でなく、前後に空白がないこと
+  - `messages`（chat）または `input`（responses）が存在し、空でないこと
+  - HTTP `Content-Encoding` は省略または `identity`（圧縮されたリクエストボディは拒否）
+- `stream:true` のとき、`text/event-stream` の bytes を順次パススルーします。`stream` なし/`false` のときは
+  JSON body をまとめて返します。
 - リクエストボディは 1 MiB までです。
-- Provider の結果 bytes は UTF-8 必須です（UTF-8 でない場合は `502`）。
-- レスポンスの token usage は概算です（bytes/4 の簡易ヒューリスティック）。
+- Provider の結果 bytes はそのまま返し、HTTP の `Content-Type` / `Content-Encoding` は LCP result metadata
+  から取得します。
 
 設定、ルーティング、Safety knobs（最大価格、タイムアウト、モデル allowlist）は
 [設定](/openai-serve/configuration-ja) を参照してください。
 
 ## LCP メタデータヘッダ
 
-`POST /v1/chat/completions` のレスポンスには以下が含まれます:
+`POST /v1/chat/completions` と `POST /v1/responses` のレスポンスには以下が含まれます:
 
 - `X-Lcp-Peer-Id`: 選択された Provider の peer id
 - `X-Lcp-Job-Id`: job id（hex）

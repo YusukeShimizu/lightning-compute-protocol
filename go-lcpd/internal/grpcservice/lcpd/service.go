@@ -672,8 +672,9 @@ func (s *Service) AcceptAndExecute(
 	return &lcpdv1.AcceptAndExecuteResponse{Result: res}, nil
 }
 
+//nolint:gocognit,cyclop,funlen // Streaming flow handles many error branches; keep linear for clarity.
 func (s *Service) AcceptAndExecuteStream(
-	req *lcpdv1.AcceptAndExecuteRequest,
+	req *lcpdv1.AcceptAndExecuteStreamRequest,
 	stream lcpdv1.LCPDService_AcceptAndExecuteStreamServer,
 ) error {
 	if req == nil {
@@ -752,6 +753,8 @@ func (s *Service) AcceptAndExecuteStream(
 
 	sendStreamEvent := func(ev requesterwait.ResultStreamEvent) error {
 		switch ev.Kind {
+		case requesterwait.ResultStreamEventKindUnspecified:
+			return nil
 		case requesterwait.ResultStreamEventKindBegin:
 			return stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
 				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
@@ -808,9 +811,9 @@ func (s *Service) AcceptAndExecuteStream(
 			}
 
 		drained:
-			res, err := protoResultFromTerminalMetadataOnly(*waited.outcome.Result)
-			if err != nil {
-				return err
+			res, protoErr := protoResultFromTerminalMetadataOnly(*waited.outcome.Result)
+			if protoErr != nil {
+				return protoErr
 			}
 
 			if res.GetStatus() == lcpdv1.Result_STATUS_OK {

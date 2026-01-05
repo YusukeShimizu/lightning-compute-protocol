@@ -21,7 +21,6 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 | `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | 0 より大きい場合、上限超の quote を拒否 |
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
-| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | プロンプト上限（0 で無効） |
 | `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## ログ（プライバシー）
@@ -55,7 +54,6 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 ## Safety limits
 
 - `OPENAI_SERVE_MAX_PRICE_MSAT`: quote 価格の上限（超えたら拒否）
-- `OPENAI_SERVE_MAX_PROMPT_BYTES`: プロンプト文字列の上限（BOLT #1 カスタムメッセージ上限を意識）
 - `OPENAI_SERVE_TIMEOUT_QUOTE` / `OPENAI_SERVE_TIMEOUT_EXECUTE`: quote/execution の時間上限
 
 ## 認証

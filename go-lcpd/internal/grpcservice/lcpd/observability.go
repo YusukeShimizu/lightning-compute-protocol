@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
@@ -120,16 +121,7 @@ func (s *Service) logResultReceived(
 	res *lcpdv1.Result,
 	started time.Time,
 ) {
-	contentType := ""
-	resultBytes := 0
-	if res != nil {
-		contentType = res.GetContentType()
-		if res.GetStatus() == lcpdv1.Result_STATUS_OK && res.GetResultLen() != 0 {
-			resultBytes = int(res.GetResultLen())
-		} else {
-			resultBytes = len(res.GetResult())
-		}
-	}
+	contentType, resultBytes := resultLoggingFields(res)
 
 	s.logger.Infow(
 		"result received",
@@ -148,6 +140,22 @@ func (s *Service) logResultReceived(
 		"wait_ms", waitDuration.Milliseconds(),
 		"total_ms", time.Since(started).Milliseconds(),
 	)
+}
+
+func resultLoggingFields(res *lcpdv1.Result) (string, int) {
+	if res == nil {
+		return "", 0
+	}
+
+	if res.GetStatus() == lcpdv1.Result_STATUS_OK && res.GetResultLen() != 0 {
+		resultLen := res.GetResultLen()
+		if resultLen > math.MaxInt {
+			return res.GetContentType(), math.MaxInt
+		}
+		return res.GetContentType(), int(resultLen)
+	}
+
+	return res.GetContentType(), len(res.GetResult())
 }
 
 func (s *Service) requestQuoteWaiterError(

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -1107,6 +1108,7 @@ func (h *Handler) startJobRunner(
 	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
 }
 
+//nolint:gocognit,funlen,nestif // Execution path handles many validation and error branches.
 func (h *Handler) runJob(
 	ctx context.Context,
 	key jobstore.Key,
@@ -1177,15 +1179,15 @@ func (h *Handler) runJob(
 
 	if wantStreaming {
 		if streamingBackend, ok := h.backend.(computebackend.StreamingBackend); ok {
-			result, err := streamingBackend.ExecuteStreaming(ctx, planned)
-			if err != nil {
+			result, streamExecErr := streamingBackend.ExecuteStreaming(ctx, planned)
+			if streamExecErr != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				code := computeErrorCode(err)
+				code := computeErrorCode(streamExecErr)
 				execDuration := time.Since(execStart)
-				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, err)
-				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, err.Error())
+				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamExecErr)
+				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, streamExecErr.Error())
 				h.updateState(key, jobstore.StateFailed)
 				return
 			}
@@ -1193,11 +1195,11 @@ func (h *Handler) runJob(
 				if ctx.Err() != nil {
 					return
 				}
-				err := fmt.Errorf("%w: streaming output is nil", computebackend.ErrBackendUnavailable)
-				code := computeErrorCode(err)
+				streamNilErr := fmt.Errorf("%w: streaming output is nil", computebackend.ErrBackendUnavailable)
+				code := computeErrorCode(streamNilErr)
 				execDuration := time.Since(execStart)
-				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, err)
-				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, err.Error())
+				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamNilErr)
+				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, streamNilErr.Error())
 				h.updateState(key, jobstore.StateFailed)
 				return
 			}
@@ -1206,7 +1208,7 @@ func (h *Handler) runJob(
 			h.updateState(key, jobstore.StateStreamingResult)
 
 			inputLen := uint64(len(input.Buf))
-			outputLen, ok, streamErr := h.sendResultStreaming(
+			outputLen, streamSendOK, streamErr := h.sendResultStreaming(
 				ctx,
 				key.PeerPubKey,
 				quoteResp.Envelope,
@@ -1227,12 +1229,19 @@ func (h *Handler) runJob(
 				h.updateState(key, jobstore.StateFailed)
 				return
 			}
-			if !ok {
+			if !streamSendOK {
 				h.updateState(key, jobstore.StateFailed)
 				return
 			}
 
-			h.logJobCompleted(meta, settleDuration, execDuration, totalDuration, int(outputLen), result.Usage)
+			h.logJobCompleted(
+				meta,
+				settleDuration,
+				execDuration,
+				totalDuration,
+				clampUint64ToInt(outputLen),
+				result.Usage,
+			)
 			h.updateState(key, jobstore.StateDone)
 			return
 		}
@@ -1254,11 +1263,11 @@ func (h *Handler) runJob(
 		if ctx.Err() != nil {
 			return
 		}
-		err := fmt.Errorf("%w: execute backend returned empty output", computebackend.ErrBackendUnavailable)
-		code := computeErrorCode(err)
+		execErr := fmt.Errorf("%w: execute backend returned empty output", computebackend.ErrBackendUnavailable)
+		code := computeErrorCode(execErr)
 		execDuration := time.Since(execStart)
-		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, err)
-		h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, err.Error())
+		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, execErr)
+		h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, execErr.Error())
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
@@ -1284,26 +1293,6 @@ func (h *Handler) runJob(
 
 	h.logJobCompleted(meta, settleDuration, execDuration, totalDuration, outputBytes, result.Usage)
 	h.updateState(key, jobstore.StateDone)
-}
-
-func (h *Handler) execute(
-	ctx context.Context,
-	req lcpwire.QuoteRequest,
-	input jobstore.InputStreamState,
-) (computebackend.ExecutionResult, error) {
-	planned, _, _, _, err := h.planTask(req, input.Buf)
-	if err != nil {
-		return computebackend.ExecutionResult{}, err
-	}
-
-	result, err := h.backend.Execute(ctx, planned)
-	if err != nil {
-		return computebackend.ExecutionResult{}, err
-	}
-	if len(result.OutputBytes) == 0 {
-		return computebackend.ExecutionResult{}, errors.New("execute backend returned empty output")
-	}
-	return result, nil
 }
 
 func (h *Handler) sendResult(
@@ -1384,6 +1373,7 @@ func (h *Handler) sendResult(
 	)
 }
 
+//nolint:gocognit,funlen,nestif // Stream-sending needs linear error handling for clarity.
 func (h *Handler) sendResultStreaming(
 	ctx context.Context,
 	peerPubKey string,
@@ -1442,10 +1432,7 @@ func (h *Handler) sendResultStreaming(
 	totalLen := uint64(0)
 	seq := uint32(0)
 
-	readBufSize := int(remoteMaxPayload)
-	if readBufSize < 1 {
-		readBufSize = 1
-	}
+	readBufSize := max(int(remoteMaxPayload), 1)
 	readBuf := make([]byte, readBufSize)
 
 	var pending []byte
@@ -1496,10 +1483,13 @@ func (h *Handler) sendResultStreaming(
 			)
 		}
 
+		if chunkLen < 0 {
+			return totalLen, false, errors.New("negative stream chunk length")
+		}
 		nextTotalLen := totalLen + uint64(chunkLen)
 		if nextTotalLen > maxStreamBytes || inputLen+nextTotalLen > maxJobBytes {
 			msg := "result exceeds remote stream limits"
-			ok := h.sendTerminalResultStatus(
+			statusOK := h.sendTerminalResultStatus(
 				ctx,
 				peerPubKey,
 				env,
@@ -1507,7 +1497,7 @@ func (h *Handler) sendResultStreaming(
 				&msg,
 				remoteMaxPayload,
 			)
-			return totalLen, ok, nil
+			return totalLen, statusOK, nil
 		}
 
 		if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamChunk, chunkPayload); sendErr != nil {
@@ -1520,11 +1510,11 @@ func (h *Handler) sendResultStreaming(
 			return totalLen, false, nil
 		}
 
-		if _, err := hash.Write(pending[:chunkLen]); err != nil {
+		if _, writeErr := hash.Write(pending[:chunkLen]); writeErr != nil {
 			return totalLen, false, fmt.Errorf(
 				"%w: sha256 write: %s",
 				computebackend.ErrBackendUnavailable,
-				err.Error(),
+				writeErr.Error(),
 			)
 		}
 		totalLen = nextTotalLen
@@ -2207,6 +2197,7 @@ func validateInputStreamBegin(begin lcpwire.StreamBegin) (uint64, lcp.Hash32, *V
 	return totalLen, *begin.SHA256, nil
 }
 
+//nolint:gocognit // Validation intentionally mirrors wire rules and error codes.
 func validateInputStream(
 	req lcpwire.QuoteRequest,
 	input jobstore.InputStreamState,
@@ -2446,6 +2437,13 @@ func (h *Handler) logJobExecutionFailed(
 		"job_id", meta.jobID,
 		"err", safeErrMessage(err),
 	)
+}
+
+func clampUint64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
 }
 
 func (h *Handler) logJobCompleted(

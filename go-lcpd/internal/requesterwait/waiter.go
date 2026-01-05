@@ -98,8 +98,9 @@ type Waiter struct {
 }
 
 const (
-	defaultMaxStreamBytes = uint64(4_194_304)
-	defaultMaxJobBytes    = uint64(8_388_608)
+	defaultMaxStreamBytes   = uint64(4_194_304)
+	defaultMaxJobBytes      = uint64(8_388_608)
+	resultStreamEventBuffer = 16
 )
 
 type streamState struct {
@@ -197,7 +198,7 @@ func (w *Waiter) SubscribeResultStream(
 	}
 
 	subCtx, cancel := context.WithCancel(ctx)
-	ch := make(chan ResultStreamEvent, 16)
+	ch := make(chan ResultStreamEvent, resultStreamEventBuffer)
 
 	k := key{peerID: peerID, jobID: jobID}
 

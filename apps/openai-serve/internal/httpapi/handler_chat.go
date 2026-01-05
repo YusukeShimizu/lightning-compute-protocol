@@ -35,14 +35,10 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	streaming := req.Stream != nil && *req.Stream
 
-	prompt, ok := s.buildPrompt(c, req.Messages)
-	if !ok {
-		return
-	}
-	promptBytes := len(prompt)
-	promptTokens := openai.ApproxTokensFromBytes(promptBytes)
+	requestBytes := len(reqBytes)
+	requestTokens := openai.ApproxTokensFromBytes(requestBytes)
+	streaming := req.Stream != nil && *req.Stream
 
 	model := strings.TrimSpace(req.Model)
 	peerID, ok := s.resolvePeerForTaskKindAndModel(
@@ -120,15 +116,16 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 			return
 		}
 
-		s.logChatCompletionStream(
+		s.logStreamResult(
 			c,
+			"chat completion (stream)",
 			started,
 			model,
 			peerID,
 			jobID,
 			quote,
-			promptBytes,
-			promptTokens,
+			requestBytes,
+			requestTokens,
 			quoteLatency,
 			execLatency,
 			streamed.bytesWritten,
@@ -143,20 +140,21 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 	execLatency := time.Since(execStart)
 
-	result, ok := validateChatCompletionResult(c, execResp)
+	result, ok := validateResult(c, execResp)
 	if !ok {
 		return
 	}
 
-	if !s.logAndWriteChatCompletionResult(
+	if !s.logAndWriteResult(
 		c,
+		"chat completion",
 		started,
 		model,
 		peerID,
 		jobID,
 		quote,
-		promptBytes,
-		promptTokens,
+		requestBytes,
+		requestTokens,
 		quoteLatency,
 		execLatency,
 		result,
@@ -165,15 +163,16 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 }
 
-func (s *Server) logChatCompletionStream(
+func (s *Server) logStreamResult(
 	c *gin.Context,
+	operation string,
 	started time.Time,
 	model string,
 	peerID string,
 	jobID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
-	promptBytes int,
-	promptTokens int,
+	requestBytes int,
+	requestTokens int,
 	quoteLatency time.Duration,
 	execLatency time.Duration,
 	streamedBytes int,
@@ -184,22 +183,22 @@ func (s *Server) logChatCompletionStream(
 	totalLatency := time.Since(started)
 
 	streamedTokens := openai.ApproxTokensFromBytes(streamedBytes)
-	totalTokens := promptTokens + streamedTokens
+	totalTokens := requestTokens + streamedTokens
 
 	jobIDHex := hex.EncodeToString(jobID)
 	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
 
 	s.log.InfoContext(
 		ctx,
-		"chat completion (stream)",
+		operation,
 		"model", model,
 		"peer_id", peerID,
 		"job_id", jobIDHex,
 		"price_msat", price,
 		"terms_hash", termsHashHex,
-		"prompt_bytes", promptBytes,
+		"request_bytes", requestBytes,
 		"streamed_bytes", streamedBytes,
-		"prompt_tokens_approx", promptTokens,
+		"request_tokens_approx", requestTokens,
 		"streamed_tokens_approx", streamedTokens,
 		"total_tokens_approx", totalTokens,
 		"quote_ms", quoteLatency.Milliseconds(),
@@ -209,6 +208,17 @@ func (s *Server) logChatCompletionStream(
 }
 
 func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
+	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
+	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
+		writeOpenAIError(
+			c,
+			http.StatusUnsupportedMediaType,
+			"invalid_request_error",
+			fmt.Sprintf("unsupported Content-Encoding: %q (only %q is supported)", enc, contentEncodingIdentity),
+		)
+		return nil, openai.ChatCompletionsRequest{}, false
+	}
+
 	body, readErr := readRequestBodyBytes(c)
 	if readErr != nil {
 		if isRequestBodyTooLarge(readErr) {
@@ -247,28 +257,6 @@ func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletion
 	}
 
 	return body, parsed, true
-}
-
-func (s *Server) buildPrompt(c *gin.Context, messages []openai.ChatMessage) (string, bool) {
-	prompt, err := openai.BuildPrompt(messages)
-	if err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return "", false
-	}
-	if s.cfg.MaxPromptBytes > 0 && len(prompt) > s.cfg.MaxPromptBytes {
-		writeOpenAIError(
-			c,
-			http.StatusBadRequest,
-			"invalid_request_error",
-			fmt.Sprintf(
-				"prompt exceeds max bytes: prompt_bytes=%d max_prompt_bytes=%d",
-				len(prompt),
-				s.cfg.MaxPromptBytes,
-			),
-		)
-		return "", false
-	}
-	return prompt, true
 }
 
 func (s *Server) resolvePeerForTaskKindAndModel(
@@ -346,7 +334,7 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 	return execResp, true
 }
 
-func validateChatCompletionResult(
+func validateResult(
 	c *gin.Context,
 	execResp *lcpdv1.AcceptAndExecuteResponse,
 ) (*lcpdv1.Result, bool) {
@@ -366,15 +354,16 @@ func validateChatCompletionResult(
 	return result, true
 }
 
-func (s *Server) logAndWriteChatCompletionResult(
+func (s *Server) logAndWriteResult(
 	c *gin.Context,
+	operation string,
 	started time.Time,
 	model string,
 	peerID string,
 	jobID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
-	promptBytes int,
-	promptTokens int,
+	requestBytes int,
+	requestTokens int,
 	quoteLatency time.Duration,
 	execLatency time.Duration,
 	result *lcpdv1.Result,
@@ -387,22 +376,22 @@ func (s *Server) logAndWriteChatCompletionResult(
 	resultBytes := result.GetResult()
 	completionBytes := len(resultBytes)
 	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
-	totalTokens := promptTokens + completionTokens
+	totalTokens := requestTokens + completionTokens
 
 	jobIDHex := hex.EncodeToString(jobID)
 	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
 
 	s.log.InfoContext(
 		ctx,
-		"chat completion",
+		operation,
 		"model", model,
 		"peer_id", peerID,
 		"job_id", jobIDHex,
 		"price_msat", price,
 		"terms_hash", termsHashHex,
-		"prompt_bytes", promptBytes,
+		"request_bytes", requestBytes,
 		"completion_bytes", completionBytes,
-		"prompt_tokens_approx", promptTokens,
+		"request_tokens_approx", requestTokens,
 		"completion_tokens_approx", completionTokens,
 		"total_tokens_approx", totalTokens,
 		"quote_ms", quoteLatency.Milliseconds(),

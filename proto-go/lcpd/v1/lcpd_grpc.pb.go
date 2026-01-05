@@ -127,7 +127,7 @@ type LCPDServiceClient interface {
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
 	// responses may have already delivered partial bytes before an error is
 	// detected (for example, checksum validation failure at stream end).
-	AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error)
+	AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error)
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -197,13 +197,13 @@ func (c *lCPDServiceClient) AcceptAndExecute(ctx context.Context, in *AcceptAndE
 	return out, nil
 }
 
-func (c *lCPDServiceClient) AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error) {
+func (c *lCPDServiceClient) AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &LCPDService_ServiceDesc.Streams[0], LCPDService_AcceptAndExecuteStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[AcceptAndExecuteRequest, AcceptAndExecuteStreamResponse]{ClientStream: stream}
+	x := &grpc.GenericClientStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ type LCPDServiceServer interface {
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
 	// responses may have already delivered partial bytes before an error is
 	// detected (for example, checksum validation failure at stream end).
-	AcceptAndExecuteStream(*AcceptAndExecuteRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error
+	AcceptAndExecuteStream(*AcceptAndExecuteStreamRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -354,7 +354,7 @@ func (UnimplementedLCPDServiceServer) RequestQuote(context.Context, *RequestQuot
 func (UnimplementedLCPDServiceServer) AcceptAndExecute(context.Context, *AcceptAndExecuteRequest) (*AcceptAndExecuteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptAndExecute not implemented")
 }
-func (UnimplementedLCPDServiceServer) AcceptAndExecuteStream(*AcceptAndExecuteRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error {
+func (UnimplementedLCPDServiceServer) AcceptAndExecuteStream(*AcceptAndExecuteStreamRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method AcceptAndExecuteStream not implemented")
 }
 func (UnimplementedLCPDServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
@@ -454,11 +454,11 @@ func _LCPDService_AcceptAndExecute_Handler(srv interface{}, ctx context.Context,
 }
 
 func _LCPDService_AcceptAndExecuteStream_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(AcceptAndExecuteRequest)
+	m := new(AcceptAndExecuteStreamRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(LCPDServiceServer).AcceptAndExecuteStream(m, &grpc.GenericServerStream[AcceptAndExecuteRequest, AcceptAndExecuteStreamResponse]{ServerStream: stream})
+	return srv.(LCPDServiceServer).AcceptAndExecuteStream(m, &grpc.GenericServerStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.

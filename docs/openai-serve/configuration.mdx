@@ -21,7 +21,6 @@ You can use `apps/openai-serve/.envrc.sample` (direnv) for local development.
 | `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | If >0, reject quotes exceeding this |
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
-| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
 | `OPENAI_SERVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## Logging (privacy)
@@ -55,7 +54,6 @@ Model validation is designed to prevent accidental misrouting or unexpected char
 ## Safety limits
 
 - `OPENAI_SERVE_MAX_PRICE_MSAT`: upper-bound quote prices (rejects quotes above this value)
-- `OPENAI_SERVE_MAX_PROMPT_BYTES`: rejects prompts that exceed a size cap (helps stay below BOLT #1 custom message limits)
 - `OPENAI_SERVE_TIMEOUT_QUOTE` / `OPENAI_SERVE_TIMEOUT_EXECUTE`: bounds quote/execution duration
 
 ## Authentication

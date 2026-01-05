@@ -2,9 +2,10 @@
 
 `openai-serve` is a small OpenAI-compatible HTTP server that forwards requests to a running `lcpd-grpcd` (Requester) over gRPC.
 
-MVP support:
+Supported endpoints:
 
-- `POST /v1/chat/completions` (non-streaming)
+- `POST /v1/chat/completions` (JSON or `stream:true` SSE passthrough)
+- `POST /v1/responses` (JSON or `stream:true` SSE passthrough)
 - `GET /v1/models`
 - `GET /healthz`
 
@@ -35,16 +36,33 @@ export OPENAI_SERVE_API_KEYS="devkey1"
 openai-serve
 ```
 
-## Example (curl)
+## Examples (curl)
+
+Chat Completions (non-streaming):
 
 ```sh
 curl -sS http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer devkey1' \
-  -d '{
-    "model": "gpt-5.2",
-    "messages": [{"role":"user","content":"Say hello in Japanese."}]
-  }'
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+Chat Completions (streaming):
+
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+Responses (streaming):
+
+```sh
+curl -N http://127.0.0.1:8080/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer devkey1' \
+  -d '{"model":"gpt-5.2","stream":true,"input":"Say hello."}'
 ```
 
 ## Environment variables
@@ -62,14 +80,14 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | `OPENAI_SERVE_MAX_PRICE_MSAT` | `0` | If >0, reject quotes exceeding this |
 | `OPENAI_SERVE_TIMEOUT_QUOTE` | `5s` | gRPC quote timeout |
 | `OPENAI_SERVE_TIMEOUT_EXECUTE` | `120s` | gRPC execute timeout |
-| `OPENAI_SERVE_MAX_PROMPT_BYTES` | `60000` | Reject oversized prompts (0 disables) |
 
 ## How it works
 
 High-level data flow:
 
-1. Your client calls the OpenAI-compatible HTTP endpoint (`/v1/chat/completions`).
-2. `openai-serve` forwards the raw request body bytes as an LCP `openai.chat_completions.v1` task.
+1. Your client calls the OpenAI-compatible HTTP endpoint (`/v1/chat/completions` or `/v1/responses`).
+2. `openai-serve` forwards the raw request body bytes as an LCP `openai.chat_completions.v1` or
+   `openai.responses.v1` task.
 3. `openai-serve` forwards the task to a local `lcpd-grpcd` (Requester) over gRPC.
 4. The Requester talks to an LCP Provider over Lightning custom messages, requests a quote, pays, and receives the result.
 5. `openai-serve` returns the raw Provider response bytes (no re-encoding) and includes LCP metadata in response headers.
@@ -81,26 +99,23 @@ The Requester (`lcpd-grpcd`) is the component that owns your Lightning node conn
 
 ### Supported endpoints
 
-- `POST /v1/chat/completions` (non-streaming)
+- `POST /v1/chat/completions` (JSON or `stream:true` SSE passthrough)
+- `POST /v1/responses` (JSON or `stream:true` SSE passthrough)
 - `GET /v1/models`
 - `GET /healthz`
 
-### JSON passthrough
+### Passthrough behavior
 
-`openai-serve` is a passthrough gateway: it transports the exact request/response JSON bytes end-to-end.
-Unknown request fields are accepted and forwarded to Providers.
-
-`openai-serve` performs only minimal validation before routing:
-
-- Body must be a valid JSON object.
-- `model` must be present and non-empty.
-- `messages` must be present and non-empty.
-- `stream` must be omitted or `false` (streaming is not supported in this MVP).
-
-### Body/result constraints
-
+- Requests are forwarded byte-for-byte to Providers; unknown fields are accepted and forwarded.
+- `stream:true` passes through `text/event-stream` bytes as they arrive. Without `stream` (or `false`), the full JSON
+  response body is returned.
+- Minimal validation before routing:
+  - Body must be valid JSON.
+  - `model` must be present, non-empty, and must not have leading/trailing whitespace.
+  - `messages` (chat completions) or `input` (responses) must be present and non-empty.
+  - HTTP `Content-Encoding` must be empty or `identity` (compressed request bodies are rejected).
 - Request body is limited to 1 MiB.
-- Provider result bytes are returned as-is, and the HTTP `Content-Type` is taken from the LCP result metadata.
+- Provider result bytes are returned as-is. HTTP `Content-Type`/`Content-Encoding` are taken from the LCP result metadata.
 
 ## Routing and model selection
 
@@ -137,7 +152,7 @@ This service treats logs as sensitive.
 
 ## Response metadata headers
 
-`POST /v1/chat/completions` includes LCP metadata headers:
+`POST /v1/chat/completions` and `POST /v1/responses` include LCP metadata headers:
 
 - `X-Lcp-Peer-Id`: the chosen Provider peer id
 - `X-Lcp-Job-Id`: the job id (hex)
