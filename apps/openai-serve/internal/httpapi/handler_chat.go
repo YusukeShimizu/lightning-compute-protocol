@@ -89,7 +89,8 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 }
 
 func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
-	if enc := strings.TrimSpace(c.GetHeader("Content-Encoding")); enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
+	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
+	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
 		writeOpenAIError(
 			c,
 			http.StatusUnsupportedMediaType,

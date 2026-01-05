@@ -145,7 +145,7 @@ If YAML is not provided, a built-in price table is used (msat per 1M tokens):
 2. Receive and validate the input stream as OpenAI request JSON bytes (`request_json.model`, `request_json.messages`, `request_json.stream=false`).
 3. Determine `max_output_tokens` for quote-time estimation:
    - Start from `llm.max_output_tokens` (and optional per-model override).
-   - If the request sets an output-token cap (`max_completion_tokens` / `max_tokens` / `max_output_tokens`), it must be <= the Provider max, and that value is used for estimation.
+   - If the request sets an output-token cap (`max_completion_tokens` / `max_tokens` / `max_output_tokens`), it must be `<=` the Provider max, and that value is used for estimation.
 4. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
 5. Compute price in msat via `QuotePrice(model, estimate, cached=0, price_table)` and apply optional `pricing.in_flight_surge`, then embed it into TermsHash / invoice binding.
 6. After payment settles, execute the passthrough request in the backend, stream the result (`lcp_stream_*`), and finalize with `lcp_result`.
