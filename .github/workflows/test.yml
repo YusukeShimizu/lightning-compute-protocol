@@ -5,12 +5,16 @@ on:
     branches:
       - main
     paths:
+      - flake.nix
+      - flake.lock
       - go-lcpd/**
       - proto/**
       - proto-go/**
       - .github/workflows/test.yml
   pull_request:
     paths:
+      - flake.nix
+      - flake.lock
       - go-lcpd/**
       - proto/**
       - proto-go/**
@@ -39,4 +43,4 @@ jobs:
           use-flakehub: false
 
       - name: Lint and test
-        run: nix develop ./go-lcpd -c make -C go-lcpd lint test
+        run: nix develop . -c make -C go-lcpd lint test
