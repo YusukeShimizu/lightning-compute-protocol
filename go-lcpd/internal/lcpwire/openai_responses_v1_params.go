@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	openAIChatCompletionsV1ParamsTLVTypeModel = uint64(1)
+	openAIResponsesV1ParamsTLVTypeModel = uint64(1)
 )
 
-func EncodeOpenAIChatCompletionsV1Params(p OpenAIChatCompletionsV1Params) ([]byte, error) {
+func EncodeOpenAIResponsesV1Params(p OpenAIResponsesV1Params) ([]byte, error) {
 	if p.Model == "" {
 		return nil, errors.New("model is required")
 	}
@@ -21,34 +21,34 @@ func EncodeOpenAIChatCompletionsV1Params(p OpenAIChatCompletionsV1Params) ([]byt
 
 	modelBytes := []byte(p.Model)
 	records := []tlv.Record{
-		tlv.MakePrimitiveRecord(tlv.Type(openAIChatCompletionsV1ParamsTLVTypeModel), &modelBytes),
+		tlv.MakePrimitiveRecord(tlv.Type(openAIResponsesV1ParamsTLVTypeModel), &modelBytes),
 	}
 
 	return encodeTLVStream(records)
 }
 
-func DecodeOpenAIChatCompletionsV1Params(payload []byte) (OpenAIChatCompletionsV1Params, error) {
+func DecodeOpenAIResponsesV1Params(payload []byte) (OpenAIResponsesV1Params, error) {
 	m, err := decodeTLVMap(payload)
 	if err != nil {
-		return OpenAIChatCompletionsV1Params{}, err
+		return OpenAIResponsesV1Params{}, err
 	}
 
-	modelBytes, err := requireTLV(m, openAIChatCompletionsV1ParamsTLVTypeModel)
+	modelBytes, err := requireTLV(m, openAIResponsesV1ParamsTLVTypeModel)
 	if err != nil {
-		return OpenAIChatCompletionsV1Params{}, err
+		return OpenAIResponsesV1Params{}, err
 	}
 	model, err := readUTF8String(modelBytes, "model")
 	if err != nil {
-		return OpenAIChatCompletionsV1Params{}, err
+		return OpenAIResponsesV1Params{}, err
 	}
 	if model == "" {
-		return OpenAIChatCompletionsV1Params{}, errors.New("model is required")
+		return OpenAIResponsesV1Params{}, errors.New("model is required")
 	}
 
 	unknown := make(map[uint64][]byte)
 	for typ, val := range m {
 		switch typ {
-		case openAIChatCompletionsV1ParamsTLVTypeModel:
+		case openAIResponsesV1ParamsTLVTypeModel:
 			continue
 		default:
 			unknown[typ] = cloneBytes(val)
@@ -58,7 +58,7 @@ func DecodeOpenAIChatCompletionsV1Params(payload []byte) (OpenAIChatCompletionsV
 		unknown = nil
 	}
 
-	return OpenAIChatCompletionsV1Params{
+	return OpenAIResponsesV1Params{
 		Model:   model,
 		Unknown: unknown,
 	}, nil

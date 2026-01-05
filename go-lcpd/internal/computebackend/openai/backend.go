@@ -63,51 +63,16 @@ func (b *Backend) Execute(
 	ctx context.Context,
 	task computebackend.Task,
 ) (computebackend.ExecutionResult, error) {
-	if task.TaskKind != "openai.chat_completions.v1" {
-		return computebackend.ExecutionResult{}, fmt.Errorf(
-			"%w: %q",
-			computebackend.ErrUnsupportedTaskKind,
-			task.TaskKind,
-		)
-	}
-	return b.executeChatCompletionsPassthrough(ctx, task)
-}
-
-func (b *Backend) executeChatCompletionsPassthrough(
-	ctx context.Context,
-	task computebackend.Task,
-) (computebackend.ExecutionResult, error) {
-	if err := validateChatCompletionsPassthroughTask(task); err != nil {
-		return computebackend.ExecutionResult{}, err
-	}
-
-	req, err := b.newChatCompletionsRequest(ctx, task.InputBytes)
+	streaming, err := b.ExecuteStreaming(ctx, task)
 	if err != nil {
 		return computebackend.ExecutionResult{}, err
 	}
+	defer func() { _ = streaming.Output.Close() }()
 
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return computebackend.ExecutionResult{}, fmt.Errorf(
-			"%w: request failed: %s",
-			computebackend.ErrBackendUnavailable,
-			err.Error(),
-		)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := readLimitedBody(resp.Body, maxPassthroughResponseBytes)
+	body, err := readLimitedBody(streaming.Output, maxPassthroughResponseBytes)
 	if err != nil {
 		return computebackend.ExecutionResult{}, err
 	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return computebackend.ExecutionResult{}, errorFromPassthroughHTTPResponse(
-			resp.StatusCode,
-			body,
-		)
-	}
-
 	if len(body) == 0 {
 		return computebackend.ExecutionResult{}, fmt.Errorf(
 			"%w: empty response",
@@ -115,10 +80,61 @@ func (b *Backend) executeChatCompletionsPassthrough(
 		)
 	}
 
-	return computebackend.ExecutionResult{OutputBytes: body}, nil
+	return computebackend.ExecutionResult{OutputBytes: body, Usage: streaming.Usage}, nil
 }
 
-func validateChatCompletionsPassthroughTask(task computebackend.Task) error {
+func (b *Backend) ExecuteStreaming(
+	ctx context.Context,
+	task computebackend.Task,
+) (computebackend.StreamingExecutionResult, error) {
+	var urlPath string
+	switch task.TaskKind {
+	case "openai.chat_completions.v1":
+		urlPath = "/chat/completions"
+	case "openai.responses.v1":
+		urlPath = "/responses"
+	default:
+		return computebackend.StreamingExecutionResult{}, fmt.Errorf(
+			"%w: %q",
+			computebackend.ErrUnsupportedTaskKind,
+			task.TaskKind,
+		)
+	}
+
+	if err := validatePassthroughTask(task); err != nil {
+		return computebackend.StreamingExecutionResult{}, err
+	}
+
+	req, err := b.newPassthroughRequest(ctx, urlPath, task.InputBytes)
+	if err != nil {
+		return computebackend.StreamingExecutionResult{}, err
+	}
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return computebackend.StreamingExecutionResult{}, fmt.Errorf(
+			"%w: request failed: %s",
+			computebackend.ErrBackendUnavailable,
+			err.Error(),
+		)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, readErr := readLimitedBody(resp.Body, maxUpstreamErrorMessageBytes)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return computebackend.StreamingExecutionResult{}, readErr
+		}
+		return computebackend.StreamingExecutionResult{}, errorFromPassthroughHTTPResponse(
+			resp.StatusCode,
+			body,
+		)
+	}
+
+	return computebackend.StreamingExecutionResult{Output: resp.Body}, nil
+}
+
+func validatePassthroughTask(task computebackend.Task) error {
 	if strings.TrimSpace(task.Model) == "" {
 		return fmt.Errorf(
 			"%w: model is required",
@@ -140,11 +156,12 @@ func validateChatCompletionsPassthroughTask(task computebackend.Task) error {
 	return nil
 }
 
-func (b *Backend) newChatCompletionsRequest(
+func (b *Backend) newPassthroughRequest(
 	ctx context.Context,
+	path string,
 	body []byte,
 ) (*http.Request, error) {
-	url := b.baseURL + "/chat/completions"
+	url := b.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -156,7 +173,7 @@ func (b *Backend) newChatCompletionsRequest(
 	}
 	req.Header.Set("Authorization", "Bearer "+b.apiKey)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "*/*")
 	return req, nil
 }
 
@@ -224,3 +241,4 @@ func errorFromPassthroughHTTPResponse(statusCode int, body []byte) error {
 }
 
 var _ computebackend.Backend = (*Backend)(nil)
+var _ computebackend.StreamingBackend = (*Backend)(nil)

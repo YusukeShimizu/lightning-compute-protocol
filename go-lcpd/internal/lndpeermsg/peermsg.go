@@ -434,6 +434,14 @@ func (p *PeerMessaging) HandleCustomMessage(ctx context.Context, msg *lnrpc.Cust
 
 	switch decision.Action {
 	case lcpmsgrouter.RouteActionDispatchManifest:
+		// The remote may not have been ready to receive our startup/online
+		// `lcp_manifest` (for example, if their SubscribeCustomMessages stream was
+		// not yet established). To avoid ending up in a one-sided "LCP-ready"
+		// state, reply with our manifest once when we observe the peer's first
+		// manifest, even if we already marked our manifest as sent.
+		peerBefore, _ := p.peerDirectory.GetPeer(peerPubKey)
+		hadRemoteManifest := peerBefore.RemoteManifest != nil
+
 		manifest, decodeErr := lcpwire.DecodeManifest(payload)
 		if decodeErr != nil {
 			p.logger.Warnw(
@@ -444,6 +452,16 @@ func (p *PeerMessaging) HandleCustomMessage(ctx context.Context, msg *lnrpc.Cust
 			return
 		}
 		p.peerDirectory.MarkLCPReady(peerPubKey, manifest)
+		if !hadRemoteManifest {
+			if err := p.sendManifestAndMarkSent(ctx, peerPubKey, "reply_to_inbound_manifest"); err != nil {
+				p.logger.Warnw(
+					"send lcp_manifest reply failed",
+					"peer_pub_key", peerPubKey,
+					"err", err,
+				)
+			}
+			return
+		}
 		if err := p.sendManifestIfNotSent(ctx, peerPubKey, "reply_to_inbound_manifest"); err != nil {
 			p.logger.Warnw(
 				"send lcp_manifest reply failed",

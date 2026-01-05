@@ -1,6 +1,7 @@
 package lcptasks
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 const (
 	TaskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
+	TaskKindOpenAIResponsesV1       = "openai.responses.v1"
 )
 
 var (
@@ -46,8 +48,33 @@ var (
 	ErrOpenAIChatCompletionsV1ModelMismatch = errors.New(
 		"openai_chat_completions_v1.params.model must match request_json.model",
 	)
-	ErrOpenAIChatCompletionsV1StreamingUnsupported = errors.New(
-		"openai_chat_completions_v1.request_json.stream must be omitted or false",
+
+	ErrOpenAIResponsesV1TaskRequired = errors.New(
+		"openai_responses_v1 task is required",
+	)
+	ErrOpenAIResponsesV1RequestJSONRequired = errors.New(
+		"openai_responses_v1.request_json is required",
+	)
+	ErrOpenAIResponsesV1RequestJSONInvalid = errors.New(
+		"openai_responses_v1.request_json must be valid json",
+	)
+	ErrOpenAIResponsesV1ParamsRequired = errors.New(
+		"openai_responses_v1.params is required",
+	)
+	ErrOpenAIResponsesV1ModelRequired = errors.New(
+		"openai_responses_v1.params.model is required",
+	)
+	ErrOpenAIResponsesV1ModelInvalid = errors.New(
+		"openai_responses_v1.params.model must be valid UTF-8",
+	)
+	ErrOpenAIResponsesV1RequestModelRequired = errors.New(
+		"openai_responses_v1.request_json.model is required",
+	)
+	ErrOpenAIResponsesV1RequestInputRequired = errors.New(
+		"openai_responses_v1.request_json.input is required",
+	)
+	ErrOpenAIResponsesV1ModelMismatch = errors.New(
+		"openai_responses_v1.params.model must match request_json.model",
 	)
 )
 
@@ -80,6 +107,8 @@ func ValidateTask(task *lcpdv1.Task) error {
 		return ErrTaskSpecRequired
 	case *lcpdv1.Task_OpenaiChatCompletionsV1:
 		return validateOpenAIChatCompletionsV1(spec.OpenaiChatCompletionsV1)
+	case *lcpdv1.Task_OpenaiResponsesV1:
+		return validateOpenAIResponsesV1(spec.OpenaiResponsesV1)
 	default:
 		return ErrUnsupportedTask
 	}
@@ -107,6 +136,20 @@ func ToWireQuoteRequestTask(task *lcpdv1.Task) (QuoteRequestTask, error) {
 			TaskKind:    TaskKindOpenAIChatCompletionsV1,
 			ParamsBytes: paramsBytes,
 		}, nil
+	case *lcpdv1.Task_OpenaiResponsesV1:
+		openaiTask := spec.OpenaiResponsesV1
+		model := openaiTask.GetParams().GetModel()
+
+		openaiParams := lcpwire.OpenAIResponsesV1Params{Model: model}
+		paramsBytes, err := lcpwire.EncodeOpenAIResponsesV1Params(openaiParams)
+		if err != nil {
+			return QuoteRequestTask{}, fmt.Errorf("encode openai_responses_v1 params: %w", err)
+		}
+
+		return QuoteRequestTask{
+			TaskKind:    TaskKindOpenAIResponsesV1,
+			ParamsBytes: paramsBytes,
+		}, nil
 	default:
 		return QuoteRequestTask{}, ErrUnsupportedTask
 	}
@@ -122,6 +165,14 @@ func ToWireInputStream(task *lcpdv1.Task) (InputStream, error) {
 	switch spec := task.GetSpec().(type) {
 	case *lcpdv1.Task_OpenaiChatCompletionsV1:
 		openaiTask := spec.OpenaiChatCompletionsV1
+		reqBytes := append([]byte(nil), openaiTask.GetRequestJson()...)
+		return InputStream{
+			DecodedBytes:    reqBytes,
+			ContentType:     ContentTypeApplicationJSONUTF8,
+			ContentEncoding: ContentEncodingIdentity,
+		}, nil
+	case *lcpdv1.Task_OpenaiResponsesV1:
+		openaiTask := spec.OpenaiResponsesV1
 		reqBytes := append([]byte(nil), openaiTask.GetRequestJson()...)
 		return InputStream{
 			DecodedBytes:    reqBytes,
@@ -160,9 +211,6 @@ func validateOpenAIChatCompletionsV1(spec *lcpdv1.OpenAIChatCompletionsV1TaskSpe
 	if err := json.Unmarshal(spec.GetRequestJson(), &parsed); err != nil {
 		return fmt.Errorf("%w: %s", ErrOpenAIChatCompletionsV1RequestJSONInvalid, err.Error())
 	}
-	if parsed.Stream != nil && *parsed.Stream {
-		return ErrOpenAIChatCompletionsV1StreamingUnsupported
-	}
 	if parsed.Model == "" {
 		return ErrOpenAIChatCompletionsV1RequestModelRequired
 	}
@@ -171,6 +219,46 @@ func validateOpenAIChatCompletionsV1(spec *lcpdv1.OpenAIChatCompletionsV1TaskSpe
 	}
 	if parsed.Model != params.GetModel() {
 		return ErrOpenAIChatCompletionsV1ModelMismatch
+	}
+
+	return nil
+}
+
+func validateOpenAIResponsesV1(spec *lcpdv1.OpenAIResponsesV1TaskSpec) error {
+	if spec == nil {
+		return ErrOpenAIResponsesV1TaskRequired
+	}
+	if len(spec.GetRequestJson()) == 0 {
+		return ErrOpenAIResponsesV1RequestJSONRequired
+	}
+
+	params := spec.GetParams()
+	if params == nil {
+		return ErrOpenAIResponsesV1ParamsRequired
+	}
+	if params.GetModel() == "" {
+		return ErrOpenAIResponsesV1ModelRequired
+	}
+	if !utf8.ValidString(params.GetModel()) {
+		return ErrOpenAIResponsesV1ModelInvalid
+	}
+
+	var parsed struct {
+		Model  string          `json:"model"`
+		Input  json.RawMessage `json:"input"`
+		Stream *bool           `json:"stream,omitempty"`
+	}
+	if err := json.Unmarshal(spec.GetRequestJson(), &parsed); err != nil {
+		return fmt.Errorf("%w: %s", ErrOpenAIResponsesV1RequestJSONInvalid, err.Error())
+	}
+	if parsed.Model == "" {
+		return ErrOpenAIResponsesV1RequestModelRequired
+	}
+	if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+		return ErrOpenAIResponsesV1RequestInputRequired
+	}
+	if parsed.Model != params.GetModel() {
+		return ErrOpenAIResponsesV1ModelMismatch
 	}
 
 	return nil

@@ -41,6 +41,25 @@ type Process struct {
 	stderr bytes.Buffer
 }
 
+// TeeEnabled returns true when itest processes should stream their output via
+// the Go test logger.
+//
+// Large processes (like lcpd-grpcd) can emit substantial logs, and teeing them
+// can significantly slow down integration tests. Keep the default off, but
+// allow enabling for debugging via `LCP_ITEST_TEE=1`.
+func TeeEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("LCP_ITEST_TEE"))
+	if v == "" {
+		return false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // Start launches the process and waits for ReadyText if provided.
 func Start(ctx context.Context, t *testing.T, cfg Config) *Process {
 	t.Helper()

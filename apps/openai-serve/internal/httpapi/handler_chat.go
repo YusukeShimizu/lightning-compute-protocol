@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,9 +18,14 @@ import (
 )
 
 const (
-	cancelJobTimeout        = 2 * time.Second
-	contentEncodingIdentity = "identity"
+	cancelJobTimeout = 2 * time.Second
+
+	cancelReasonRequestCanceled        = "request canceled"
+	providerReturnedNoResultMessage    = "provider returned no result"
+	providerReturnedNonOKStatusMessage = "provider returned non-ok status"
 )
+
+type buildTaskFunc func(c *gin.Context, model string, reqBytes []byte) (*lcpdv1.Task, bool)
 
 func (s *Server) handleChatCompletions(c *gin.Context) {
 	if c.Request.Method != http.MethodPost {
@@ -36,16 +40,39 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	streaming := req.Stream != nil && *req.Stream
+	model := strings.TrimSpace(req.Model)
+	s.handleOpenAIPassthrough(
+		c,
+		started,
+		lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
+		model,
+		reqBytes,
+		streaming,
+		s.buildLCPOpenAIChatCompletionsV1Task,
+		"chat completion",
+	)
+}
+
+func (s *Server) handleOpenAIPassthrough(
+	c *gin.Context,
+	started time.Time,
+	taskKind lcpdv1.LCPTaskKind,
+	model string,
+	reqBytes []byte,
+	streaming bool,
+	buildTask buildTaskFunc,
+	operation string,
+) {
 	requestBytes := len(reqBytes)
 	requestTokens := openai.ApproxTokensFromBytes(requestBytes)
 
-	model := strings.TrimSpace(req.Model)
-	peerID, ok := s.resolvePeerForModel(c, model)
+	peerID, ok := s.resolvePeerForTaskKindAndModel(c, taskKind, model)
 	if !ok {
 		return
 	}
 
-	task, ok := s.buildLCPOpenAIChatCompletionsV1Task(c, model, reqBytes)
+	task, ok := buildTask(c, model, reqBytes)
 	if !ok {
 		return
 	}
@@ -59,6 +86,103 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 
 	jobID := copyBytes(quote.GetTerms().GetJobId())
 
+	if streaming {
+		s.handleOpenAIStreaming(
+			c,
+			started,
+			operation,
+			model,
+			peerID,
+			jobID,
+			quote,
+			requestBytes,
+			requestTokens,
+			quoteLatency,
+		)
+		return
+	}
+
+	s.handleOpenAINonStreaming(
+		c,
+		started,
+		operation,
+		model,
+		peerID,
+		jobID,
+		quote,
+		requestBytes,
+		requestTokens,
+		quoteLatency,
+	)
+}
+
+func (s *Server) handleOpenAIStreaming(
+	c *gin.Context,
+	started time.Time,
+	operation string,
+	model string,
+	peerID string,
+	jobID []byte,
+	quote *lcpdv1.RequestQuoteResponse,
+	requestBytes int,
+	requestTokens int,
+	quoteLatency time.Duration,
+) {
+	execStart := time.Now()
+	grpcStream, cancel, err := s.acceptAndExecuteStream(c, peerID, jobID)
+	if err != nil {
+		cancel()
+		s.cancelJobIfRequestCanceled(c, peerID, jobID, err)
+		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
+		return
+	}
+	defer cancel()
+
+	writeLCPHeaders(c, peerID, jobID, quote)
+
+	streamed, streamErr := s.writeLCPStreamToHTTP(c, grpcStream)
+	execLatency := time.Since(execStart)
+
+	if streamErr != nil {
+		s.cancelJobIfRequestCanceled(c, peerID, jobID, streamErr)
+		if !streamed.wroteBody {
+			writeOpenAIError(c, httpStatusFromGRPC(streamErr), "server_error", grpcErrMessage(streamErr))
+		}
+		return
+	}
+
+	if _, ok := validateStreamedTerminalResult(c, streamed); !ok {
+		return
+	}
+
+	s.logStreamResult(
+		c,
+		operation+" (stream)",
+		started,
+		model,
+		peerID,
+		jobID,
+		quote,
+		requestBytes,
+		requestTokens,
+		quoteLatency,
+		execLatency,
+		streamed.bytesWritten,
+	)
+}
+
+func (s *Server) handleOpenAINonStreaming(
+	c *gin.Context,
+	started time.Time,
+	operation string,
+	model string,
+	peerID string,
+	jobID []byte,
+	quote *lcpdv1.RequestQuoteResponse,
+	requestBytes int,
+	requestTokens int,
+	quoteLatency time.Duration,
+) {
 	execStart := time.Now()
 	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, jobID)
 	if !ok {
@@ -66,13 +190,14 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	}
 	execLatency := time.Since(execStart)
 
-	result, ok := validateChatCompletionResult(c, execResp)
+	result, ok := validateResult(c, execResp)
 	if !ok {
 		return
 	}
 
-	if !s.logAndWriteChatCompletionResult(
+	s.logAndWriteResult(
 		c,
+		operation,
 		started,
 		model,
 		peerID,
@@ -83,69 +208,112 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 		quoteLatency,
 		execLatency,
 		result,
-	) {
-		return
+	)
+}
+
+func (s *Server) cancelJobIfRequestCanceled(c *gin.Context, peerID string, jobID []byte, err error) {
+	if shouldCancelAfterExecuteError(c, err) {
+		s.cancelJobAsync(peerID, jobID)
 	}
 }
 
-func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
-	enc := strings.TrimSpace(c.GetHeader("Content-Encoding"))
-	if enc != "" && !strings.EqualFold(enc, contentEncodingIdentity) {
-		writeOpenAIError(
-			c,
-			http.StatusUnsupportedMediaType,
-			"invalid_request_error",
-			fmt.Sprintf("unsupported Content-Encoding: %q (only %q is supported)", enc, contentEncodingIdentity),
-		)
-		return nil, openai.ChatCompletionsRequest{}, false
+func validateStreamedTerminalResult(c *gin.Context, streamed streamWriteResult) (*lcpdv1.Result, bool) {
+	if streamed.terminalResult == nil {
+		writeOpenAIErrorIfNoBody(c, streamed.wroteBody, http.StatusBadGateway, providerReturnedNoResultMessage)
+		return nil, false
 	}
-
-	body, readErr := readRequestBodyBytes(c)
-	if readErr != nil {
-		if isRequestBodyTooLarge(readErr) {
-			writeOpenAIError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", readErr.Error())
-			return nil, openai.ChatCompletionsRequest{}, false
+	if streamed.terminalResult.GetStatus() != lcpdv1.Result_STATUS_OK {
+		msg := strings.TrimSpace(streamed.terminalResult.GetMessage())
+		if msg == "" {
+			msg = providerReturnedNonOKStatusMessage
 		}
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", readErr.Error())
-		return nil, openai.ChatCompletionsRequest{}, false
+		writeOpenAIErrorIfNoBody(c, streamed.wroteBody, http.StatusBadGateway, msg)
+		return nil, false
 	}
+	return streamed.terminalResult, true
+}
 
+func writeOpenAIErrorIfNoBody(c *gin.Context, wroteBody bool, status int, message string) {
+	if wroteBody {
+		return
+	}
+	writeOpenAIError(c, status, "server_error", message)
+}
+
+func writeLCPHeaders(c *gin.Context, peerID string, jobID []byte, quote *lcpdv1.RequestQuoteResponse) {
+	price := quote.GetTerms().GetPriceMsat()
+	jobIDHex := hex.EncodeToString(jobID)
+	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+	c.Header("X-Lcp-Peer-Id", peerID)
+	c.Header("X-Lcp-Job-Id", jobIDHex)
+	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
+	c.Header("X-Lcp-Terms-Hash", termsHashHex)
+}
+
+func (s *Server) logStreamResult(
+	c *gin.Context,
+	operation string,
+	started time.Time,
+	model string,
+	peerID string,
+	jobID []byte,
+	quote *lcpdv1.RequestQuoteResponse,
+	requestBytes int,
+	requestTokens int,
+	quoteLatency time.Duration,
+	execLatency time.Duration,
+	streamedBytes int,
+) {
+	ctx := c.Request.Context()
+
+	price := quote.GetTerms().GetPriceMsat()
+	totalLatency := time.Since(started)
+
+	streamedTokens := openai.ApproxTokensFromBytes(streamedBytes)
+	totalTokens := requestTokens + streamedTokens
+
+	jobIDHex := hex.EncodeToString(jobID)
+	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+
+	s.log.InfoContext(
+		ctx,
+		operation,
+		"model", model,
+		"peer_id", peerID,
+		"job_id", jobIDHex,
+		"price_msat", price,
+		"terms_hash", termsHashHex,
+		"request_bytes", requestBytes,
+		"streamed_bytes", streamedBytes,
+		"request_tokens_approx", requestTokens,
+		"streamed_tokens_approx", streamedTokens,
+		"total_tokens_approx", totalTokens,
+		"quote_ms", quoteLatency.Milliseconds(),
+		"execute_ms", execLatency.Milliseconds(),
+		"total_ms", totalLatency.Milliseconds(),
+	)
+}
+
+func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletionsRequest, bool) {
 	var parsed openai.ChatCompletionsRequest
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		msg := strings.TrimPrefix(err.Error(), "json: ")
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", msg)
+	body, ok := decodeJSONRequest(c, &parsed)
+	if !ok {
 		return nil, openai.ChatCompletionsRequest{}, false
 	}
-
-	model := parsed.Model
-	trimmedModel := strings.TrimSpace(model)
-	if trimmedModel == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
-		return nil, openai.ChatCompletionsRequest{}, false
-	}
-	if trimmedModel != model {
-		writeOpenAIError(
-			c,
-			http.StatusBadRequest,
-			"invalid_request_error",
-			"model must not have leading/trailing whitespace",
-		)
+	if !validateModelField(c, parsed.Model) {
 		return nil, openai.ChatCompletionsRequest{}, false
 	}
 	if len(parsed.Messages) == 0 {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return nil, openai.ChatCompletionsRequest{}, false
 	}
-	if parsed.Stream != nil && *parsed.Stream {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "stream=true is not supported")
-		return nil, openai.ChatCompletionsRequest{}, false
-	}
 
 	return body, parsed, true
 }
 
-func (s *Server) resolvePeerForModel(
+func (s *Server) resolvePeerForTaskKindAndModel(
 	c *gin.Context,
+	taskKind lcpdv1.LCPTaskKind,
 	model string,
 ) (string, bool) {
 	peersResp, err := s.listPeers(c)
@@ -153,11 +321,11 @@ func (s *Server) resolvePeerForModel(
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return "", false
 	}
-	if modelErr := s.validateModel(model, peersResp); modelErr != nil {
+	if modelErr := s.validateModelForTaskKind(model, taskKind, peersResp); modelErr != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", modelErr.Error())
 		return "", false
 	}
-	peerID, err := s.resolvePeerID(model, peersResp)
+	peerID, err := s.resolvePeerIDForTaskKind(model, taskKind, peersResp)
 	if err != nil {
 		writeOpenAIError(c, http.StatusServiceUnavailable, "server_error", err.Error())
 		return "", false
@@ -210,7 +378,7 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 	execResp, err := s.acceptAndExecute(c, peerID, jobID)
 	if err != nil {
 		if shouldCancelAfterExecuteError(c, err) {
-			s.cancelJobAsync(peerID, jobID, "request canceled")
+			s.cancelJobAsync(peerID, jobID)
 		}
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return nil, false
@@ -218,19 +386,19 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 	return execResp, true
 }
 
-func validateChatCompletionResult(
+func validateResult(
 	c *gin.Context,
 	execResp *lcpdv1.AcceptAndExecuteResponse,
 ) (*lcpdv1.Result, bool) {
 	result := execResp.GetResult()
 	if result == nil {
-		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no result")
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", providerReturnedNoResultMessage)
 		return nil, false
 	}
 	if result.GetStatus() != lcpdv1.Result_STATUS_OK {
 		msg := strings.TrimSpace(result.GetMessage())
 		if msg == "" {
-			msg = "provider returned non-ok status"
+			msg = providerReturnedNonOKStatusMessage
 		}
 		writeOpenAIError(c, http.StatusBadGateway, "server_error", msg)
 		return nil, false
@@ -238,8 +406,9 @@ func validateChatCompletionResult(
 	return result, true
 }
 
-func (s *Server) logAndWriteChatCompletionResult(
+func (s *Server) logAndWriteResult(
 	c *gin.Context,
+	operation string,
 	started time.Time,
 	model string,
 	peerID string,
@@ -266,7 +435,7 @@ func (s *Server) logAndWriteChatCompletionResult(
 
 	s.log.InfoContext(
 		ctx,
-		"chat completion",
+		operation,
 		"model", model,
 		"peer_id", peerID,
 		"job_id", jobIDHex,
@@ -282,10 +451,7 @@ func (s *Server) logAndWriteChatCompletionResult(
 		"total_ms", totalLatency.Milliseconds(),
 	)
 
-	c.Header("X-Lcp-Peer-Id", peerID)
-	c.Header("X-Lcp-Job-Id", jobIDHex)
-	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
-	c.Header("X-Lcp-Terms-Hash", termsHashHex)
+	writeLCPHeaders(c, peerID, jobID, quote)
 
 	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
 		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))
@@ -329,7 +495,7 @@ func (s *Server) acceptAndExecute(
 	})
 }
 
-func (s *Server) cancelJobAsync(peerID string, jobID []byte, reason string) {
+func (s *Server) cancelJobAsync(peerID string, jobID []byte) {
 	jobIDCopy := copyBytes(jobID)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), cancelJobTimeout)
@@ -337,7 +503,7 @@ func (s *Server) cancelJobAsync(peerID string, jobID []byte, reason string) {
 		_, err := s.lcpd.CancelJob(ctx, &lcpdv1.CancelJobRequest{
 			PeerId: peerID,
 			JobId:  jobIDCopy,
-			Reason: reason,
+			Reason: cancelReasonRequestCanceled,
 		})
 		if err != nil {
 			s.log.ErrorContext(ctx, "cancel job failed", "err", err, "peer_id", peerID)

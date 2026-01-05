@@ -13,33 +13,39 @@ func TestApproxUsageEstimator_Estimate_Deterministic(t *testing.T) {
 
 	estimator := llm.NewApproxUsageEstimator()
 
-	got, err := estimator.Estimate(
-		computebackend.Task{
-			TaskKind:   "openai.chat_completions.v1",
-			Model:      "test-model",
-			InputBytes: []byte("hello"), // len=5 -> ceil(5/4)=2
-		},
-		llm.ExecutionPolicy{MaxOutputTokens: 10},
-	)
-	if err != nil {
-		t.Fatalf("Estimate: %v", err)
-	}
+	for _, taskKind := range []string{"openai.chat_completions.v1", "openai.responses.v1"} {
+		t.Run(taskKind, func(t *testing.T) {
+			t.Parallel()
 
-	want := llm.Estimation{
-		Usage: llm.UsageEstimate{
-			InputTokens:     2,
-			MaxOutputTokens: 10,
-			TotalTokens:     12,
-		},
-		Resources: []llm.ResourceEstimate{
-			{Name: "tokens.input_estimate", Amount: 2},
-			{Name: "tokens.output_max", Amount: 10},
-			{Name: "tokens.total_estimate", Amount: 12},
-		},
-		EstimatorID: "approx.v1",
-	}
+			got, err := estimator.Estimate(
+				computebackend.Task{
+					TaskKind:   taskKind,
+					Model:      "test-model",
+					InputBytes: []byte("hello"), // len=5 -> ceil(5/4)=2
+				},
+				llm.ExecutionPolicy{MaxOutputTokens: 10},
+			)
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
 
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("estimation mismatch (-want +got):\n%s", diff)
+			want := llm.Estimation{
+				Usage: llm.UsageEstimate{
+					InputTokens:     2,
+					MaxOutputTokens: 10,
+					TotalTokens:     12,
+				},
+				Resources: []llm.ResourceEstimate{
+					{Name: "tokens.input_estimate", Amount: 2},
+					{Name: "tokens.output_max", Amount: 10},
+					{Name: "tokens.total_estimate", Amount: 12},
+				},
+				EstimatorID: "approx.v1",
+			}
+
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("estimation mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +39,7 @@ const (
 
 	contentTypeTextPlain       = "text/plain; charset=utf-8"
 	contentTypeApplicationJSON = "application/json; charset=utf-8"
+	contentTypeTextEventStream = "text/event-stream; charset=utf-8"
 	contentEncodingIdentity    = "identity"
 )
 
@@ -784,40 +787,54 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 	peerPubKey string,
 	req lcpwire.QuoteRequest,
 ) bool {
-	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
+	switch req.TaskKind {
+	case taskKindOpenAIChatCompletionsV1, taskKindOpenAIResponsesV1:
+	default:
 		return false
 	}
 	if len(h.cfg.Models) == 0 {
 		return false
 	}
 	if req.ParamsBytes == nil {
-		h.sendError(
-			ctx,
-			peerPubKey,
-			req.Envelope,
-			lcpwire.ErrorCodeUnsupportedParams,
-			"openai.chat_completions.v1 params are required",
-		)
+		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedParams, "params are required")
 		return true
 	}
 
-	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
-	if err != nil {
-		h.sendError(
-			ctx,
-			peerPubKey,
-			req.Envelope,
-			lcpwire.ErrorCodeUnsupportedParams,
-			"openai.chat_completions.v1 params must be a valid TLV stream",
-		)
-		return true
+	var model string
+	switch req.TaskKind {
+	case taskKindOpenAIChatCompletionsV1:
+		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+		if err != nil {
+			h.sendError(
+				ctx,
+				peerPubKey,
+				req.Envelope,
+				lcpwire.ErrorCodeUnsupportedParams,
+				"openai.chat_completions.v1 params must be a valid TLV stream",
+			)
+			return true
+		}
+		model = params.Model
+	case taskKindOpenAIResponsesV1:
+		params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
+		if err != nil {
+			h.sendError(
+				ctx,
+				peerPubKey,
+				req.Envelope,
+				lcpwire.ErrorCodeUnsupportedParams,
+				"openai.responses.v1 params must be a valid TLV stream",
+			)
+			return true
+		}
+		model = params.Model
 	}
 
-	if _, ok := h.cfg.Models[params.Model]; ok {
+	if _, ok := h.cfg.Models[model]; ok {
 		return false
 	}
 
-	msg := fmt.Sprintf("unsupported model: %q", params.Model)
+	msg := fmt.Sprintf("unsupported model: %q", model)
 	supported := make([]string, 0, len(h.cfg.Models))
 	for model := range h.cfg.Models {
 		supported = append(supported, model)
@@ -1091,6 +1108,7 @@ func (h *Handler) startJobRunner(
 	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
 }
 
+//nolint:gocognit,funlen,nestif // Execution path handles many validation and error branches.
 func (h *Handler) runJob(
 	ctx context.Context,
 	key jobstore.Key,
@@ -1145,7 +1163,7 @@ func (h *Handler) runJob(
 	h.updateState(key, jobstore.StateExecuting)
 
 	execStart := time.Now()
-	result, err := h.execute(ctx, req, input)
+	planned, _, plannedModel, wantStreaming, err := h.planTask(req, input.Buf)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -1157,38 +1175,124 @@ func (h *Handler) runJob(
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
+	meta.model = plannedModel
+
+	if wantStreaming {
+		if streamingBackend, ok := h.backend.(computebackend.StreamingBackend); ok {
+			result, streamExecErr := streamingBackend.ExecuteStreaming(ctx, planned)
+			if streamExecErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				code := computeErrorCode(streamExecErr)
+				execDuration := time.Since(execStart)
+				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamExecErr)
+				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, streamExecErr.Error())
+				h.updateState(key, jobstore.StateFailed)
+				return
+			}
+			if result.Output == nil {
+				if ctx.Err() != nil {
+					return
+				}
+				streamNilErr := fmt.Errorf("%w: streaming output is nil", computebackend.ErrBackendUnavailable)
+				code := computeErrorCode(streamNilErr)
+				execDuration := time.Since(execStart)
+				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamNilErr)
+				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, streamNilErr.Error())
+				h.updateState(key, jobstore.StateFailed)
+				return
+			}
+			defer func() { _ = result.Output.Close() }()
+
+			h.updateState(key, jobstore.StateStreamingResult)
+
+			inputLen := uint64(len(input.Buf))
+			outputLen, streamSendOK, streamErr := h.sendResultStreaming(
+				ctx,
+				key.PeerPubKey,
+				quoteResp.Envelope,
+				req.TaskKind,
+				inputLen,
+				result.Output,
+				remoteMaxPayload,
+			)
+			execDuration := time.Since(execStart)
+			totalDuration := time.Since(settleStart)
+			if streamErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				code := computeErrorCode(streamErr)
+				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamErr)
+				h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, streamErr.Error())
+				h.updateState(key, jobstore.StateFailed)
+				return
+			}
+			if !streamSendOK {
+				h.updateState(key, jobstore.StateFailed)
+				return
+			}
+
+			h.logJobCompleted(
+				meta,
+				settleDuration,
+				execDuration,
+				totalDuration,
+				clampUint64ToInt(outputLen),
+				result.Usage,
+			)
+			h.updateState(key, jobstore.StateDone)
+			return
+		}
+	}
+
+	result, err := h.backend.Execute(ctx, planned)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		code := computeErrorCode(err)
+		execDuration := time.Since(execStart)
+		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, err)
+		h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, err.Error())
+		h.updateState(key, jobstore.StateFailed)
+		return
+	}
+	if len(result.OutputBytes) == 0 {
+		if ctx.Err() != nil {
+			return
+		}
+		execErr := fmt.Errorf("%w: execute backend returned empty output", computebackend.ErrBackendUnavailable)
+		code := computeErrorCode(execErr)
+		execDuration := time.Since(execStart)
+		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, execErr)
+		h.sendError(ctx, key.PeerPubKey, quoteResp.Envelope, code, execErr.Error())
+		h.updateState(key, jobstore.StateFailed)
+		return
+	}
+
 	execDuration := time.Since(execStart)
 	outputBytes := len(result.OutputBytes)
 	totalDuration := time.Since(settleStart)
+	inputLen := uint64(len(input.Buf))
 
-	if ok := h.sendResult(ctx, key.PeerPubKey, quoteResp.Envelope, req.TaskKind, result.OutputBytes, remoteMaxPayload); !ok {
+	if ok := h.sendResult(
+		ctx,
+		key.PeerPubKey,
+		quoteResp.Envelope,
+		req.TaskKind,
+		wantStreaming,
+		inputLen,
+		result.OutputBytes,
+		remoteMaxPayload,
+	); !ok {
 		h.updateState(key, jobstore.StateFailed)
 		return
 	}
 
 	h.logJobCompleted(meta, settleDuration, execDuration, totalDuration, outputBytes, result.Usage)
-
 	h.updateState(key, jobstore.StateDone)
-}
-
-func (h *Handler) execute(
-	ctx context.Context,
-	req lcpwire.QuoteRequest,
-	input jobstore.InputStreamState,
-) (computebackend.ExecutionResult, error) {
-	planned, _, _, err := h.planTask(req, input.Buf)
-	if err != nil {
-		return computebackend.ExecutionResult{}, err
-	}
-
-	result, err := h.backend.Execute(ctx, planned)
-	if err != nil {
-		return computebackend.ExecutionResult{}, err
-	}
-	if len(result.OutputBytes) == 0 {
-		return computebackend.ExecutionResult{}, errors.New("execute backend returned empty output")
-	}
-	return result, nil
 }
 
 func (h *Handler) sendResult(
@@ -1196,6 +1300,8 @@ func (h *Handler) sendResult(
 	peerPubKey string,
 	env lcpwire.JobEnvelope,
 	taskKind string,
+	streaming bool,
+	inputLen uint64,
 	output []byte,
 	remoteMaxPayload uint32,
 ) bool {
@@ -1213,7 +1319,7 @@ func (h *Handler) sendResult(
 	}
 
 	totalLen := uint64(len(output))
-	if totalLen > remoteManifest.MaxStreamBytes || totalLen > remoteManifest.MaxJobBytes {
+	if totalLen > remoteManifest.MaxStreamBytes || inputLen+totalLen > remoteManifest.MaxJobBytes {
 		msg := "result exceeds remote stream limits"
 		return h.sendTerminalResultStatus(
 			ctx,
@@ -1235,7 +1341,7 @@ func (h *Handler) sendResult(
 
 	expiry := h.resultExpiry()
 
-	contentType := resultContentTypeForTaskKind(taskKind)
+	contentType := resultContentTypeForTaskKind(taskKind, streaming)
 	contentEncoding := contentEncodingIdentity
 
 	if !h.sendResultStream(
@@ -1265,6 +1371,190 @@ func (h *Handler) sendResult(
 		contentEncoding,
 		remoteMaxPayload,
 	)
+}
+
+//nolint:gocognit,funlen,nestif // Stream-sending needs linear error handling for clarity.
+func (h *Handler) sendResultStreaming(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	taskKind string,
+	inputLen uint64,
+	output io.Reader,
+	remoteMaxPayload uint32,
+) (uint64, bool, error) {
+	if h.messenger == nil {
+		return 0, false, nil
+	}
+
+	remoteManifest, remoteMaxPayload, ok := h.resolveRemoteManifestAndMaxPayload(
+		peerPubKey,
+		env.JobID,
+		remoteMaxPayload,
+	)
+	if !ok {
+		return 0, false, nil
+	}
+
+	maxStreamBytes := remoteManifest.MaxStreamBytes
+	if maxStreamBytes == 0 {
+		maxStreamBytes = defaultMaxStreamBytes
+	}
+	maxJobBytes := remoteManifest.MaxJobBytes
+	if maxJobBytes == 0 {
+		maxJobBytes = defaultMaxJobBytes
+	}
+
+	streamID, ok := h.newStreamID()
+	if !ok {
+		return 0, false, nil
+	}
+
+	expiry := h.resultExpiry()
+
+	contentType := resultContentTypeForTaskKind(taskKind, true)
+	contentEncoding := contentEncodingIdentity
+
+	if !h.sendResultStreamBeginUnknown(
+		ctx,
+		peerPubKey,
+		env,
+		expiry,
+		streamID,
+		contentType,
+		contentEncoding,
+		remoteMaxPayload,
+	) {
+		return 0, false, nil
+	}
+
+	hash := sha256.New()
+	totalLen := uint64(0)
+	seq := uint32(0)
+
+	readBufSize := max(int(remoteMaxPayload), 1)
+	readBuf := make([]byte, readBufSize)
+
+	var pending []byte
+
+	for {
+		if len(pending) == 0 {
+			n, readErr := output.Read(readBuf)
+			if n == 0 && readErr == nil {
+				return totalLen, false, fmt.Errorf(
+					"%w: stream read returned 0 bytes",
+					computebackend.ErrBackendUnavailable,
+				)
+			}
+			if n > 0 {
+				pending = append(pending[:0], readBuf[:n]...)
+			}
+
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) && len(pending) == 0 {
+					break
+				}
+				if !errors.Is(readErr, io.EOF) {
+					return totalLen, false, fmt.Errorf(
+						"%w: stream read: %s",
+						computebackend.ErrBackendUnavailable,
+						readErr.Error(),
+					)
+				}
+			}
+			if len(pending) == 0 {
+				continue
+			}
+		}
+
+		chunkPayload, chunkLen, err := encodeFittingResultStreamChunk(
+			env,
+			expiry,
+			streamID,
+			seq,
+			pending,
+			remoteMaxPayload,
+		)
+		if err != nil {
+			return totalLen, false, fmt.Errorf(
+				"%w: encode lcp_stream_chunk: %s",
+				computebackend.ErrBackendUnavailable,
+				err.Error(),
+			)
+		}
+
+		if chunkLen < 0 {
+			return totalLen, false, errors.New("negative stream chunk length")
+		}
+		nextTotalLen := totalLen + uint64(chunkLen)
+		if nextTotalLen > maxStreamBytes || inputLen+nextTotalLen > maxJobBytes {
+			msg := "result exceeds remote stream limits"
+			statusOK := h.sendTerminalResultStatus(
+				ctx,
+				peerPubKey,
+				env,
+				lcpwire.ResultStatusFailed,
+				&msg,
+				remoteMaxPayload,
+			)
+			return totalLen, statusOK, nil
+		}
+
+		if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamChunk, chunkPayload); sendErr != nil {
+			h.logger.Warnw(
+				"send lcp_stream_chunk failed",
+				"peer_pub_key", peerPubKey,
+				"seq", seq,
+				"err", sendErr,
+			)
+			return totalLen, false, nil
+		}
+
+		if _, writeErr := hash.Write(pending[:chunkLen]); writeErr != nil {
+			return totalLen, false, fmt.Errorf(
+				"%w: sha256 write: %s",
+				computebackend.ErrBackendUnavailable,
+				writeErr.Error(),
+			)
+		}
+		totalLen = nextTotalLen
+		pending = pending[chunkLen:]
+		seq++
+	}
+
+	if totalLen == 0 {
+		return 0, false, fmt.Errorf("%w: empty response", computebackend.ErrBackendUnavailable)
+	}
+
+	var resultHash lcp.Hash32
+	sum := hash.Sum(nil)
+	copy(resultHash[:], sum)
+
+	if !h.sendResultStreamEnd(
+		ctx,
+		peerPubKey,
+		env,
+		expiry,
+		streamID,
+		totalLen,
+		resultHash,
+		remoteMaxPayload,
+	) {
+		return totalLen, false, nil
+	}
+	ok = h.sendTerminalOKResult(
+		ctx,
+		peerPubKey,
+		env,
+		expiry,
+		streamID,
+		totalLen,
+		resultHash,
+		contentType,
+		contentEncoding,
+		remoteMaxPayload,
+	)
+	return totalLen, ok, nil
 }
 
 func (h *Handler) resolveRemoteManifestAndMaxPayload(
@@ -1369,6 +1659,57 @@ func (h *Handler) sendResultStreamBegin(
 		Kind:            lcpwire.StreamKindResult,
 		TotalLen:        &totalLen,
 		SHA256:          &resultHash,
+		ContentType:     contentType,
+		ContentEncoding: contentEncoding,
+	}
+	beginPayload, err := lcpwire.EncodeStreamBegin(begin)
+	if err != nil {
+		h.logger.Warnw(
+			"encode lcp_stream_begin failed",
+			"peer_pub_key", peerPubKey,
+			"err", err,
+		)
+		return false
+	}
+	if uint64(len(beginPayload)) > uint64(remoteMaxPayload) {
+		h.logger.Warnw(
+			"lcp_stream_begin exceeds remote max_payload_bytes",
+			"peer_pub_key", peerPubKey,
+			"payload_len", len(beginPayload),
+			"max_payload_bytes", remoteMaxPayload,
+		)
+		return false
+	}
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeStreamBegin, beginPayload); sendErr != nil {
+		h.logger.Warnw(
+			"send lcp_stream_begin failed",
+			"peer_pub_key", peerPubKey,
+			"err", sendErr,
+		)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) sendResultStreamBeginUnknown(
+	ctx context.Context,
+	peerPubKey string,
+	env lcpwire.JobEnvelope,
+	expiry uint64,
+	streamID lcp.Hash32,
+	contentType string,
+	contentEncoding string,
+	remoteMaxPayload uint32,
+) bool {
+	begin := lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: env.ProtocolVersion,
+			JobID:           env.JobID,
+			MsgID:           h.mustNewMsgID(),
+			Expiry:          expiry,
+		},
+		StreamID:        streamID,
+		Kind:            lcpwire.StreamKindResult,
 		ContentType:     contentType,
 		ContentEncoding: contentEncoding,
 	}
@@ -1794,10 +2135,25 @@ type openAIChatCompletionsRequest struct {
 	MaxOutputTokens     *uint32 `json:"max_output_tokens,omitempty"`
 }
 
+type openAIResponsesRequest struct {
+	Model string          `json:"model"`
+	Input json.RawMessage `json:"input"`
+
+	Stream *bool `json:"stream,omitempty"`
+}
+
 func parseOpenAIChatCompletionsRequest(body []byte) (openAIChatCompletionsRequest, error) {
 	var parsed openAIChatCompletionsRequest
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return openAIChatCompletionsRequest{}, err
+	}
+	return parsed, nil
+}
+
+func parseOpenAIResponsesRequest(body []byte) (openAIResponsesRequest, error) {
+	var parsed openAIResponsesRequest
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return openAIResponsesRequest{}, err
 	}
 	return parsed, nil
 }
@@ -1841,76 +2197,125 @@ func validateInputStreamBegin(begin lcpwire.StreamBegin) (uint64, lcp.Hash32, *V
 	return totalLen, *begin.SHA256, nil
 }
 
+//nolint:gocognit // Validation intentionally mirrors wire rules and error codes.
 func validateInputStream(
 	req lcpwire.QuoteRequest,
 	input jobstore.InputStreamState,
 ) *ValidationError {
-	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
+	switch req.TaskKind {
+	case taskKindOpenAIChatCompletionsV1:
+		if req.ParamsBytes == nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 params are required",
+			}
+		}
+
+		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+		if err != nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 params must be a valid TLV stream",
+			}
+		}
+
+		parsed, err := parseOpenAIChatCompletionsRequest(input.Buf)
+		if err != nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.chat_completions.v1 input must be valid json",
+			}
+		}
+		if parsed.Model == "" {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "request_json.model is required",
+			}
+		}
+		if len(parsed.Messages) == 0 {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "request_json.messages is required",
+			}
+		}
+		if parsed.Model != params.Model {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "params.model must match request_json.model",
+			}
+		}
+
+		return nil
+	case taskKindOpenAIResponsesV1:
+		if req.ParamsBytes == nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.responses.v1 params are required",
+			}
+		}
+
+		params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
+		if err != nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.responses.v1 params must be a valid TLV stream",
+			}
+		}
+
+		parsed, err := parseOpenAIResponsesRequest(input.Buf)
+		if err != nil {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "openai.responses.v1 input must be valid json",
+			}
+		}
+		if parsed.Model == "" {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "request_json.model is required",
+			}
+		}
+		if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "request_json.input is required",
+			}
+		}
+		if parsed.Model != params.Model {
+			return &ValidationError{
+				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Message: "params.model must match request_json.model",
+			}
+		}
+
+		return nil
+	default:
 		return nil
 	}
-
-	if req.ParamsBytes == nil {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "openai.chat_completions.v1 params are required",
-		}
-	}
-
-	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
-	if err != nil {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "openai.chat_completions.v1 params must be a valid TLV stream",
-		}
-	}
-
-	parsed, err := parseOpenAIChatCompletionsRequest(input.Buf)
-	if err != nil {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "openai.chat_completions.v1 input must be valid json",
-		}
-	}
-	if parsed.Stream != nil && *parsed.Stream {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "streaming is not supported",
-		}
-	}
-	if parsed.Model == "" {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "request_json.model is required",
-		}
-	}
-	if len(parsed.Messages) == 0 {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "request_json.messages is required",
-		}
-	}
-	if parsed.Model != params.Model {
-		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedParams,
-			Message: "params.model must match request_json.model",
-		}
-	}
-
-	return nil
 }
 
 func inputContentTypeForTaskKind(taskKind string) string {
 	switch taskKind {
 	case taskKindOpenAIChatCompletionsV1:
 		return contentTypeApplicationJSON
+	case taskKindOpenAIResponsesV1:
+		return contentTypeApplicationJSON
 	default:
 		return ""
 	}
 }
 
-func resultContentTypeForTaskKind(taskKind string) string {
+func resultContentTypeForTaskKind(taskKind string, streaming bool) string {
 	switch taskKind {
 	case taskKindOpenAIChatCompletionsV1:
+		if streaming {
+			return contentTypeTextEventStream
+		}
+		return contentTypeApplicationJSON
+	case taskKindOpenAIResponsesV1:
+		if streaming {
+			return contentTypeTextEventStream
+		}
 		return contentTypeApplicationJSON
 	default:
 		return contentTypeTextPlain
@@ -1918,17 +2323,26 @@ func resultContentTypeForTaskKind(taskKind string) string {
 }
 
 func modelFromRequest(req lcpwire.QuoteRequest) string {
-	if req.TaskKind != taskKindOpenAIChatCompletionsV1 {
-		return ""
-	}
 	if req.ParamsBytes == nil {
 		return ""
 	}
-	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
-	if err != nil {
+
+	switch req.TaskKind {
+	case taskKindOpenAIChatCompletionsV1:
+		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
+		if err != nil {
+			return ""
+		}
+		return params.Model
+	case taskKindOpenAIResponsesV1:
+		params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
+		if err != nil {
+			return ""
+		}
+		return params.Model
+	default:
 		return ""
 	}
-	return params.Model
 }
 
 func computeErrorCode(err error) lcpwire.ErrorCode {
@@ -2025,6 +2439,13 @@ func (h *Handler) logJobExecutionFailed(
 	)
 }
 
+func clampUint64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
+}
+
 func (h *Handler) logJobCompleted(
 	meta jobLogMeta,
 	settleDuration time.Duration,
@@ -2071,12 +2492,14 @@ func (h *Handler) maxOutputTokensForModel(model string) (uint32, error) {
 func (h *Handler) planTask(
 	req lcpwire.QuoteRequest,
 	inputBytes []byte,
-) (computebackend.Task, llm.ExecutionPolicy, string, error) {
+) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
 	switch req.TaskKind {
 	case taskKindOpenAIChatCompletionsV1:
 		return h.planOpenAIChatCompletionsV1Task(req, inputBytes)
+	case taskKindOpenAIResponsesV1:
+		return h.planOpenAIResponsesV1Task(req, inputBytes)
 	default:
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: %q",
 			computebackend.ErrUnsupportedTaskKind,
 			req.TaskKind,
@@ -2087,16 +2510,16 @@ func (h *Handler) planTask(
 func (h *Handler) planOpenAIChatCompletionsV1Task(
 	req lcpwire.QuoteRequest,
 	inputBytes []byte,
-) (computebackend.Task, llm.ExecutionPolicy, string, error) {
+) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
 	if req.ParamsBytes == nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: openai.chat_completions.v1 params are required",
 			computebackend.ErrInvalidTask,
 		)
 	}
 	params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
 	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: invalid openai.chat_completions.v1 params: %s",
 			computebackend.ErrInvalidTask,
 			err.Error(),
@@ -2105,34 +2528,27 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 
 	parsed, err := parseOpenAIChatCompletionsRequest(inputBytes)
 	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: invalid openai.chat_completions.v1 input_json: %s",
 			computebackend.ErrInvalidTask,
 			err.Error(),
 		)
 	}
 
-	if parsed.Stream != nil && *parsed.Stream {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
-			"%w: streaming is not supported",
-			computebackend.ErrInvalidTask,
-		)
-	}
-
 	if parsed.Model == "" {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: request_json.model is required",
 			computebackend.ErrInvalidTask,
 		)
 	}
 	if len(parsed.Messages) == 0 {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: request_json.messages is required",
 			computebackend.ErrInvalidTask,
 		)
 	}
 	if parsed.Model != params.Model {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: params.model must match request_json.model",
 			computebackend.ErrInvalidTask,
 		)
@@ -2140,7 +2556,7 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 
 	providerMaxOutputTokens, err := h.maxOutputTokensForModel(params.Model)
 	if err != nil {
-		return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: provider max_output_tokens invalid: %s",
 			computebackend.ErrInvalidTask,
 			err.Error(),
@@ -2150,13 +2566,13 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 	maxOutputTokens := providerMaxOutputTokens
 	if parsedMax, ok := parsed.maxOutputTokens(); ok {
 		if parsedMax == 0 {
-			return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+			return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 				"%w: max_tokens must be > 0",
 				computebackend.ErrInvalidTask,
 			)
 		}
 		if parsedMax > providerMaxOutputTokens {
-			return computebackend.Task{}, llm.ExecutionPolicy{}, "", fmt.Errorf(
+			return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 				"%w: max_tokens exceeds provider max_output_tokens",
 				computebackend.ErrInvalidTask,
 			)
@@ -2164,13 +2580,82 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 		maxOutputTokens = parsedMax
 	}
 
+	streaming := parsed.Stream != nil && *parsed.Stream
+
 	task := computebackend.Task{
 		TaskKind:   req.TaskKind,
 		Model:      params.Model,
 		InputBytes: append([]byte(nil), inputBytes...),
 	}
 	policy := llm.ExecutionPolicy{MaxOutputTokens: maxOutputTokens}
-	return task, policy, params.Model, nil
+	return task, policy, params.Model, streaming, nil
+}
+
+func (h *Handler) planOpenAIResponsesV1Task(
+	req lcpwire.QuoteRequest,
+	inputBytes []byte,
+) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
+	if req.ParamsBytes == nil {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: openai.responses.v1 params are required",
+			computebackend.ErrInvalidTask,
+		)
+	}
+	params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
+	if err != nil {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: invalid openai.responses.v1 params: %s",
+			computebackend.ErrInvalidTask,
+			err.Error(),
+		)
+	}
+
+	parsed, err := parseOpenAIResponsesRequest(inputBytes)
+	if err != nil {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: invalid openai.responses.v1 input_json: %s",
+			computebackend.ErrInvalidTask,
+			err.Error(),
+		)
+	}
+
+	if parsed.Model == "" {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: request_json.model is required",
+			computebackend.ErrInvalidTask,
+		)
+	}
+	if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: request_json.input is required",
+			computebackend.ErrInvalidTask,
+		)
+	}
+	if parsed.Model != params.Model {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: params.model must match request_json.model",
+			computebackend.ErrInvalidTask,
+		)
+	}
+
+	providerMaxOutputTokens, err := h.maxOutputTokensForModel(params.Model)
+	if err != nil {
+		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
+			"%w: provider max_output_tokens invalid: %s",
+			computebackend.ErrInvalidTask,
+			err.Error(),
+		)
+	}
+
+	streaming := parsed.Stream != nil && *parsed.Stream
+
+	task := computebackend.Task{
+		TaskKind:   req.TaskKind,
+		Model:      params.Model,
+		InputBytes: append([]byte(nil), inputBytes...),
+	}
+	policy := llm.ExecutionPolicy{MaxOutputTokens: providerMaxOutputTokens}
+	return task, policy, params.Model, streaming, nil
 }
 
 func (h *Handler) priceTable() llm.PriceTable {
@@ -2191,7 +2676,7 @@ func (h *Handler) quotePrice(
 	req lcpwire.QuoteRequest,
 	inputBytes []byte,
 ) (llm.PriceBreakdown, error) {
-	planned, policy, model, err := h.planTask(req, inputBytes)
+	planned, policy, model, _, err := h.planTask(req, inputBytes)
 	if err != nil {
 		return llm.PriceBreakdown{}, err
 	}

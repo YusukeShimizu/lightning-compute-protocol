@@ -338,7 +338,7 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestMarksReadyAndRepliesOnce(t
 	}
 }
 
-func TestPeerMessaging_HandleCustomMessage_LCPManifestDoesNotReplyIfAlreadySentOnOnline(t *testing.T) {
+func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesOnceEvenIfAlreadySentOnOnline(t *testing.T) {
 	t.Parallel()
 
 	peerBytes, peerPubKey := newPeerPubKey()
@@ -384,7 +384,7 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestDoesNotReplyIfAlreadySentO
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if got, want := len(fake.sendReqs), 1; got != want {
+	if got, want := len(fake.sendReqs), 2; got != want {
 		t.Fatalf("SendCustomMessage calls mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 }

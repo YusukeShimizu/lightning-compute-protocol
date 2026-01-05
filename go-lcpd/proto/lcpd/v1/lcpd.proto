@@ -107,6 +107,18 @@ service LCPDService {
   //   Impact: Outcome may be unknown if failure happened after payment settlement.
   rpc AcceptAndExecute(AcceptAndExecuteRequest) returns (AcceptAndExecuteResponse);
 
+  // AcceptAndExecuteStream pays the invoice associated with the quote and streams
+  // the decoded result stream bytes as they arrive.
+  //
+  // The stream ends with a terminal `Result` event that indicates the final job
+  // status and (when available) the validated stream metadata (hash/len).
+  //
+  // Errors follow the same model as `AcceptAndExecute`, but note that streaming
+  // responses may have already delivered partial bytes before an error is
+  // detected (for example, checksum validation failure at stream end).
+  rpc AcceptAndExecuteStream(AcceptAndExecuteStreamRequest)
+      returns (stream AcceptAndExecuteStreamResponse);
+
   // CancelJob sends an `lcp_cancel` message to the provider.
   //
   // Cancellation is best-effort: the provider may have already completed the job.
@@ -139,6 +151,7 @@ enum LCPTaskKind {
   reserved 1;
   reserved "LCP_TASK_KIND_LLM_CHAT";
   LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 = 2; // "openai.chat_completions.v1"
+  LCP_TASK_KIND_OPENAI_RESPONSES_V1 = 3; // "openai.responses.v1"
 }
 
 // Task is the strict container for a job request.
@@ -152,6 +165,9 @@ message Task {
 
     // Structured specification for "openai.chat_completions.v1"
     OpenAIChatCompletionsV1TaskSpec openai_chat_completions_v1 = 2;
+
+    // Structured specification for "openai.responses.v1"
+    OpenAIResponsesV1TaskSpec openai_responses_v1 = 3;
   }
 }
 
@@ -176,6 +192,35 @@ message OpenAIChatCompletionsV1TaskSpec {
 // OpenAIChatCompletionsV1Params defines the tunable parameters for
 // "openai.chat_completions.v1".
 message OpenAIChatCompletionsV1Params {
+  // "model" (TLV type 1).
+  // Identifier for the execution target (for example, an OpenAI model ID).
+  string model = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.min_len = 1
+  ];
+}
+
+// OpenAIResponsesV1TaskSpec defines a passthrough OpenAI-compatible
+// Responses request. It maps to:
+//   - input: raw HTTP request body bytes (JSON)
+//   - params: TLV encoded parameters
+message OpenAIResponsesV1TaskSpec {
+  // Raw HTTP request body bytes for `POST /v1/responses`.
+  bytes request_json = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).bytes.min_len = 1
+  ];
+
+  // The configuration parameters for routing/validation.
+  OpenAIResponsesV1Params params = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
+// OpenAIResponsesV1Params defines the tunable parameters for
+// "openai.responses.v1".
+message OpenAIResponsesV1Params {
   // "model" (TLV type 1).
   // Identifier for the execution target (for example, an OpenAI model ID).
   string model = 1 [
@@ -298,6 +343,7 @@ message LCPTaskTemplate {
     option (buf.validate.oneof).required = true;
 
     OpenAIChatCompletionsV1Params openai_chat_completions_v1 = 3;
+    OpenAIResponsesV1Params openai_responses_v1 = 4;
   }
 
   reserved 2;
@@ -385,6 +431,27 @@ message AcceptAndExecuteRequest {
   ];
 }
 
+// AcceptAndExecuteStreamRequest is the request message for `LCPDService.AcceptAndExecuteStream`.
+message AcceptAndExecuteStreamRequest {
+  // The target peer's Node ID.
+  string peer_id = 1 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
+  ];
+
+  // The job_id to execute (must match a previously received Quote).
+  bytes job_id = 2 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).bytes.len = 32
+  ];
+
+  // Authorization to pay the invoice.
+  bool pay_invoice = 3 [
+    (google.api.field_behavior) = REQUIRED,
+    (buf.validate.field).required = true
+  ];
+}
+
 // AcceptAndExecuteResponse is the response message for `LCPDService.AcceptAndExecute`.
 message AcceptAndExecuteResponse {
   // The execution result.
@@ -392,6 +459,53 @@ message AcceptAndExecuteResponse {
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).required = true
   ];
+}
+
+// AcceptAndExecuteStreamResponse is the server-streaming response message for
+// `LCPDService.AcceptAndExecuteStream`.
+message AcceptAndExecuteStreamResponse {
+  oneof event {
+    option (buf.validate.oneof).required = true;
+
+    ResultStreamBegin result_begin = 1;
+    ResultStreamChunk result_chunk = 2;
+    ResultStreamEnd result_end = 3;
+    Result result = 4;
+  }
+}
+
+// ResultStreamBegin marks the start of the decoded result stream.
+message ResultStreamBegin {
+  // Content type of the decoded result stream bytes.
+  string content_type = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.min_len = 1
+  ];
+
+  // Content encoding of the decoded result stream bytes.
+  string content_encoding = 2 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).string.min_len = 1
+  ];
+}
+
+// ResultStreamChunk carries a contiguous slice of decoded result stream bytes.
+message ResultStreamChunk {
+  bytes data = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).bytes.min_len = 1
+  ];
+}
+
+// ResultStreamEnd marks the end of the decoded result stream and contains the
+// validated stream metadata.
+message ResultStreamEnd {
+  bytes result_hash = 1 [
+    (google.api.field_behavior) = OUTPUT_ONLY,
+    (buf.validate.field).bytes.len = 32
+  ];
+
+  uint64 result_len = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
 }
 
 // CancelJobRequest is the request message for `LCPDService.CancelJob`.

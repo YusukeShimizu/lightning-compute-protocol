@@ -712,18 +712,27 @@ func localManifestForProvider(providerCfg provider.Config) *lcpwire.Manifest {
 			continue
 		}
 
-		encodedParams, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		chatParams, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
 			lcpwire.OpenAIChatCompletionsV1Params{Model: model},
 		)
-		if err != nil {
-			continue
+		if err == nil {
+			paramsBytes := chatParams
+			manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
+				TaskKind:    "openai.chat_completions.v1",
+				ParamsBytes: &paramsBytes,
+			})
 		}
-		paramsBytes := encodedParams
 
-		manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
-			TaskKind:    "openai.chat_completions.v1",
-			ParamsBytes: &paramsBytes,
-		})
+		responsesParams, err := lcpwire.EncodeOpenAIResponsesV1Params(
+			lcpwire.OpenAIResponsesV1Params{Model: model},
+		)
+		if err == nil {
+			paramsBytes := responsesParams
+			manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
+				TaskKind:    "openai.responses.v1",
+				ParamsBytes: &paramsBytes,
+			})
+		}
 	}
 	return manifest
 }

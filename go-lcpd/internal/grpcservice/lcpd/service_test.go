@@ -23,6 +23,7 @@ import (
 	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -115,6 +116,28 @@ func (m *fakeMessenger) messages() []sentMsg {
 	copy(out, m.sent)
 	return out
 }
+
+type recordingStreamServer struct {
+	ctx  context.Context
+	sent []*lcpdv1.AcceptAndExecuteStreamResponse
+}
+
+func (s *recordingStreamServer) Send(resp *lcpdv1.AcceptAndExecuteStreamResponse) error {
+	s.sent = append(s.sent, resp)
+	return nil
+}
+
+func (s *recordingStreamServer) SetHeader(metadata.MD) error  { return nil }
+func (s *recordingStreamServer) SendHeader(metadata.MD) error { return nil }
+func (s *recordingStreamServer) SetTrailer(metadata.MD)       {}
+func (s *recordingStreamServer) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+func (s *recordingStreamServer) SendMsg(any) error { return nil }
+func (s *recordingStreamServer) RecvMsg(any) error { return nil }
 
 func TestGetLocalInfo_UnavailableWhenNotConfigured(t *testing.T) {
 	t.Parallel()
@@ -481,6 +504,269 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	}
 	if got, want := resp.GetResult().GetContentEncoding(), resultContentEncoding; got != want {
 		t.Fatalf("content_encoding mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+}
+
+//nolint:gocognit,cyclop // End-to-end streaming scenario needs full setup for correctness.
+func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
+	t.Parallel()
+
+	peerID := "02" + strings.Repeat("f", 64)
+	clock := fakeClock{now: time.Unix(1_700_000_000, 0)}
+	jobs := requesterjobstore.NewWithClock(clock.Now)
+	waiter := requesterwait.New(nil, nil)
+
+	var jobID lcp.JobID
+	for i := range jobID {
+		jobID[i] = 0x33
+	}
+
+	quoteExpiry := uint64(clock.Now().Unix()) + 60
+	requestJSON := openaiChatCompletionsRequestJSON("stream me", "model-stream")
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-stream"},
+	)
+	if err != nil {
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
+	}
+	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
+		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		JobID:           jobID,
+		PriceMsat:       123,
+		QuoteExpiry:     quoteExpiry,
+	}, protocolcompat.TermsCommit{
+		TaskKind:             "openai.chat_completions.v1",
+		Input:                requestJSON,
+		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
+		InputContentEncoding: lcptasks.ContentEncodingIdentity,
+		Params:               paramsBytes,
+	})
+	if err != nil {
+		t.Fatalf("ComputeTermsHash: %v", err)
+	}
+
+	terms := &lcpdv1.Terms{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
+		JobId:           append([]byte(nil), jobID[:]...),
+		PriceMsat:       123,
+		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
+		TermsHash:       append([]byte(nil), termsHash[:]...),
+		PaymentRequest:  "lnbc1stream",
+	}
+
+	if putErr := jobs.PutQuote(peerID, openaiChatTask("stream me", "model-stream"), terms); putErr != nil {
+		t.Fatalf("PutQuote: %v", putErr)
+	}
+
+	payCalled := make(chan struct{})
+	ln := &fakeLightning{
+		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
+			return lightningrpc.PaymentRequestInfo{
+				DescriptionHash: termsHash,
+				PayeePubKey:     peerID,
+				AmountMsat:      123,
+				TimestampUnix:   int64(quoteExpiry) - 30,
+				ExpirySeconds:   30,
+			}, nil
+		},
+		payInvoiceFn: func(context.Context, string) (lcp.Hash32, error) {
+			select {
+			case <-payCalled:
+			default:
+				close(payCalled)
+			}
+			var preimage lcp.Hash32
+			preimage[0] = 0xaa
+			return preimage, nil
+		},
+	}
+
+	expiry := uint64(clock.Now().Unix()) + 300
+
+	resultBytes := []byte("streamed-bytes")
+	resultSum := sha256.Sum256(resultBytes)
+	resultHash := lcp.Hash32(resultSum)
+	resultLen := uint64(len(resultBytes))
+
+	resultContentType := "text/event-stream; charset=utf-8"
+	resultContentEncoding := lcptasks.ContentEncodingIdentity
+
+	var resultStreamID lcp.Hash32
+	resultStreamID[0] = 0x44
+
+	beginPayload, err := lcpwire.EncodeStreamBegin(lcpwire.StreamBegin{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			MsgID:           lcpwire.MsgID{},
+			Expiry:          expiry,
+		},
+		StreamID:        resultStreamID,
+		Kind:            lcpwire.StreamKindResult,
+		ContentType:     resultContentType,
+		ContentEncoding: resultContentEncoding,
+	})
+	if err != nil {
+		t.Fatalf("EncodeStreamBegin: %v", err)
+	}
+
+	chunkPayload, _, err := lcpwire.EncodeStreamChunk(lcpwire.StreamChunk{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			Expiry:          expiry,
+		},
+		StreamID: resultStreamID,
+		Seq:      0,
+		Data:     resultBytes,
+	})
+	if err != nil {
+		t.Fatalf("EncodeStreamChunk: %v", err)
+	}
+
+	endPayload, err := lcpwire.EncodeStreamEnd(lcpwire.StreamEnd{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			MsgID:           lcpwire.MsgID{},
+			Expiry:          expiry,
+		},
+		StreamID: resultStreamID,
+		TotalLen: resultLen,
+		SHA256:   resultHash,
+	})
+	if err != nil {
+		t.Fatalf("EncodeStreamEnd: %v", err)
+	}
+
+	terminalPayload, err := lcpwire.EncodeResult(lcpwire.Result{
+		Envelope: lcpwire.JobEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV02,
+			JobID:           jobID,
+			MsgID:           lcpwire.MsgID{},
+			Expiry:          expiry,
+		},
+		Status: lcpwire.ResultStatusOK,
+		OK: &lcpwire.ResultOK{
+			ResultStreamID:        resultStreamID,
+			ResultHash:            resultHash,
+			ResultLen:             resultLen,
+			ResultContentType:     resultContentType,
+			ResultContentEncoding: resultContentEncoding,
+		},
+	})
+	if err != nil {
+		t.Fatalf("EncodeResult: %v", err)
+	}
+
+	svc := mustNewService(t, Params{
+		Clock:         clock,
+		JobStore:      jobs,
+		Waiter:        waiter,
+		LightningRPC:  ln,
+		PeerDirectory: peerdirectory.New(),
+	})
+
+	stream := &recordingStreamServer{ctx: context.Background()}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- svc.AcceptAndExecuteStream(
+			&lcpdv1.AcceptAndExecuteStreamRequest{
+				PeerId:     peerID,
+				JobId:      append([]byte(nil), jobID[:]...),
+				PayInvoice: true,
+			},
+			stream,
+		)
+	}()
+
+	select {
+	case <-payCalled:
+	case <-time.After(time.Second):
+		t.Fatalf("PayInvoice was not called")
+	}
+
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeStreamBegin, beginPayload),
+	)
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeStreamChunk, chunkPayload),
+	)
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeStreamEnd, endPayload),
+	)
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeResult, terminalPayload),
+	)
+
+	select {
+	case streamErr := <-errCh:
+		if streamErr != nil {
+			t.Fatalf("AcceptAndExecuteStream: %v", streamErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("AcceptAndExecuteStream did not return")
+	}
+
+	if got, want := len(stream.sent), 4; got != want {
+		t.Fatalf("sent stream response count mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+
+	begin := stream.sent[0].GetResultBegin()
+	if begin == nil {
+		t.Fatalf("expected first event to be result_begin")
+	}
+	if begin.GetContentType() != resultContentType || begin.GetContentEncoding() != resultContentEncoding {
+		t.Fatalf(
+			"result_begin content type/encoding mismatch (-want +got):\n%s",
+			cmp.Diff(
+				resultContentType+"/"+resultContentEncoding,
+				begin.GetContentType()+"/"+begin.GetContentEncoding(),
+			),
+		)
+	}
+
+	chunk := stream.sent[1].GetResultChunk()
+	if chunk == nil {
+		t.Fatalf("expected second event to be result_chunk")
+	}
+	if diff := cmp.Diff(resultBytes, chunk.GetData()); diff != "" {
+		t.Fatalf("chunk data mismatch (-want +got):\n%s", diff)
+	}
+
+	end := stream.sent[2].GetResultEnd()
+	if end == nil {
+		t.Fatalf("expected third event to be result_end")
+	}
+	if end.GetResultLen() != resultLen {
+		t.Fatalf("result_end len mismatch (-want +got):\n%s", cmp.Diff(resultLen, end.GetResultLen()))
+	}
+	if diff := cmp.Diff(resultHash[:], end.GetResultHash()); diff != "" {
+		t.Fatalf("result_end hash mismatch (-want +got):\n%s", diff)
+	}
+
+	result := stream.sent[3].GetResult()
+	if result == nil {
+		t.Fatalf("expected terminal result event")
+	}
+	if got, want := result.GetStatus(), lcpdv1.Result_STATUS_OK; got != want {
+		t.Fatalf("result status mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	}
+	if diff := cmp.Diff(resultHash[:], result.GetResultHash()); diff != "" {
+		t.Fatalf("result hash mismatch (-want +got):\n%s", diff)
+	}
+	if got := result.GetResultLen(); got != resultLen {
+		t.Fatalf("result len mismatch (-want +got):\n%s", cmp.Diff(resultLen, got))
+	}
+	if got := result.GetContentType(); got != resultContentType {
+		t.Fatalf("result content_type mismatch (-want +got):\n%s", cmp.Diff(resultContentType, got))
+	}
+	if got := result.GetContentEncoding(); got != resultContentEncoding {
+		t.Fatalf("result content_encoding mismatch (-want +got):\n%s", cmp.Diff(resultContentEncoding, got))
 	}
 }
 

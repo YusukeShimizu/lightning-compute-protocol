@@ -1,4 +1,4 @@
-.PHONY: test test-regtest test-regtest-custommsg test-regtest-grpc lint tools gen fmt proto-deps devnet-up devnet-down devnet-status devnet-info
+.PHONY: test test-regtest test-regtest-custommsg test-regtest-grpc test-regtest-openai-serve lint tools gen fmt proto-deps devnet-up devnet-down devnet-status devnet-info
 
 # Nix-first workflow:
 # - All targets are meant to run inside the go-lcpd devShell (`nix develop`).
@@ -35,6 +35,9 @@ test-regtest-custommsg:
 
 test-regtest-grpc:
 	LCP_ITEST_REGTEST=1 go test ./itest/e2e -run RequesterGRPC -count=1 -v
+
+test-regtest-openai-serve:
+	LCP_ITEST_REGTEST=1 go test ./itest/e2e -run Regtest_OpenAIServe -count=1 -v
 
 test-e2e-regtest:
 	LCP_ITEST_REGTEST=1 go test ./itest/e2e -run Regtest -count=1 -v

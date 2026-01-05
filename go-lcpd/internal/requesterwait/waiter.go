@@ -32,12 +32,43 @@ var (
 	ErrPeerIDRequired       = errors.New("peer_id is required")
 	ErrAlreadyWaitingQuote  = errors.New("quote waiter already registered")
 	ErrAlreadyWaitingResult = errors.New("result waiter already registered")
+	ErrAlreadySubscribed    = errors.New("result stream subscriber already registered")
 	ErrWaitCancelled        = errors.New("wait cancelled or deadline exceeded")
 )
 
 type key struct {
 	peerID string
 	jobID  lcp.JobID
+}
+
+type ResultStreamEventKind uint8
+
+const (
+	ResultStreamEventKindUnspecified ResultStreamEventKind = 0
+	ResultStreamEventKindBegin       ResultStreamEventKind = 1
+	ResultStreamEventKindChunk       ResultStreamEventKind = 2
+)
+
+// ResultStreamEvent describes incremental result stream events for a job.
+//
+// This is used by server-streaming RPCs that need to forward bytes as they
+// arrive, without interpreting the bytes. Events are best-effort: they do not
+// replay already-processed chunks to late subscribers.
+type ResultStreamEvent struct {
+	Kind ResultStreamEventKind
+
+	// Begin metadata.
+	ContentType     string
+	ContentEncoding string
+
+	// Chunk data for Kind=chunk.
+	Data []byte
+}
+
+type resultStreamSub struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	ch     chan ResultStreamEvent
 }
 
 type entry struct {
@@ -48,6 +79,8 @@ type entry struct {
 	resultOutcome   *ResultOutcome
 	resultDelivered bool
 	resultCh        chan ResultOutcome
+
+	resultStreamSub *resultStreamSub
 
 	// Result stream reassembly state (v0.2).
 	resultStream      *streamState
@@ -65,8 +98,9 @@ type Waiter struct {
 }
 
 const (
-	defaultMaxStreamBytes = uint64(4_194_304)
-	defaultMaxJobBytes    = uint64(8_388_608)
+	defaultMaxStreamBytes   = uint64(4_194_304)
+	defaultMaxJobBytes      = uint64(8_388_608)
+	resultStreamEventBuffer = 16
 )
 
 type streamState struct {
@@ -143,6 +177,53 @@ func (w *Waiter) WaitResult(
 		func(e *entry) { e.resultDelivered = true },
 		ErrAlreadyWaitingResult,
 	)
+}
+
+// SubscribeResultStream registers a subscriber for incremental result stream
+// events for the given job.
+//
+// The returned unsubscribe function MUST be called to avoid leaking waiter
+// state. Unsubscribing also cancels the subscription context so that any
+// in-flight event delivery can be aborted safely.
+func (w *Waiter) SubscribeResultStream(
+	ctx context.Context,
+	peerID string,
+	jobID lcp.JobID,
+) (<-chan ResultStreamEvent, func(), error) {
+	if peerID == "" {
+		return nil, nil, ErrPeerIDRequired
+	}
+	if ctx == nil {
+		return nil, nil, errors.New("context is required")
+	}
+
+	subCtx, cancel := context.WithCancel(ctx)
+	ch := make(chan ResultStreamEvent, resultStreamEventBuffer)
+
+	k := key{peerID: peerID, jobID: jobID}
+
+	w.mu.Lock()
+	e := w.ensureEntryLocked(k)
+	if e.resultStreamSub != nil {
+		w.mu.Unlock()
+		cancel()
+		return nil, nil, ErrAlreadySubscribed
+	}
+	e.resultStreamSub = &resultStreamSub{ctx: subCtx, cancel: cancel, ch: ch}
+	w.mu.Unlock()
+
+	unsubscribe := func() {
+		w.mu.Lock()
+		curr, ok := w.entries[k]
+		if ok && curr.resultStreamSub != nil && curr.resultStreamSub.ch == ch {
+			curr.resultStreamSub.cancel()
+			curr.resultStreamSub = nil
+			w.maybeCleanupLocked(k, curr)
+		}
+		w.mu.Unlock()
+	}
+
+	return ch, unsubscribe, nil
 }
 
 // HandleInboundCustomMessage decodes inbound job-scope messages and delivers them
@@ -232,6 +313,8 @@ func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
 
 	k := key{peerID: peerID, jobID: begin.Envelope.JobID}
 
+	var sub *resultStreamSub
+
 	w.mu.Lock()
 	e := w.ensureEntryLocked(k)
 	if e.resultStream != nil && !e.resultStream.done {
@@ -250,11 +333,20 @@ func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
 		beginSHA256:     begin.SHA256,
 		done:            false,
 	}
+	sub = e.resultStreamSub
 	w.mu.Unlock()
+
+	w.publishResultStreamEvent(sub, ResultStreamEvent{
+		Kind:            ResultStreamEventKindBegin,
+		ContentType:     begin.ContentType,
+		ContentEncoding: begin.ContentEncoding,
+	})
 }
 
 func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
 	k := key{peerID: peerID, jobID: chunk.Envelope.JobID}
+
+	var sub *resultStreamSub
 
 	w.mu.Lock()
 	e := w.ensureEntryLocked(k)
@@ -291,7 +383,13 @@ func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
 
 	st.buf = append(st.buf, chunk.Data...)
 	st.expectedSeq++
+	sub = e.resultStreamSub
 	w.mu.Unlock()
+
+	w.publishResultStreamEvent(sub, ResultStreamEvent{
+		Kind: ResultStreamEventKindChunk,
+		Data: append([]byte(nil), chunk.Data...),
+	})
 }
 
 func (w *Waiter) handleStreamEnd(peerID string, end lcpwire.StreamEnd) {
@@ -580,6 +678,9 @@ func (w *Waiter) maybeCleanupLocked(k key, e *entry) {
 	if e == nil {
 		return
 	}
+	if e.resultStreamSub != nil {
+		return
+	}
 	if e.quoteCh != nil || e.resultCh != nil {
 		return
 	}
@@ -621,4 +722,15 @@ func cloneTerminalResult(in lcpwire.Result) *lcpwire.Result {
 func sha256Sum(b []byte) lcp.Hash32 {
 	sum := sha256.Sum256(b)
 	return lcp.Hash32(sum)
+}
+
+func (w *Waiter) publishResultStreamEvent(sub *resultStreamSub, ev ResultStreamEvent) {
+	if sub == nil {
+		return
+	}
+
+	select {
+	case sub.ch <- ev:
+	case <-sub.ctx.Done():
+	}
 }

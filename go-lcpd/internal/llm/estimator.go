@@ -40,7 +40,10 @@ func (e ApproxUsageEstimator) Estimate(
 	task computebackend.Task,
 	policy ExecutionPolicy,
 ) (Estimation, error) {
-	if task.TaskKind != "openai.chat_completions.v1" {
+	switch task.TaskKind {
+	case "openai.chat_completions.v1", "openai.responses.v1":
+		// ok
+	default:
 		return Estimation{}, fmt.Errorf(
 			"%w: %q",
 			computebackend.ErrUnsupportedTaskKind,

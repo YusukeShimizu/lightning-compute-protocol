@@ -103,18 +103,6 @@ func TestValidateTask_Errors(t *testing.T) {
 			wantErr: lcptasks.ErrOpenAIChatCompletionsV1RequestJSONInvalid,
 		},
 		{
-			name: "openai_chat_completions_v1 request_json stream true",
-			task: &lcpdv1.Task{
-				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-						RequestJson: []byte(`{"model":"gpt-5.2","stream":true}`),
-						Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
-					},
-				},
-			},
-			wantErr: lcptasks.ErrOpenAIChatCompletionsV1StreamingUnsupported,
-		},
-		{
 			name: "openai_chat_completions_v1 request_json model missing",
 			task: &lcpdv1.Task{
 				Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
@@ -164,6 +152,48 @@ func TestValidateTask_Errors(t *testing.T) {
 	}
 }
 
+func TestValidateTask_OpenAIChatCompletionsV1_AllowsStreaming(t *testing.T) {
+	t.Parallel()
+
+	requestJSON := []byte(`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	task := &lcpdv1.Task{
+		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
+			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
+				RequestJson: requestJSON,
+				Params: &lcpdv1.OpenAIChatCompletionsV1Params{
+					Model: "gpt-5.2",
+				},
+			},
+		},
+	}
+
+	if err := lcptasks.ValidateTask(task); err != nil {
+		t.Fatalf("ValidateTask: %v", err)
+	}
+}
+
+func TestValidateTask_OpenAIResponsesV1(t *testing.T) {
+	t.Parallel()
+
+	requestJSON := []byte(`{"model":"gpt-5.2","input":"hi"}`)
+
+	task := &lcpdv1.Task{
+		Spec: &lcpdv1.Task_OpenaiResponsesV1{
+			OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1TaskSpec{
+				RequestJson: requestJSON,
+				Params: &lcpdv1.OpenAIResponsesV1Params{
+					Model: "gpt-5.2",
+				},
+			},
+		},
+	}
+
+	if err := lcptasks.ValidateTask(task); err != nil {
+		t.Fatalf("ValidateTask: %v", err)
+	}
+}
+
 func TestToWireQuoteRequestTask_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
@@ -197,6 +227,39 @@ func TestToWireQuoteRequestTask_OpenAIChatCompletionsV1(t *testing.T) {
 	}
 }
 
+func TestToWireQuoteRequestTask_OpenAIResponsesV1(t *testing.T) {
+	t.Parallel()
+
+	requestJSON := []byte(`{"model":"gpt-5.2","input":"hi"}`)
+	task := &lcpdv1.Task{
+		Spec: &lcpdv1.Task_OpenaiResponsesV1{
+			OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1TaskSpec{
+				RequestJson: requestJSON,
+				Params:      &lcpdv1.OpenAIResponsesV1Params{Model: "gpt-5.2"},
+			},
+		},
+	}
+
+	got, err := lcptasks.ToWireQuoteRequestTask(task)
+	if err != nil {
+		t.Fatalf("ToWireQuoteRequestTask: %v", err)
+	}
+
+	if diff := cmp.Diff(lcptasks.TaskKindOpenAIResponsesV1, got.TaskKind); diff != "" {
+		t.Fatalf("TaskKind mismatch (-want +got):\n%s", diff)
+	}
+
+	decoded, err := lcpwire.DecodeOpenAIResponsesV1Params(got.ParamsBytes)
+	if err != nil {
+		t.Fatalf("DecodeOpenAIResponsesV1Params: %v", err)
+	}
+
+	wantParams := lcpwire.OpenAIResponsesV1Params{Model: "gpt-5.2"}
+	if diff := cmp.Diff(wantParams, decoded); diff != "" {
+		t.Fatalf("params mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestToWireInputStream_OpenAIChatCompletionsV1(t *testing.T) {
 	t.Parallel()
 
@@ -206,6 +269,34 @@ func TestToWireInputStream_OpenAIChatCompletionsV1(t *testing.T) {
 			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
 				RequestJson: requestJSON,
 				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
+			},
+		},
+	}
+
+	got, err := lcptasks.ToWireInputStream(task)
+	if err != nil {
+		t.Fatalf("ToWireInputStream: %v", err)
+	}
+
+	want := lcptasks.InputStream{
+		DecodedBytes:    requestJSON,
+		ContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
+		ContentEncoding: lcptasks.ContentEncodingIdentity,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("input stream mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestToWireInputStream_OpenAIResponsesV1(t *testing.T) {
+	t.Parallel()
+
+	requestJSON := []byte(`{"model":"gpt-5.2","input":"hi"}`)
+	task := &lcpdv1.Task{
+		Spec: &lcpdv1.Task_OpenaiResponsesV1{
+			OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1TaskSpec{
+				RequestJson: requestJSON,
+				Params:      &lcpdv1.OpenAIResponsesV1Params{Model: "gpt-5.2"},
 			},
 		},
 	}
