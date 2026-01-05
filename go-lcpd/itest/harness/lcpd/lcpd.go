@@ -110,8 +110,8 @@ func Start(ctx context.Context, t *testing.T, cfg RunConfig) *Handle {
 		Env:          env,
 		ReadyText:    "ready",
 		ReadyTimeout: defaultLCPDReadyTimeout,
-		TeeStdout:    true,
-		TeeStderr:    true,
+		TeeStdout:    proc.TeeEnabled(),
+		TeeStderr:    proc.TeeEnabled(),
 	})
 
 	return &Handle{

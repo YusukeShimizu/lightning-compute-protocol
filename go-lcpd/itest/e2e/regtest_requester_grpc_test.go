@@ -246,7 +246,7 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 	if execResp.GetResult() == nil {
 		t.Fatalf("AcceptAndExecute: result is nil")
 	}
-	if diff := cmp.Diff("text/plain; charset=utf-8", execResp.GetResult().GetContentType()); diff != "" {
+	if diff := cmp.Diff("application/json; charset=utf-8", execResp.GetResult().GetContentType()); diff != "" {
 		t.Fatalf("result content_type mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff([]byte("deterministic-output"), execResp.GetResult().GetResult()); diff != "" {
