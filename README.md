@@ -1,5 +1,7 @@
 # LCP (Lightning Compute Protocol)
 
+**Docs site (Mintlify): [Lightning Compute Protocol](https://candy-208aed2d-85.mintlify.app/)**
+
 LCP (Lightning Compute Protocol) is an application-layer protocol for paying for small compute jobs over Lightning.
 It uses BOLT #1 custom messages on a direct Lightning peer connection.
 
@@ -18,19 +20,10 @@ Limitations:
 
 Reference: BOLT #1 messaging (`https://github.com/lightning/bolts/blob/master/01-messaging.md`).
 
-## One-shot client demo
-
-The one-shot client in [go-lcpd/tools/lcpd-oneshot](go-lcpd/tools/lcpd-oneshot) provides a simple way to execute a task in a single request using the LCP protocol.
-It serves as a reference implementation demonstrating how to use the protocol.
-
-![demo](go-lcpd/tools/lcpd-oneshot/demo.gif)
-
 ## Potential future work
 
 These are design ideas. They are not implemented in this repo:
-- Large payload delivery: optional encrypted out-of-band transport or compression on top of streams.
 - Privacy improvements: BOLT 12 offers and blinded paths to reduce direct peering requirements.
-- Integration layers: Lightning Service Provider (LSP) integration (an OpenAI-compatible gateway lives in `apps/openai-serve/`).
 
 ## Safety / use at your own risk
 
@@ -55,7 +48,6 @@ This project is unaudited. Running it against real funds and real peers can lead
 - One-shot client (demo): [go-lcpd/tools/lcpd-oneshot](go-lcpd/tools/lcpd-oneshot)
 
 ## Docs site (Mintlify)
-
 This repository’s docs site is managed with Mintlify (`docs/docs.json`).
 All Mintlify pages and assets live under `docs/` (Japanese pages are colocated with English and use a `-ja` suffix).
 
