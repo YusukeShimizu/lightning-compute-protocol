@@ -8,7 +8,7 @@ import (
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterwait"
 	"github.com/google/go-cmp/cmp"
 )
@@ -49,7 +49,7 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 		done <- out
 	}()
 
-	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	waiter.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer-a",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteResponse),
 		Payload:    payload,
@@ -103,7 +103,7 @@ func TestWaitQuoteResponse_DeliversError(t *testing.T) {
 		done <- out
 	}()
 
-	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	waiter.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer-b",
 		MsgType:    uint16(lcpwire.MessageTypeError),
 		Payload:    payload,
@@ -146,7 +146,7 @@ func TestWaitResult_ReceivesPendingFailedResult(t *testing.T) {
 	}
 
 	// Deliver result before waiting.
-	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	waiter.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer-c",
 		MsgType:    uint16(lcpwire.MessageTypeResult),
 		Payload:    payload,
@@ -166,7 +166,10 @@ func TestWaitResult_ReceivesPendingFailedResult(t *testing.T) {
 		t.Fatalf("Result mismatch (-want +got):\n%s", diff)
 	}
 	if len(out.ResultBytes) != 0 {
-		t.Fatalf("expected empty result_bytes for failed status, got %d bytes", len(out.ResultBytes))
+		t.Fatalf(
+			"expected empty result_bytes for failed status, got %d bytes",
+			len(out.ResultBytes),
+		)
 	}
 }
 
@@ -203,7 +206,7 @@ func TestWaitResult_CancelThenRetry(t *testing.T) {
 		t.Fatalf("encode result: %v", err)
 	}
 
-	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	waiter.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer-d",
 		MsgType:    uint16(lcpwire.MessageTypeResult),
 		Payload:    payload,
@@ -244,7 +247,7 @@ func TestWaitQuoteResponse_IgnoresDifferentPeer(t *testing.T) {
 		t.Fatalf("encode quote response: %v", err)
 	}
 
-	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	waiter.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer-other",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteResponse),
 		Payload:    payload,

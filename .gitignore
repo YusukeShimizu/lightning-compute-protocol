@@ -9,6 +9,7 @@ dist/
 coverage.*
 *.out
 *.test
+target/
 
 # OS / editor files
 .DS_Store

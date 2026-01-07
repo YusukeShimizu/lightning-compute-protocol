@@ -118,7 +118,8 @@ func findModuleRoot(t *testing.T) string {
 			openAI := filepath.Join(repoRoot, "apps", "openai-serve")
 			openAIMod := filepath.Join(openAI, "go.mod")
 			openAIModBytes, openAIModErr := os.ReadFile(openAIMod)
-			if openAIModErr == nil && bytes.Contains(openAIModBytes, []byte(openAIServeModuleLine)) {
+			if openAIModErr == nil &&
+				bytes.Contains(openAIModBytes, []byte(openAIServeModuleLine)) {
 				return openAI
 			}
 			if openAIModErr != nil {

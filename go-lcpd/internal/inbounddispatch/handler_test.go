@@ -7,18 +7,18 @@ import (
 	"testing"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/google/go-cmp/cmp"
 )
 
 type recordingHandler struct {
 	mu   sync.Mutex
-	msgs []lndpeermsg.InboundCustomMessage
+	msgs []peermsg.InboundCustomMessage
 }
 
 func (r *recordingHandler) HandleInboundCustomMessage(
 	_ context.Context,
-	msg lndpeermsg.InboundCustomMessage,
+	msg peermsg.InboundCustomMessage,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -101,7 +101,7 @@ func TestHandler_DispatchesPerSpec(t *testing.T) {
 				requester: requester,
 			}
 
-			h.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+			h.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 				PeerPubKey: "peer",
 				MsgType:    tc.msgType,
 				Payload:    []byte("payload"),

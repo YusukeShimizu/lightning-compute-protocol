@@ -18,13 +18,12 @@ func TestStore_UpsertAndGet(t *testing.T) {
 	createdAt := time.Unix(100, 0)
 
 	job := jobstore.Job{
-		PeerPubKey:      "peer-a",
-		JobID:           jobID,
-		State:           jobstore.StateQuoted,
-		QuoteExpiry:     123,
-		TermsHash:       hashPtr(0xaa),
-		InvoiceAddIndex: ptrUint64(9),
-		CreatedAt:       createdAt,
+		PeerPubKey:  "peer-a",
+		JobID:       jobID,
+		State:       jobstore.StateQuoted,
+		QuoteExpiry: 123,
+		TermsHash:   hashPtr(0xaa),
+		CreatedAt:   createdAt,
 	}
 
 	store.Upsert(job)
@@ -207,8 +206,4 @@ func hash(fill byte) lcp.Hash32 {
 func hashPtr(fill byte) *lcp.Hash32 {
 	h := hash(fill)
 	return &h
-}
-
-func ptrUint64(v uint64) *uint64 {
-	return &v
 }

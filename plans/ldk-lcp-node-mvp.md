@@ -24,8 +24,10 @@ This plan MUST be maintained in accordance with `.codex/skills/lcp-execplan/refe
 
 - [x] (2026-01-06) 初版 ExecPlan を作成（当初は lnd shim 案）。
 - [x] (2026-01-06) 方針転換: “lnd 互換 shim” を作らず、独立ノード + go-lcpd 側の抽象化/変更を許容する方向に更新。
-- [ ] (TODO) `go-lcpd` 側に Lightning ノード抽象（実装差し替え可能な interface）を導入する。
-- [ ] (TODO) `apps/ldk-lcp-node/`（Rust）を追加し、peer/チャネル/支払い/custom message を提供する。
+- [x] (2026-01-07) `go-lcpd/proto/lnnode/v1/lnnode.proto` を追加（`LightningNodeService` RPC surface を定義）。
+- [x] (2026-01-07) `apps/ldk-lcp-node/` を新規追加し、gRPC サーバ stub が `cargo build` でコンパイルできる状態にした。
+- [ ] (TODO) `apps/ldk-lcp-node/` の LDK 実装を入れる（completed: gRPC/proto skeleton; remaining: peer/チャネル/支払い/invoice/custom message + 永続化 + chain sync）。
+- [ ] (TODO) `go-lcpd` 側に Lightning ノード抽象（実装差し替え可能な interface）を導入し、`lnnode.v1` の gRPC backend（`ldkgrpc` client）を追加する。
 - [ ] (TODO) `go-lcpd` を LDK ノードに接続して LCP を完走させる（regtest E2E）。
 
 ## Surprises & Discoveries
@@ -53,7 +55,7 @@ This plan MUST be maintained in accordance with `.codex/skills/lcp-execplan/refe
 
 ## Outcomes & Retrospective
 
-(未記入)
+(2026-01-07) 状態: `lnnode.v1` の proto を追加し、`apps/ldk-lcp-node` の Rust daemon skeleton が `cargo build` で通るところまで進んだ。次は `ldk-lcp-node` の実装（peer/チャネル/支払い/invoice/custom message + 永続化 + chain sync）を入れ、続いて `go-lcpd` の Lightning backend を `ldkgrpc` に差し替えて regtest E2E を回す。
 
 ## Context and Orientation
 
@@ -397,3 +399,4 @@ MVP 完了後、安定運用に必要な要素を入れます。
 Plan changes:
 
 - (2026-01-06) ユーザー要望により、lnd shim 案から「独立 LDK ノード + go-lcpd 変更許容」へ方針転換し、MVP の責務にチャネル open/close を含めた。
+- (2026-01-07) 進捗反映のため、`lnnode.v1` proto と `apps/ldk-lcp-node` skeleton 追加に合わせて Progress / Outcomes を更新した。

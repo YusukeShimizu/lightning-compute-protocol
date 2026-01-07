@@ -20,10 +20,12 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/inbounddispatch"
 	"github.com/bruwbird/lcp/go-lcpd/internal/jobstore"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lightningrpc"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode/lndgrpc"
 	"github.com/bruwbird/lcp/go-lcpd/internal/llm"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/provider"
 	"github.com/bruwbird/lcp/go-lcpd/internal/replaystore"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterjobstore"
@@ -507,7 +509,8 @@ func warnDeprecatedProviderConfigWhenModelsSet(logger *zap.SugaredLogger, cfg pr
 	if len(cfg.SupportedLegacyModels) > 0 {
 		logger.Warnw(
 			"provider YAML uses deprecated supported_llm_chat_profiles; ignoring because llm.models is set",
-			"hint", "remove supported_llm_chat_profiles and configure llm.models only",
+			"hint",
+			"remove supported_llm_chat_profiles and configure llm.models only",
 		)
 	}
 	if len(cfg.SupportedModels) > 0 {
@@ -549,7 +552,8 @@ func warnSupportedModelsDeprecated(logger *zap.SugaredLogger, usedLegacy bool) {
 	if usedLegacy {
 		logger.Warnw(
 			"provider YAML uses deprecated supported_llm_chat_profiles; migrate to supported_models or llm.models",
-			"hint", "define llm.models.<model>.price and remove supported_llm_chat_profiles",
+			"hint",
+			"define llm.models.<model>.price and remove supported_llm_chat_profiles",
 		)
 		return
 	}
@@ -747,13 +751,26 @@ func baseFXOptions(
 	commonProvides := fx.Provide(
 		func(l grpcListener) net.Listener { return l.Listener },
 		peerdirectory.New,
-		lndpeermsg.New,
 		lcpd.New,
 		grpcserver.New,
 		jobstore.New,
 		requesterjobstore.New,
 		requesterwait.New,
 		func() *replaystore.Store { return replaystore.New(0) },
+
+		provider.DefaultValidator,
+		providePeerMsgConfig,
+		fx.Annotate(
+			provideLightningBackend,
+			fx.As(new(lightningnode.Backend)),
+			fx.As(new(lightningnode.PeerSubscriber)),
+			fx.As(new(lightningnode.PeerMessenger)),
+			fx.As(new(lightningnode.Requester)),
+			fx.As(new(lightningnode.Invoicer)),
+		),
+		provider.NewHandler,
+		fx.Annotate(inbounddispatch.New, fx.As(new(peermsg.InboundMessageHandler))),
+		peermsg.New,
 	)
 
 	opts := []fx.Option{
@@ -762,37 +779,30 @@ func baseFXOptions(
 		fx.Supply(grpcListener{Listener: grpcLis}),
 		commonProvides,
 		fx.WithLogger(func() fxevent.Logger { return &fxevent.ZapLogger{Logger: baseLogger} }),
-		fx.Invoke(func(*grpc.Server, *lndpeermsg.PeerMessaging) {}),
+		fx.Invoke(func(*grpc.Server, *peermsg.PeerMessaging) {}),
 	}
 
 	if lndCfg != nil {
-		opts = append(opts,
-			fx.Supply(lndCfg),
-			fx.Provide(
-				provider.DefaultValidator,
-				provideLNDAdapter,
-				provideProviderMessenger,
-				provideProviderInvoiceCreator,
-				providePeerMessenger,
-				fx.Annotate(provideLightningRPC, fx.As(new(lcpd.LightningRPC))),
-				provider.NewHandler,
-				fx.Annotate(inbounddispatch.New, fx.As(new(lndpeermsg.InboundMessageHandler))),
-			),
-		)
-	} else {
-		opts = append(opts,
-			fx.Provide(
-				func() lndpeermsg.InboundMessageHandler {
-					return lndpeermsg.InboundMessageHandlerFunc(func(context.Context, lndpeermsg.InboundCustomMessage) {})
-				},
-			),
-		)
+		opts = append(opts, fx.Supply(lndCfg))
 	}
 
 	return opts
 }
 
-type lndAdapterParams struct {
+type peerMsgConfigParams struct {
+	fx.In
+
+	LNDConfig *lndpeermsg.Config `optional:"true"`
+}
+
+func providePeerMsgConfig(p peerMsgConfigParams) *peermsg.Config {
+	if p.LNDConfig == nil || p.LNDConfig.ManifestResendInterval == nil {
+		return nil
+	}
+	return &peermsg.Config{ManifestResendInterval: p.LNDConfig.ManifestResendInterval}
+}
+
+type lightningBackendParams struct {
 	fx.In
 
 	Lifecycle fx.Lifecycle
@@ -800,52 +810,27 @@ type lndAdapterParams struct {
 	Logger    *zap.SugaredLogger `optional:"true"`
 }
 
-func provideLNDAdapter(p lndAdapterParams) (*provider.LNDAdapter, error) {
-	adapter, err := provider.NewLNDAdapter(context.Background(), p.Config, p.Logger)
+func provideLightningBackend(p lightningBackendParams) (lightningnode.Backend, error) {
+	logger := p.Logger
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
+
+	if p.Config == nil || strings.TrimSpace(p.Config.RPCAddr) == "" {
+		return lightningnode.NewDisabled(), nil
+	}
+
+	backend, err := lndgrpc.New(context.Background(), *p.Config, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	p.Lifecycle.Append(fx.Hook{
 		OnStop: func(_ context.Context) error {
-			return adapter.Close()
+			return backend.Close()
 		},
 	})
-	return adapter, nil
-}
-
-func provideProviderMessenger(adapter *provider.LNDAdapter) provider.Messenger {
-	return adapter
-}
-
-func provideProviderInvoiceCreator(adapter *provider.LNDAdapter) provider.InvoiceCreator {
-	return adapter
-}
-
-func providePeerMessenger(adapter *provider.LNDAdapter) lcpd.PeerMessenger {
-	return adapter
-}
-
-type lightningRPCParams struct {
-	fx.In
-
-	Lifecycle fx.Lifecycle
-	Config    *lndpeermsg.Config `optional:"true"`
-	Logger    *zap.SugaredLogger `optional:"true"`
-}
-
-func provideLightningRPC(p lightningRPCParams) (*lightningrpc.Client, error) {
-	client, err := lightningrpc.New(context.Background(), p.Config, p.Logger)
-	if err != nil {
-		return nil, err
-	}
-
-	p.Lifecycle.Append(fx.Hook{
-		OnStop: func(_ context.Context) error {
-			return client.Close()
-		},
-	})
-	return client, nil
+	return backend, nil
 }
 
 func parseLogLevel(s string) zapcore.Level {

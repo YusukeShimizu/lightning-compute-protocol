@@ -14,9 +14,10 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/jobstore"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode"
 	"github.com/bruwbird/lcp/go-lcpd/internal/llm"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/replaystore"
 	"github.com/google/go-cmp/cmp"
@@ -31,10 +32,9 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: "lnbcrt1payment",
 		PaymentHash:    mustHash32(0xAA),
-		AddIndex:       7,
 	}
 	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
 	estimator := llm.NewApproxUsageEstimator()
@@ -68,10 +68,14 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 
 	model := "gpt-5.2"
 	req := newOpenAIChatCompletionsV1QuoteRequest(model)
-	inputBytes := fmt.Appendf(nil, `{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`, model)
+	inputBytes := fmt.Appendf(
+		nil,
+		`{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`,
+		model,
+	)
 	payload := mustEncodeQuoteRequest(t, req)
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -122,17 +126,17 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 		SHA256:   inputHash,
 	})
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
 		Payload:    beginPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
 		Payload:    chunkPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
 		Payload:    endPayload,
@@ -162,9 +166,6 @@ func TestHandler_HandleInputStream_SendsQuoteResponse(t *testing.T) {
 	}
 	if job.PaymentHash == nil || *job.PaymentHash != invoices.result.PaymentHash {
 		t.Fatalf("payment_hash mismatch")
-	}
-	if job.InvoiceAddIndex == nil || *job.InvoiceAddIndex != invoices.result.AddIndex {
-		t.Fatalf("invoice add_index mismatch: got nil or wrong value")
 	}
 
 	paramsBytes := []byte(nil)
@@ -228,10 +229,9 @@ func TestHandler_HandleQuoteRequest_RejectsUnsupportedModel(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: "lnbcrt1payment",
 		PaymentHash:    mustHash32(0xAA),
-		AddIndex:       7,
 	}
 	policy := llm.MustFixedExecutionPolicy(llm.DefaultMaxOutputTokens)
 	estimator := llm.NewApproxUsageEstimator()
@@ -271,7 +271,7 @@ func TestHandler_HandleQuoteRequest_RejectsUnsupportedModel(t *testing.T) {
 		t.Fatalf("encode quote_request: %v", err)
 	}
 
-	handler.handleQuoteRequest(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.handleQuoteRequest(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -316,10 +316,9 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: "lnbcrt1existing",
 		PaymentHash:    mustHash32(0xBB),
-		AddIndex:       4,
 	}
 	jobs := jobstore.New()
 
@@ -327,7 +326,11 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 	estimator := llm.NewApproxUsageEstimator()
 	model := "gpt-5.2"
 	req := newOpenAIChatCompletionsV1QuoteRequest(model)
-	inputBytes := fmt.Appendf(nil, `{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`, model)
+	inputBytes := fmt.Appendf(
+		nil,
+		`{"model":%q,"messages":[{"role":"user","content":"prompt"}]}`,
+		model,
+	)
 	price := mustQuotePriceForPrompt(t, policy, estimator, model, inputBytes).PriceMsat
 	quoteTTL := uint64(600)
 	quoteExpiry := uint64(clock.now.Unix()) + quoteTTL
@@ -364,16 +367,14 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 		PaymentRequest: invoices.result.PaymentRequest,
 	}
 	paymentHash := invoices.result.PaymentHash
-	addIndex := invoices.result.AddIndex
 	jobs.Upsert(jobstore.Job{
-		PeerPubKey:      "peer1",
-		JobID:           req.Envelope.JobID,
-		State:           jobstore.StateWaitingPayment,
-		QuoteExpiry:     quoteExpiry,
-		TermsHash:       &quoteResp.TermsHash,
-		PaymentHash:     &paymentHash,
-		InvoiceAddIndex: &addIndex,
-		QuoteResponse:   &quoteResp,
+		PeerPubKey:    "peer1",
+		JobID:         req.Envelope.JobID,
+		State:         jobstore.StateWaitingPayment,
+		QuoteExpiry:   quoteExpiry,
+		TermsHash:     &quoteResp.TermsHash,
+		PaymentHash:   &paymentHash,
+		QuoteResponse: &quoteResp,
 	})
 
 	handler := NewHandler(
@@ -396,7 +397,7 @@ func TestHandler_HandleQuoteRequest_ReusesExistingQuoteResponse(t *testing.T) {
 		t.Fatalf("encode quote_request: %v", err)
 	}
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -426,10 +427,9 @@ func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t
 	clock := &fakeClock{now: time.Unix(2000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: "lnbcrt1settle",
 		PaymentHash:    mustHash32(0xCC),
-		AddIndex:       12,
 	}
 	jobs := jobstore.New()
 	backend := &fakeBackend{
@@ -462,7 +462,7 @@ func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t
 	inputBytes := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
 	payload := mustEncodeQuoteRequest(t, req)
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -512,17 +512,17 @@ func TestHandler_RunJob_OpenAIChatCompletionsV1_SettledSendsJSONResultMetadata(t
 		SHA256:   inputHash,
 	})
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
 		Payload:    beginPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
 		Payload:    chunkPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
 		Payload:    endPayload,
@@ -583,10 +583,9 @@ func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(2000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: paymentRequest,
 		PaymentHash:    mustHash32(0xCC),
-		AddIndex:       12,
 	}
 	jobs := jobstore.New()
 	backend := &fakeBackend{
@@ -623,7 +622,7 @@ func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
 	)
 	payload := mustEncodeQuoteRequest(t, req)
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -674,17 +673,17 @@ func TestHandler_LogsDoNotContainPromptOrResult(t *testing.T) {
 		SHA256:   inputHash,
 	})
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
 		Payload:    beginPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamChunk),
 		Payload:    chunkPayload,
 	})
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamEnd),
 		Payload:    endPayload,
@@ -734,10 +733,9 @@ func TestHandler_HandleStreamBegin_OpenAIChatCompletionsV1_RejectsWrongContentTy
 	clock := &fakeClock{now: time.Unix(2000, 0)}
 	messenger := &fakeMessenger{}
 	invoices := newFakeInvoiceCreator()
-	invoices.result = InvoiceResult{
+	invoices.result = lightningnode.CreateInvoiceResponse{
 		PaymentRequest: "lnbcrt1settle",
 		PaymentHash:    mustHash32(0xCC),
-		AddIndex:       12,
 	}
 	jobs := jobstore.New()
 	backend := &fakeBackend{
@@ -770,7 +768,7 @@ func TestHandler_HandleStreamBegin_OpenAIChatCompletionsV1_RejectsWrongContentTy
 	inputBytes := []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`)
 	payload := mustEncodeQuoteRequest(t, req)
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
 		Payload:    payload,
@@ -798,7 +796,7 @@ func TestHandler_HandleStreamBegin_OpenAIChatCompletionsV1_RejectsWrongContentTy
 		ContentEncoding: "identity",
 	})
 
-	handler.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
+	handler.HandleInboundCustomMessage(context.Background(), peermsg.InboundCustomMessage{
 		PeerPubKey: "peer1",
 		MsgType:    uint16(lcpwire.MessageTypeStreamBegin),
 		Payload:    beginPayload,
@@ -858,7 +856,7 @@ func (f *fakeMessenger) messages() []sentMessage {
 
 type fakeInvoiceCreator struct {
 	mu      sync.Mutex
-	result  InvoiceResult
+	result  lightningnode.CreateInvoiceResponse
 	err     error
 	settleC chan struct{}
 	created int
@@ -872,23 +870,26 @@ func newFakeInvoiceCreator() *fakeInvoiceCreator {
 
 func (f *fakeInvoiceCreator) CreateInvoice(
 	_ context.Context,
-	_ InvoiceRequest,
-) (InvoiceResult, error) {
+	_ lightningnode.CreateInvoiceRequest,
+) (lightningnode.CreateInvoiceResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created++
 	if f.err != nil {
-		return InvoiceResult{}, f.err
+		return lightningnode.CreateInvoiceResponse{}, f.err
 	}
 	return f.result, nil
 }
 
-func (f *fakeInvoiceCreator) WaitForSettlement(ctx context.Context, _ lcp.Hash32, _ uint64) error {
+func (f *fakeInvoiceCreator) WaitInvoiceSettled(
+	ctx context.Context,
+	_ lcp.Hash32,
+) (lightningnode.InvoiceSettlementState, error) {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return lightningnode.InvoiceSettlementStateUnspecified, ctx.Err()
 	case <-f.settleC:
-		return nil
+		return lightningnode.InvoiceSettlementStateSettled, nil
 	}
 }
 

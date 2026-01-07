@@ -338,7 +338,9 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestMarksReadyAndRepliesOnce(t
 	}
 }
 
-func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesOnceEvenIfAlreadySentOnOnline(t *testing.T) {
+func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesOnceEvenIfAlreadySentOnOnline(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	peerBytes, peerPubKey := newPeerPubKey()

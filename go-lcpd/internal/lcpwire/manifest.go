@@ -66,7 +66,10 @@ func EncodeManifest(m Manifest) ([]byte, error) {
 
 	if m.MaxInflightJobs != nil {
 		maxInflight := *m.MaxInflightJobs
-		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(manifestTLVTypeMaxInflightJobs), &maxInflight))
+		records = append(
+			records,
+			tlv.MakePrimitiveRecord(tlv.Type(manifestTLVTypeMaxInflightJobs), &maxInflight),
+		)
 	}
 
 	return encodeTLVStream(records)

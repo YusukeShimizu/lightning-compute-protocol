@@ -20,9 +20,10 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/envconfig"
 	"github.com/bruwbird/lcp/go-lcpd/internal/jobstore"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode"
 	"github.com/bruwbird/lcp/go-lcpd/internal/llm"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/replaystore"
 	"go.uber.org/zap"
@@ -36,6 +37,8 @@ const (
 
 	defaultMaxStreamBytes = uint64(4_194_304)
 	defaultMaxJobBytes    = uint64(8_388_608)
+
+	maxInt64 = int64(^uint64(0) >> 1)
 
 	contentTypeTextPlain       = "text/plain; charset=utf-8"
 	contentTypeApplicationJSON = "application/json; charset=utf-8"
@@ -51,37 +54,11 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-type Messenger interface {
-	SendCustomMessage(
-		ctx context.Context,
-		peerPubKey string,
-		msgType lcpwire.MessageType,
-		payload []byte,
-	) error
-}
-
-type InvoiceRequest struct {
-	DescriptionHash lcp.Hash32
-	PriceMsat       uint64
-	ExpirySeconds   uint64
-}
-
-type InvoiceResult struct {
-	PaymentRequest string
-	PaymentHash    lcp.Hash32
-	AddIndex       uint64
-}
-
-type InvoiceCreator interface {
-	CreateInvoice(ctx context.Context, req InvoiceRequest) (InvoiceResult, error)
-	WaitForSettlement(ctx context.Context, paymentHash lcp.Hash32, addIndex uint64) error
-}
-
 type Handler struct {
 	cfg       Config
 	validator QuoteRequestValidator
-	messenger Messenger
-	invoices  InvoiceCreator
+	messenger lightningnode.PeerMessenger
+	invoices  lightningnode.Invoicer
 	backend   computebackend.Backend
 	policy    llm.ExecutionPolicyProvider
 	estimator llm.UsageEstimator
@@ -101,8 +78,8 @@ type Handler struct {
 func NewHandler(
 	cfg Config,
 	validator QuoteRequestValidator,
-	messenger Messenger,
-	invoices InvoiceCreator,
+	messenger lightningnode.PeerMessenger,
+	invoices lightningnode.Invoicer,
 	backend computebackend.Backend,
 	policy llm.ExecutionPolicyProvider,
 	estimator llm.UsageEstimator,
@@ -144,7 +121,7 @@ func NewHandler(
 
 func (h *Handler) HandleInboundCustomMessage(
 	ctx context.Context,
-	msg lndpeermsg.InboundCustomMessage,
+	msg peermsg.InboundCustomMessage,
 ) {
 	switch lcpwire.MessageType(msg.MsgType) {
 	case lcpwire.MessageTypeQuoteRequest:
@@ -167,7 +144,7 @@ func (h *Handler) HandleInboundCustomMessage(
 	}
 }
 
-func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+func (h *Handler) handleQuoteRequest(ctx context.Context, msg peermsg.InboundCustomMessage) {
 	req, err := lcpwire.DecodeQuoteRequest(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
@@ -301,19 +278,26 @@ func (h *Handler) handleExistingQuoteRequest(
 		return
 	}
 
-	invoice := invoiceFromJob(existing)
+	if existing.PaymentHash == nil {
+		h.logger.Warnw(
+			"cannot resume job runner: missing payment_hash",
+			"peer_pub_key", peerPubKey,
+			"job_id", req.Envelope.JobID.String(),
+		)
+		return
+	}
 	h.startJobRunner(
 		ctx,
 		key,
 		*existing.QuoteRequest,
 		*existing.InputStream,
 		*existing.QuoteResponse,
-		invoice,
+		*existing.PaymentHash,
 		remoteMaxPayload,
 	)
 }
 
-func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+func (h *Handler) handleStreamBegin(ctx context.Context, msg peermsg.InboundCustomMessage) {
 	begin, err := lcpwire.DecodeStreamBegin(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
@@ -416,7 +400,7 @@ func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundC
 	h.jobs.Upsert(job)
 }
 
-func (h *Handler) handleStreamChunk(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+func (h *Handler) handleStreamChunk(ctx context.Context, msg peermsg.InboundCustomMessage) {
 	chunk, err := lcpwire.DecodeStreamChunk(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
@@ -486,7 +470,7 @@ func (h *Handler) handleStreamChunk(ctx context.Context, msg lndpeermsg.InboundC
 	h.jobs.Upsert(job)
 }
 
-func (h *Handler) handleStreamEnd(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
+func (h *Handler) handleStreamEnd(ctx context.Context, msg peermsg.InboundCustomMessage) {
 	end, err := lcpwire.DecodeStreamEnd(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
@@ -697,9 +681,9 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 		invoiceExpirySeconds = 1
 	}
 
-	invoice, err := h.invoices.CreateInvoice(ctx, InvoiceRequest{
+	invoice, err := h.invoices.CreateInvoice(ctx, lightningnode.CreateInvoiceRequest{
 		DescriptionHash: termsHash,
-		PriceMsat:       priceMsat,
+		AmountMsat:      priceMsat,
 		ExpirySeconds:   invoiceExpirySeconds,
 	})
 	if err != nil {
@@ -740,22 +724,20 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 	quoteRespCopy := quoteResp
 	termsCopy := quoteResp.TermsHash
 	paymentHash := invoice.PaymentHash
-	addIndex := invoice.AddIndex
 
 	h.jobs.Upsert(jobstore.Job{
-		PeerPubKey:      key.PeerPubKey,
-		JobID:           key.JobID,
-		State:           jobstore.StateWaitingPayment,
-		QuoteRequest:    &reqCopy,
-		InputStream:     &inputCopy,
-		QuoteExpiry:     quoteExpiry,
-		TermsHash:       &termsCopy,
-		PaymentHash:     &paymentHash,
-		InvoiceAddIndex: &addIndex,
-		QuoteResponse:   &quoteRespCopy,
+		PeerPubKey:    key.PeerPubKey,
+		JobID:         key.JobID,
+		State:         jobstore.StateWaitingPayment,
+		QuoteRequest:  &reqCopy,
+		InputStream:   &inputCopy,
+		QuoteExpiry:   quoteExpiry,
+		TermsHash:     &termsCopy,
+		PaymentHash:   &paymentHash,
+		QuoteResponse: &quoteRespCopy,
 	})
 
-	h.startJobRunner(ctx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
+	h.startJobRunner(ctx, key, reqCopy, inputCopy, quoteResp, paymentHash, remoteMaxPayload)
 }
 
 func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
@@ -796,7 +778,13 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 		return false
 	}
 	if req.ParamsBytes == nil {
-		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedParams, "params are required")
+		h.sendError(
+			ctx,
+			peerPubKey,
+			req.Envelope,
+			lcpwire.ErrorCodeUnsupportedParams,
+			"params are required",
+		)
 		return true
 	}
 
@@ -845,7 +833,7 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 	return true
 }
 
-func (h *Handler) handleCancel(_ context.Context, msg lndpeermsg.InboundCustomMessage) {
+func (h *Handler) handleCancel(_ context.Context, msg peermsg.InboundCustomMessage) {
 	cancelMsg, err := lcpwire.DecodeCancel(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
@@ -934,19 +922,6 @@ func (h *Handler) newQuoteResponse(
 		TermsHash:      termsHash,
 		PaymentRequest: paymentRequest,
 	}
-}
-
-func invoiceFromJob(job jobstore.Job) InvoiceResult {
-	invoice := InvoiceResult{
-		PaymentRequest: job.QuoteResponse.PaymentRequest,
-	}
-	if job.PaymentHash != nil {
-		invoice.PaymentHash = *job.PaymentHash
-	}
-	if job.InvoiceAddIndex != nil {
-		invoice.AddIndex = *job.InvoiceAddIndex
-	}
-	return invoice
 }
 
 func (h *Handler) nowUnix() (uint64, bool) {
@@ -1058,7 +1033,7 @@ func (h *Handler) startJobRunner(
 	req lcpwire.QuoteRequest,
 	input jobstore.InputStreamState,
 	quoteResp lcpwire.QuoteResponse,
-	invoice InvoiceResult,
+	paymentHash lcp.Hash32,
 	remoteMaxPayload uint32,
 ) {
 	if h.invoices == nil || h.messenger == nil {
@@ -1105,7 +1080,7 @@ func (h *Handler) startJobRunner(
 	h.inFlight++
 	h.jobMu.Unlock()
 
-	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
+	go h.runJob(jobCtx, key, reqCopy, inputCopy, quoteResp, paymentHash, remoteMaxPayload)
 }
 
 //nolint:gocognit,funlen,nestif // Execution path handles many validation and error branches.
@@ -1115,7 +1090,7 @@ func (h *Handler) runJob(
 	req lcpwire.QuoteRequest,
 	input jobstore.InputStreamState,
 	quoteResp lcpwire.QuoteResponse,
-	invoice InvoiceResult,
+	paymentHash lcp.Hash32,
 	remoteMaxPayload uint32,
 ) {
 	defer h.forgetJob(key)
@@ -1134,7 +1109,8 @@ func (h *Handler) runJob(
 	}
 
 	settleStart := time.Now()
-	if err := h.invoices.WaitForSettlement(ctx, invoice.PaymentHash, invoice.AddIndex); err != nil {
+	settleState, err := h.invoices.WaitInvoiceSettled(ctx, paymentHash)
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			h.logger.Debugw(
 				"job canceled before settlement",
@@ -1148,6 +1124,16 @@ func (h *Handler) runJob(
 			"peer_pub_key", key.PeerPubKey,
 			"job_id", jobID,
 			"err", err,
+		)
+		h.updateState(key, jobstore.StateFailed)
+		return
+	}
+	if settleState != lightningnode.InvoiceSettlementStateSettled {
+		h.logger.Warnw(
+			"invoice not settled",
+			"peer_pub_key", key.PeerPubKey,
+			"job_id", jobID,
+			"state", settleState,
 		)
 		h.updateState(key, jobstore.StateFailed)
 		return
@@ -1195,7 +1181,10 @@ func (h *Handler) runJob(
 				if ctx.Err() != nil {
 					return
 				}
-				streamNilErr := fmt.Errorf("%w: streaming output is nil", computebackend.ErrBackendUnavailable)
+				streamNilErr := fmt.Errorf(
+					"%w: streaming output is nil",
+					computebackend.ErrBackendUnavailable,
+				)
 				code := computeErrorCode(streamNilErr)
 				execDuration := time.Since(execStart)
 				h.logJobExecutionFailed(meta, settleDuration, execDuration, code, streamNilErr)
@@ -1263,7 +1252,10 @@ func (h *Handler) runJob(
 		if ctx.Err() != nil {
 			return
 		}
-		execErr := fmt.Errorf("%w: execute backend returned empty output", computebackend.ErrBackendUnavailable)
+		execErr := fmt.Errorf(
+			"%w: execute backend returned empty output",
+			computebackend.ErrBackendUnavailable,
+		)
 		code := computeErrorCode(execErr)
 		execDuration := time.Since(execStart)
 		h.logJobExecutionFailed(meta, settleDuration, execDuration, code, execErr)
@@ -2275,7 +2267,8 @@ func validateInputStream(
 				Message: "request_json.model is required",
 			}
 		}
-		if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+		if len(bytes.TrimSpace(parsed.Input)) == 0 ||
+			bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
 			return &ValidationError{
 				Code:    lcpwire.ErrorCodeUnsupportedParams,
 				Message: "request_json.input is required",
@@ -2625,7 +2618,8 @@ func (h *Handler) planOpenAIResponsesV1Task(
 			computebackend.ErrInvalidTask,
 		)
 	}
-	if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+	if len(bytes.TrimSpace(parsed.Input)) == 0 ||
+		bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
 		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: request_json.input is required",
 			computebackend.ErrInvalidTask,

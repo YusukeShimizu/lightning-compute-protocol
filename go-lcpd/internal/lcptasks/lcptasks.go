@@ -254,7 +254,8 @@ func validateOpenAIResponsesV1(spec *lcpdv1.OpenAIResponsesV1TaskSpec) error {
 	if parsed.Model == "" {
 		return ErrOpenAIResponsesV1RequestModelRequired
 	}
-	if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
+	if len(bytes.TrimSpace(parsed.Input)) == 0 ||
+		bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
 		return ErrOpenAIResponsesV1RequestInputRequired
 	}
 	if parsed.Model != params.GetModel() {

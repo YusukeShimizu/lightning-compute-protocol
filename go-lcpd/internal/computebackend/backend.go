@@ -64,5 +64,8 @@ func (b *Disabled) Execute(context.Context, Task) (ExecutionResult, error) {
 }
 
 func (b *Disabled) ExecuteStreaming(context.Context, Task) (StreamingExecutionResult, error) {
-	return StreamingExecutionResult{}, fmt.Errorf("%w: compute backend is disabled", ErrBackendUnavailable)
+	return StreamingExecutionResult{}, fmt.Errorf(
+		"%w: compute backend is disabled",
+		ErrBackendUnavailable,
+	)
 }

@@ -14,9 +14,9 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcptasks"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lightningrpc"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterjobstore"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterwait"
@@ -36,30 +36,30 @@ func (f fakeClock) Now() time.Time { return f.now }
 
 type fakeLightning struct {
 	mu           sync.Mutex
-	getInfoFn    func(context.Context) (lightningrpc.Info, error)
-	decodeFn     func(context.Context, string) (lightningrpc.PaymentRequestInfo, error)
+	getInfoFn    func(context.Context) (lightningnode.NodeInfo, error)
+	decodeFn     func(context.Context, string) (lightningnode.DecodedInvoice, error)
 	payInvoiceFn func(context.Context, string) (lcp.Hash32, error)
 }
 
-func (f *fakeLightning) GetInfo(ctx context.Context) (lightningrpc.Info, error) {
+func (f *fakeLightning) GetNodeInfo(ctx context.Context) (lightningnode.NodeInfo, error) {
 	f.mu.Lock()
 	fn := f.getInfoFn
 	f.mu.Unlock()
 	if fn == nil {
-		return lightningrpc.Info{}, errors.New("GetInfo not implemented")
+		return lightningnode.NodeInfo{}, errors.New("GetNodeInfo not implemented")
 	}
 	return fn(ctx)
 }
 
-func (f *fakeLightning) DecodePaymentRequest(
+func (f *fakeLightning) DecodeInvoice(
 	ctx context.Context,
 	paymentRequest string,
-) (lightningrpc.PaymentRequestInfo, error) {
+) (lightningnode.DecodedInvoice, error) {
 	f.mu.Lock()
 	fn := f.decodeFn
 	f.mu.Unlock()
 	if fn == nil {
-		return lightningrpc.PaymentRequestInfo{}, errors.New("DecodePaymentRequest not implemented")
+		return lightningnode.DecodedInvoice{}, errors.New("DecodeInvoice not implemented")
 	}
 	return fn(ctx, paymentRequest)
 }
@@ -155,8 +155,8 @@ func TestGetLocalInfo_ReturnsManifestAndNodeID(t *testing.T) {
 
 	nodeID := "02" + strings.Repeat("a", 64)
 	ln := &fakeLightning{
-		getInfoFn: func(context.Context) (lightningrpc.Info, error) {
-			return lightningrpc.Info{IdentityPubKey: nodeID}, nil
+		getInfoFn: func(context.Context) (lightningnode.NodeInfo, error) {
+			return lightningnode.NodeInfo{IdentityPubKey: nodeID}, nil
 		},
 	}
 
@@ -171,7 +171,7 @@ func TestGetLocalInfo_ReturnsManifestAndNodeID(t *testing.T) {
 	svc := mustNewService(t, Params{
 		PeerDirectory: peerdirectory.New(),
 		LocalManifest: localManifest,
-		LightningRPC:  ln,
+		Lightning:     ln,
 	})
 
 	resp, err := svc.GetLocalInfo(context.Background(), &lcpdv1.GetLocalInfoRequest{})
@@ -369,8 +369,8 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	}
 
 	ln := &fakeLightning{
-		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
-			return lightningrpc.PaymentRequestInfo{
+		decodeFn: func(context.Context, string) (lightningnode.DecodedInvoice, error) {
+			return lightningnode.DecodedInvoice{
 				DescriptionHash: termsHash,
 				PayeePubKey:     peerID,
 				AmountMsat:      123,
@@ -473,14 +473,20 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		context.Background(),
 		inbound(peerID, lcpwire.MessageTypeStreamChunk, chunkPayload),
 	)
-	waiter.HandleInboundCustomMessage(context.Background(), inbound(peerID, lcpwire.MessageTypeStreamEnd, endPayload))
-	waiter.HandleInboundCustomMessage(context.Background(), inbound(peerID, lcpwire.MessageTypeResult, terminalPayload))
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeStreamEnd, endPayload),
+	)
+	waiter.HandleInboundCustomMessage(
+		context.Background(),
+		inbound(peerID, lcpwire.MessageTypeResult, terminalPayload),
+	)
 
 	svc := mustNewService(t, Params{
 		Clock:         clock,
 		JobStore:      jobs,
 		Waiter:        waiter,
-		LightningRPC:  ln,
+		Lightning:     ln,
 		PeerDirectory: peerdirectory.New(),
 	})
 
@@ -560,8 +566,8 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 
 	payCalled := make(chan struct{})
 	ln := &fakeLightning{
-		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
-			return lightningrpc.PaymentRequestInfo{
+		decodeFn: func(context.Context, string) (lightningnode.DecodedInvoice, error) {
+			return lightningnode.DecodedInvoice{
 				DescriptionHash: termsHash,
 				PayeePubKey:     peerID,
 				AmountMsat:      123,
@@ -663,7 +669,7 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		Clock:         clock,
 		JobStore:      jobs,
 		Waiter:        waiter,
-		LightningRPC:  ln,
+		Lightning:     ln,
 		PeerDirectory: peerdirectory.New(),
 	})
 
@@ -720,7 +726,8 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 	if begin == nil {
 		t.Fatalf("expected first event to be result_begin")
 	}
-	if begin.GetContentType() != resultContentType || begin.GetContentEncoding() != resultContentEncoding {
+	if begin.GetContentType() != resultContentType ||
+		begin.GetContentEncoding() != resultContentEncoding {
 		t.Fatalf(
 			"result_begin content type/encoding mismatch (-want +got):\n%s",
 			cmp.Diff(
@@ -743,7 +750,10 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		t.Fatalf("expected third event to be result_end")
 	}
 	if end.GetResultLen() != resultLen {
-		t.Fatalf("result_end len mismatch (-want +got):\n%s", cmp.Diff(resultLen, end.GetResultLen()))
+		t.Fatalf(
+			"result_end len mismatch (-want +got):\n%s",
+			cmp.Diff(resultLen, end.GetResultLen()),
+		)
 	}
 	if diff := cmp.Diff(resultHash[:], end.GetResultHash()); diff != "" {
 		t.Fatalf("result_end hash mismatch (-want +got):\n%s", diff)
@@ -766,7 +776,10 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		t.Fatalf("result content_type mismatch (-want +got):\n%s", cmp.Diff(resultContentType, got))
 	}
 	if got := result.GetContentEncoding(); got != resultContentEncoding {
-		t.Fatalf("result content_encoding mismatch (-want +got):\n%s", cmp.Diff(resultContentEncoding, got))
+		t.Fatalf(
+			"result content_encoding mismatch (-want +got):\n%s",
+			cmp.Diff(resultContentEncoding, got),
+		)
 	}
 }
 
@@ -819,8 +832,8 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 	}
 
 	ln := &fakeLightning{
-		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
-			return lightningrpc.PaymentRequestInfo{
+		decodeFn: func(context.Context, string) (lightningnode.DecodedInvoice, error) {
+			return lightningnode.DecodedInvoice{
 				DescriptionHash: termsHash,
 				PayeePubKey:     peerID,
 				AmountMsat:      124,
@@ -834,7 +847,7 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 		Clock:         clock,
 		JobStore:      jobs,
 		Waiter:        requesterwait.New(nil, nil),
-		LightningRPC:  ln,
+		Lightning:     ln,
 		PeerDirectory: peerdirectory.New(),
 	})
 
@@ -895,8 +908,8 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 	}
 
 	ln := &fakeLightning{
-		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
-			return lightningrpc.PaymentRequestInfo{
+		decodeFn: func(context.Context, string) (lightningnode.DecodedInvoice, error) {
+			return lightningnode.DecodedInvoice{
 				DescriptionHash: termsHash,
 				PayeePubKey:     peerID,
 				AmountMsat:      123,
@@ -910,7 +923,7 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 		Clock:         clock,
 		JobStore:      jobs,
 		Waiter:        requesterwait.New(nil, nil),
-		LightningRPC:  ln,
+		Lightning:     ln,
 		PeerDirectory: peerdirectory.New(),
 	})
 
@@ -971,8 +984,8 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 	}
 
 	ln := &fakeLightning{
-		decodeFn: func(context.Context, string) (lightningrpc.PaymentRequestInfo, error) {
-			return lightningrpc.PaymentRequestInfo{
+		decodeFn: func(context.Context, string) (lightningnode.DecodedInvoice, error) {
+			return lightningnode.DecodedInvoice{
 				DescriptionHash: termsHash,
 				PayeePubKey:     peerID,
 				AmountMsat:      123,
@@ -986,7 +999,7 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 		Clock:         clock,
 		JobStore:      jobs,
 		Waiter:        requesterwait.New(nil, nil),
-		LightningRPC:  ln,
+		Lightning:     ln,
 		PeerDirectory: peerdirectory.New(),
 	})
 
@@ -1005,7 +1018,7 @@ func TestAcceptAndExecute_RejectsPayInvoiceFalse(t *testing.T) {
 		PeerDirectory: peerdirectory.New(),
 		JobStore:      requesterjobstore.New(),
 		Waiter:        requesterwait.New(nil, nil),
-		LightningRPC:  &fakeLightning{},
+		Lightning:     &fakeLightning{},
 	})
 
 	_, err := svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
@@ -1023,7 +1036,7 @@ func TestAcceptAndExecute_JobNotFound(t *testing.T) {
 		PeerDirectory: peerdirectory.New(),
 		JobStore:      requesterjobstore.New(),
 		Waiter:        requesterwait.New(nil, nil),
-		LightningRPC:  &fakeLightning{},
+		Lightning:     &fakeLightning{},
 	})
 
 	_, err := svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
@@ -1303,10 +1316,16 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 		t.Fatalf("stream_begin.job_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if begin.TotalLen == nil || *begin.TotalLen != wantInputLen {
-		t.Fatalf("stream_begin.total_len mismatch (-want +got):\n%s", cmp.Diff(wantInputLen, begin.TotalLen))
+		t.Fatalf(
+			"stream_begin.total_len mismatch (-want +got):\n%s",
+			cmp.Diff(wantInputLen, begin.TotalLen),
+		)
 	}
 	if begin.SHA256 == nil || *begin.SHA256 != wantInputHash {
-		t.Fatalf("stream_begin.sha256 mismatch (-want +got):\n%s", cmp.Diff(wantInputHash, begin.SHA256))
+		t.Fatalf(
+			"stream_begin.sha256 mismatch (-want +got):\n%s",
+			cmp.Diff(wantInputHash, begin.SHA256),
+		)
 	}
 	if got, want := begin.ContentType, lcptasks.ContentTypeApplicationJSONUTF8; got != want {
 		t.Fatalf("stream_begin.content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
@@ -1388,8 +1407,8 @@ func inbound(
 	peerID string,
 	msgType lcpwire.MessageType,
 	payload []byte,
-) lndpeermsg.InboundCustomMessage {
-	return lndpeermsg.InboundCustomMessage{
+) peermsg.InboundCustomMessage {
+	return peermsg.InboundCustomMessage{
 		PeerPubKey: peerID,
 		MsgType:    uint16(msgType),
 		Payload:    payload,

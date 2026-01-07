@@ -189,7 +189,9 @@ func TestE2E_Regtest_OpenAIServe_StreamAndResponses(t *testing.T) {
 			t,
 			httpClient,
 			fmt.Sprintf("http://%s/v1/chat/completions", httpAddr),
-			[]byte(`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+			[]byte(
+				`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hello"}]}`,
+			),
 		)
 
 		if diff := cmp.Diff(http.StatusOK, resp.StatusCode); diff != "" {
@@ -282,10 +284,20 @@ func TestE2E_Regtest_OpenAIServe_StreamAndResponses(t *testing.T) {
 	})
 }
 
-func mustPostJSON(t *testing.T, client *http.Client, url string, body []byte) (*http.Response, []byte) {
+func mustPostJSON(
+	t *testing.T,
+	client *http.Client,
+	url string,
+	body []byte,
+) (*http.Response, []byte) {
 	t.Helper()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		url,
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
