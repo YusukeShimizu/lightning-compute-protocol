@@ -1,0 +1,127 @@
+---
+title: lcp-quickstart (CLI)
+description: Guided setup for testnet/mainnet to run lcpd-grpcd + openai-serve against your lnd.
+---
+
+`lcp-quickstart` is a small CLI that helps you bring up a local “Requester stack”:
+
+- `lnd` (yours; optionally started by the tool)
+- `lcpd-grpcd` (Requester)
+- `openai-serve` (OpenAI-compatible HTTP gateway)
+
+The goal is an observable outcome: `curl http://127.0.0.1:8080/healthz` returns `ok`.
+
+## Safety notes
+
+- Mainnet moves real funds. Mainnet “up” requires explicit consent: `--i-understand-mainnet`.
+- Wallet creation/unlock is **not** automated. If needed, run:
+  - `lcp-quickstart <testnet|mainnet> lncli create`
+  - `lcp-quickstart <testnet|mainnet> lncli unlock`
+- `lcpd-grpcd` is forced to bind loopback only (`127.0.0.1` / `localhost`).
+- `openai-serve` binds loopback by default. If you bind it to a non-loopback address, you must pass
+  `--i-understand-exposing-openai` and set `--openai-api-keys` (non-empty).
+
+## Install
+
+From the repository root:
+
+```sh
+cd apps/lcp-quickstart
+go install ./cmd/lcp-quickstart
+```
+
+`lcp-quickstart` builds `lcpd-grpcd` and `openai-serve` from this repository on demand.
+
+It can also auto-install `lnd` and `lncli` (downloaded into `~/.lcp-quickstart/bin/`) if they are missing.
+
+If repo-root auto-detection fails, run it from within the repo or pass `--repo-root <path>`.
+
+## Run (testnet)
+
+Testnet requires an explicit Provider:
+
+```sh
+lcp-quickstart testnet up --provider "<pubkey>@<host:port>"
+```
+
+If `lnd` is not running, you can try a best-effort start:
+
+```sh
+lcp-quickstart testnet up --provider "<pubkey>@<host:port>" --start-lnd
+```
+
+If you see a “channel/route required” error, you need outbound liquidity. You can opt into an `lncli openchannel` attempt:
+
+```sh
+lcp-quickstart testnet up \
+  --provider "<pubkey>@<host:port>" \
+  --open-channel --channel-sats <sats>
+```
+
+## Run (mainnet)
+
+Mainnet requires explicit opt-in:
+
+```sh
+lcp-quickstart mainnet up --i-understand-mainnet
+```
+
+You can override the Provider with `--provider "<pubkey>@<host:port>"`. If omitted, it uses:
+
+```text
+03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db983@54.214.32.132:20309
+```
+
+Mainnet also sets a conservative default price cap for `openai-serve` (`OPENAI_SERVE_MAX_PRICE_MSAT`). Override via
+`--openai-max-price-msat`.
+
+## Verify (HTTP)
+
+Health check:
+
+```sh
+curl -sS http://127.0.0.1:8080/healthz
+```
+
+Expected output:
+
+```text
+ok
+```
+
+Chat completions (default API key is `lcp-dev`):
+
+```sh
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer lcp-dev' \
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+## Operations
+
+```sh
+lcp-quickstart <testnet|mainnet> status
+lcp-quickstart <testnet|mainnet> lncli <args...>
+lcp-quickstart <testnet|mainnet> logs <lnd|lcpd-grpcd|openai-serve>
+lcp-quickstart <testnet|mainnet> down
+lcp-quickstart <testnet|mainnet> reset --force
+```
+
+`status` prints “next steps” guidance (unlock wallet, connect Provider, open a channel, etc).
+
+## Workspace layout
+
+By default, the tool writes to `~/.lcp-quickstart/`:
+
+- `state.json`: machine-readable state snapshot
+- `logs/<component>.log`: logs
+- `pids/<component>.pid`: PID tracking (for managed processes)
+- `bin/`: built binaries (`lcpd-grpcd`, `openai-serve`)
+
+Override with `--home <dir>`.
+
+## Related docs
+
+- Manual mainnet walkthrough: [go-lcpd quickstart (mainnet)](/go-lcpd/docs/quickstart-mainnet)
+- OpenAI gateway behavior/config: [openai-serve overview](/openai-serve/overview) / [configuration](/openai-serve/configuration)

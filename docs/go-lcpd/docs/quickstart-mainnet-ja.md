@@ -1,5 +1,8 @@
 # クイックスタート（mainnet）
 
+`openai-serve`（OpenAI互換HTTP）まで含めて “ガイド付きで一式起動” したい場合は、
+[lcp-quickstart](/lcp-quickstart/overview-ja) を参照してください。このページは手動の `go-lcpd` 手順です。
+
 ## 安全性と運用上の注意（mainnet）
 
 - このプロジェクトは未監査です。mainnet で送金 / チャネル開設 / 請求書支払いを行うと、資金を失う可能性があります。
