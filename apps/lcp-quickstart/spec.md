@@ -21,6 +21,14 @@ The keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpret
   Rationale: logs are commonly shared; leaks are catastrophic.
 - The app MUST bind local services (`lcpd-grpcd`, `openai-serve`, optional local API for UI) to `127.0.0.1` by default.
   Rationale: these processes can spend funds or expose sensitive metadata if reachable remotely.
+- The app MUST refuse to bind `lcpd-grpcd` to non-loopback addresses.
+  Rationale: `lcpd-grpcd` has no built-in auth and can spend sats via the user’s `lnd`.
+- The app MUST refuse to bind `openai-serve` to non-loopback addresses unless the user passes `--i-understand-exposing-openai` and configures API keys (`--openai-api-keys` non-empty).
+  Rationale: exposing the OpenAI-compatible HTTP surface without explicit consent/auth is unsafe.
+- The app MAY auto-install `lnd` and `lncli` by downloading official release binaries into the workspace `bin/` directory.
+  Rationale: reduce onboarding friction and avoid OS-specific package managers.
+- If auto-installing `lnd`/`lncli`, the app SHOULD verify the tarball SHA256 using the release `manifest-<version>.txt`.
+  Rationale: detect corruption and avoid partially downloaded/cached artifacts.
 - The app MUST pin `openai-serve` routing to a single Provider peer id (`OPENAI_SERVE_DEFAULT_PEER_ID`) for both testnet and mainnet.
   Rationale: prevent accidental routing to an arbitrary connected peer.
 - The app SHOULD set a conservative `OPENAI_SERVE_MAX_PRICE_MSAT` default for mainnet.
@@ -137,8 +145,8 @@ The keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpret
        - start `lnd` via `ManagedLND.Start(...)` and retry `LNCLI.GetInfo(testnet)`.
      - If `LNCLI.DetectWalletState(testnet)` is `uninitialized` or `locked`:
        - print the exact next command(s) to run (interactive) and exit non-zero:
-         - `lncli --network=testnet create` (first time)
-         - `lncli --network=testnet unlock` (when locked)
+         - `lcp-quickstart testnet lncli create` (first time)
+         - `lcp-quickstart testnet lncli unlock` (when locked)
      - Validate `LNCLI.ValidateNetwork(testnet, getinfo_json)` succeeds.
      - Parse `provider_peer_id` from the `--provider` string.
      - `LNCLI.ConnectPeer(testnet, provider)`
@@ -211,7 +219,7 @@ The keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpret
        - if `--start-lnd`: start `lnd` via `ManagedLND.Start(...)` and retry
        - else: instruct the user to start/unlock `lnd`
      - If `LNCLI.DetectWalletState(mainnet)` is `uninitialized` or `locked`:
-       - print “run `lncli create` / `lncli unlock`” and exit non-zero.
+       - print “run `lcp-quickstart mainnet lncli create` / `lcp-quickstart mainnet lncli unlock`” and exit non-zero.
      - Validate `LNCLI.ValidateNetwork(mainnet, getinfo_json)` succeeds.
      - Determine Provider:
        - default: `03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db983@54.214.32.132:20309`
