@@ -21,10 +21,11 @@
 - [x] (2026-01-06 06:34Z) 独立app化（`apps/lcp-quickstart/`）と将来UI前提（状態管理/イベント）を設計に反映した。
 - [x] (2026-01-06 07:21Z) WYSIWID-style spec（Concepts + Synchronizations）を追加した（`apps/lcp-quickstart/spec.md`）。
 - [x] (2026-01-06 07:30Z) スコープ変更: regtestを廃止し、testnet/mainnetのみに再設計した（本ExecPlanとspecを更新）。
-- [ ] `apps/lcp-quickstart/`（新規Go module）にCLI + 中核ロジック + 状態管理を実装する。
-- [ ] `testnet up/status/down/logs/reset` を実装し、最小のセットアップ体験を成立させる。
-- [ ] `mainnet up/status/down/logs/reset` を実装し、安全優先で段階的にセットアップできるようにする。
-- [ ] 最小ドキュメント（README）を追加し、初心者が同じ結果を再現できるようにする。
+- [x] (2026-01-07 03:28Z) `apps/lcp-quickstart/`（新規Go module）にCLI + 中核ロジック + 状態管理の骨格を実装した（workspace/state/proc/lncli/controller、`up/down/status/logs/reset` の基本動線）。
+- [x] (2026-01-07 04:40Z) `testnet up/status/down/logs/reset` を実装し、最小のセットアップ体験を成立させた（statusの次アクション提示、provider/channelの再判定、logsのコンポーネント検証と未生成ログの明確なエラーなど）。※ 実環境での手順検証は継続。
+- [x] (2026-01-07 04:55Z) `mainnet up/status/down/logs/reset` を実装し、安全優先で段階的にセットアップできるようにした（`--i-understand-mainnet` 同意ゲート、mainnet Provider既定、`OPENAI_SERVE_MAX_PRICE_MSAT` の保守的デフォルト、非loopback bindの安全ガードなど）。※ 実環境での手順検証は継続。
+- [x] (2026-01-07 04:55Z) 最小ドキュメント（README）を追加し、初心者が同じ結果を再現できるようにした（`apps/lcp-quickstart/README.md`）。
+- [x] (2026-01-07 05:30Z) `lnd` / `lncli` の自動インストール（workspace `bin/` へのダウンロード）と `lcp-quickstart <network> lncli ...` ラッパを追加し、セットアップの前提依存を削減した。
 
 ## Surprises & Discoveries
 
@@ -36,6 +37,8 @@
   Evidence: `docs/go-lcpd/docs/quickstart-mainnet.md`
 - Observation: このrepo内には “testnet Provider node” の既定値が見当たらない。
   Evidence: `docs/go-lcpd/docs/quickstart-mainnet.md` はmainnetのみ
+- Observation: `lcpd-grpcd` の計算バックエンドは既定で `disabled` になっており（`LCPD_BACKEND` 未設定でもOK）、Requester用途では追加のAPIキー設定が不要。
+  Evidence: `go-lcpd/tools/lcpd-grpcd/main.go` の `computeBackendFromEnvConfig`
 
 ## Decision Log
 
@@ -57,6 +60,18 @@
 - Decision: `openai-serve` は常に `OPENAI_SERVE_DEFAULT_PEER_ID` を固定する。
   Rationale: 接続済みの別ピアに誤ルーティングして課金/情報漏えいする事故を防ぐ。
   Date/Author: 2026-01-06 / Codex
+- Decision: `lcp-quickstart` は repo root を cwd から上方向探索で自動検出し、必要なら `--repo-root` で上書きできるようにする。
+  Rationale: `go install` 後にどのディレクトリから実行しても、`go-lcpd/` や `apps/openai-serve/` をビルドできるようにするため。
+  Date/Author: 2026-01-07 / Codex
+- Decision: `lcpd-grpcd` は loopback にのみ bind し、`openai-serve` の非loopback bind は明示フラグ + API key 設定がある場合のみ許可する。
+  Rationale: `lcpd-grpcd` は認証がなく資金操作に直結しうる。`openai-serve` も露出時は誤操作/漏えいの危険が高いため、明示同意と最低限の認証を必須にする。
+  Date/Author: 2026-01-07 / Codex
+- Decision: `apps/lcp-quickstart/README.md` を “最小の再現手順” として整備する。
+  Rationale: `go install` 後に初心者が迷わず（testnet/mainnetの安全差分を理解しつつ）同じ結果を再現できるようにするため。
+  Date/Author: 2026-01-07 / Codex
+- Decision: `lnd` / `lncli` は OS パッケージマネージャに依存せず、workspace の `bin/` へ公式リリースをダウンロードして使用できるようにする（`manifest-<version>.txt` の SHA256 で検証する）。
+  Rationale: 環境差分（brew/apt 等）と “未導入” によるつまずきを減らし、最小のセットアップ体験を成立させるため。
+  Date/Author: 2026-01-07 / Codex
 
 ## Outcomes & Retrospective
 
@@ -193,6 +208,8 @@ mainnetは資金が動くため、必ず `--i-understand-mainnet` を要求し�
 
 ### 2) 起動（testnet）
 
+（注）`lcp-quickstart` は repo root を自動検出します。検出に失敗する場合は、repo内から実行するか `--repo-root <path>` を指定してください。
+
     lcp-quickstart testnet up --provider "<pubkey>@<host:port>"
 
 ### 3) 起動（mainnet）
@@ -247,3 +264,15 @@ mainnetは資金が動くため、必ず `--i-understand-mainnet` を要求し�
 Plan revision note (2026-01-06 07:30Z):
 
 ユーザー要望により regtest をスコープから外し、testnet/mainnet のみに絞りました。これに伴い、採掘による自動資金付与やローカルdevnet管理（bitcoind + 2x lnd）は削除し、`lncli` ベースで「段階的に案内しながら進める」設計に切り替えました。
+
+Plan revision note (2026-01-07 03:28Z):
+
+`apps/lcp-quickstart/` の新規Go module実装を開始し、CLI + 状態ファイル（JSON） + 外部プロセス起動（pid/log） + `lncli` ラッパの骨格を追加しました。あわせて Progress/Decision Log/Concrete Steps を更新しました。
+
+Plan revision note (2026-01-07 04:55Z):
+
+`mainnet up/status/down/logs/reset` を実装し、mainnetの安全ガード（同意ゲート/保守的既定値/非loopback bindの制限）を追加しました。あわせて `apps/lcp-quickstart/README.md` を追加し、初心者が同じ結果を再現できる “最小ドキュメント” を用意しました。
+
+Plan revision note (2026-01-07 05:30Z):
+
+`lnd` / `lncli` の “未導入” を吸収するため、workspace `bin/` への自動ダウンロード（公式リリース + manifest SHA256 検証）を追加しました。あわせて `lcp-quickstart <network> lncli ...` のラッパを提供し、wallet create/unlock を “自動化せずに” 実行できる導線を用意しました。
