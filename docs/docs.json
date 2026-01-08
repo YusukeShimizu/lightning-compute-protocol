@@ -41,6 +41,7 @@
             "group": "Getting Started",
             "pages": [
               "index",
+              "lcp-quickstart/overview",
               "go-lcpd/docs/regtest",
               "go-lcpd/docs/quickstart-mainnet"
             ]
@@ -84,6 +85,7 @@
             "group": "はじめに",
             "pages": [
               "index-ja",
+              "lcp-quickstart/overview-ja",
               "go-lcpd/docs/regtest-ja",
               "go-lcpd/docs/quickstart-mainnet-ja"
             ]

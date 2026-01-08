@@ -1,0 +1,128 @@
+---
+title: lcp-quickstart (CLI)
+description: testnet/mainnet 向けに、lnd + lcpd-grpcd + openai-serve を段階的に起動するガイド付き CLI。
+---
+
+`lcp-quickstart` は、ローカルで “Requester スタック” を立ち上げるための小さな CLI です:
+
+- `lnd`（ユーザー管理。必要ならツールが起動を試みる）
+- `lcpd-grpcd`（Requester）
+- `openai-serve`（OpenAI 互換 HTTP ゲートウェイ）
+
+観測できるゴールは `curl http://127.0.0.1:8080/healthz` が `ok` を返すことです。
+
+## 安全上の注意
+
+- mainnet は実資金が動きます。mainnet の `up` は明示同意が必須です: `--i-understand-mainnet`
+- wallet の作成/アンロックは自動化しません（seed 安全のため）。必要なら次を実行します:
+  - `lcp-quickstart <testnet|mainnet> lncli create`
+  - `lcp-quickstart <testnet|mainnet> lncli unlock`
+- `lcpd-grpcd` は loopback（`127.0.0.1` / `localhost`）への bind のみ許可します。
+- `openai-serve` は既定で loopback bind です。非 loopback に bind する場合は
+  `--i-understand-exposing-openai` と `--openai-api-keys`（非空）が必須です。
+
+## インストール
+
+repo root から:
+
+```sh
+cd apps/lcp-quickstart
+go install ./cmd/lcp-quickstart
+```
+
+`lcp-quickstart` は必要に応じて、このリポジトリ内の `lcpd-grpcd` と `openai-serve` をビルドします。
+
+また、`lnd` / `lncli` が未導入の場合は `~/.lcp-quickstart/bin/` へ自動インストール（ダウンロード）できます。
+
+repo root の自動検出に失敗する場合は、repo 内から実行するか `--repo-root <path>` を指定してください。
+
+## 起動（testnet）
+
+testnet は Provider 指定が必須です:
+
+```sh
+lcp-quickstart testnet up --provider "<pubkey>@<host:port>"
+```
+
+`lnd` が起動していない場合は、best-effort で起動を試せます:
+
+```sh
+lcp-quickstart testnet up --provider "<pubkey>@<host:port>" --start-lnd
+```
+
+“channel/route required” が出た場合は outbound liquidity が不足しています。明示的に opt-in した場合のみ、
+`lncli openchannel` を試みます:
+
+```sh
+lcp-quickstart testnet up \
+  --provider "<pubkey>@<host:port>" \
+  --open-channel --channel-sats <sats>
+```
+
+## 起動（mainnet）
+
+mainnet は明示的な opt-in が必須です:
+
+```sh
+lcp-quickstart mainnet up --i-understand-mainnet
+```
+
+Provider は `--provider "<pubkey>@<host:port>"` で上書きできます。未指定の場合は次を使用します:
+
+```text
+03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db983@54.214.32.132:20309
+```
+
+mainnet では `openai-serve` に保守的な価格上限（`OPENAI_SERVE_MAX_PRICE_MSAT`）を既定で設定します。
+必要なら `--openai-max-price-msat` で上書きしてください。
+
+## 動作確認（HTTP）
+
+ヘルスチェック:
+
+```sh
+curl -sS http://127.0.0.1:8080/healthz
+```
+
+期待する出力:
+
+```text
+ok
+```
+
+Chat completions（既定 API key は `lcp-dev`）:
+
+```sh
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer lcp-dev' \
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hello."}]}'
+```
+
+## 運用コマンド
+
+```sh
+lcp-quickstart <testnet|mainnet> status
+lcp-quickstart <testnet|mainnet> lncli <args...>
+lcp-quickstart <testnet|mainnet> logs <lnd|lcpd-grpcd|openai-serve>
+lcp-quickstart <testnet|mainnet> down
+lcp-quickstart <testnet|mainnet> reset --force
+```
+
+`status` は “次にすべきこと”（wallet unlock、Provider 接続、チャネル開設など）を表示します。
+
+## Workspace レイアウト
+
+既定では `~/.lcp-quickstart/` に出力します:
+
+- `state.json`: 状態スナップショット（機械可読）
+- `logs/<component>.log`: ログ
+- `pids/<component>.pid`: PID 管理（ツールが管理するプロセス用）
+- `bin/`: ビルド済みバイナリ（`lcpd-grpcd`, `openai-serve`）
+
+`--home <dir>` で上書きできます。
+
+## 関連ドキュメント
+
+- 手動 mainnet 手順: [go-lcpd quickstart (mainnet)](/go-lcpd/docs/quickstart-mainnet-ja)
+- OpenAI ゲートウェイ: [openai-serve overview](/openai-serve/overview-ja) / [configuration](/openai-serve/configuration-ja)

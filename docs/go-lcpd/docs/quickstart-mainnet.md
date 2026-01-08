@@ -1,5 +1,8 @@
 # Quickstart (mainnet)
 
+If you want a guided CLI that also brings up `openai-serve` (OpenAI-compatible HTTP), see
+[lcp-quickstart](/lcp-quickstart/overview). This page documents the manual `go-lcpd` workflow.
+
 ## Safety & operational constraints (mainnet)
 
 - This project is unaudited. Sending funds / opening channels / paying invoices on mainnet can lead to loss of funds.
