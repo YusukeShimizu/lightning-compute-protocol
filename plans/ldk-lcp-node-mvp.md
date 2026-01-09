@@ -26,7 +26,8 @@ This plan MUST be maintained in accordance with `.codex/skills/lcp-execplan/refe
 - [x] (2026-01-06) 方針転換: “lnd 互換 shim” を作らず、独立ノード + go-lcpd 側の抽象化/変更を許容する方向に更新。
 - [x] (2026-01-07) `go-lcpd/proto/lnnode/v1/lnnode.proto` を追加（`LightningNodeService` RPC surface を定義）。
 - [x] (2026-01-07) `apps/ldk-lcp-node/` を新規追加し、gRPC サーバ stub が `cargo build` でコンパイルできる状態にした。
-- [ ] (TODO) `apps/ldk-lcp-node/` の LDK 実装を入れる（completed: gRPC/proto skeleton; remaining: peer/チャネル/支払い/invoice/custom message + 永続化 + chain sync）。
+- [x] (2026-01-07) `apps/ldk-lcp-node/` に LDK runtime + `lnnode.v1` gRPC 実装を追加（peer/channel/wallet/invoice/payment/custom message + 永続化 + Esplora chain sync）。
+- [x] (2026-01-08) `apps/ldk-lcp-node/` の regtest 実動確認（2台起動→peer/チャネル/支払い/invoice）手順を追加し、Rapid Gossip Sync (RGS)（network graph 永続化 + sync loop）を実装した。
 - [ ] (TODO) `go-lcpd` 側に Lightning ノード抽象（実装差し替え可能な interface）を導入し、`lnnode.v1` の gRPC backend（`ldkgrpc` client）を追加する。
 - [ ] (TODO) `go-lcpd` を LDK ノードに接続して LCP を完走させる（regtest E2E）。
 
@@ -34,6 +35,12 @@ This plan MUST be maintained in accordance with `.codex/skills/lcp-execplan/refe
 
 - Observation: `ldk-node` crate（0.7.0 時点）は custom message を外部 API に露出しておらず、LCP の transport（BOLT #1 custom messages）にそのまま使えない。
   Evidence: `ldk-node` の `CustomMessageHandler` は LSPS 等の内部用途向けで、外部へ raw custom message を流す API が見当たらない（crate ソース調査）。
+
+- Observation: regtest では `nigiri` の Chopsticks が Esplora 互換 API（`:3000`）を提供し、`POST /tx` は自動で 1 ブロック採掘されるため、LDK の on-chain フロー検証が手早い。
+  Evidence: Nigiri の docker-compose で Chopsticks が `--use-faucet`/`--use-mining` で起動され、Esplora endpoints + 拡張が公開される（Nigiri README）。
+
+- Observation: `NetworkGraph` 自体が last RGS timestamp を保持しているため、graph を永続化すれば incremental RGS の resume が可能。
+  Evidence: LDK の `NetworkGraph` serialization に `last_rapid_gossip_sync_timestamp` が含まれる。
 
 ## Decision Log
 
@@ -55,7 +62,9 @@ This plan MUST be maintained in accordance with `.codex/skills/lcp-execplan/refe
 
 ## Outcomes & Retrospective
 
-(2026-01-07) 状態: `lnnode.v1` の proto を追加し、`apps/ldk-lcp-node` の Rust daemon skeleton が `cargo build` で通るところまで進んだ。次は `ldk-lcp-node` の実装（peer/チャネル/支払い/invoice/custom message + 永続化 + chain sync）を入れ、続いて `go-lcpd` の Lightning backend を `ldkgrpc` に差し替えて regtest E2E を回す。
+(2026-01-07) 状態: `apps/ldk-lcp-node` に LDK runtime を導入し、`lnnode.v1` の gRPC 実装（peer/channel/wallet/invoice/payment/custom message + 永続化 + Esplora chain sync）まで入った（`cargo check` OK）。次は regtest で 2 台のノードを起動して動作確認し、RGS を足したうえで `go-lcpd` の Lightning backend を `ldkgrpc` に差し替えて regtest E2E を回す。
+
+(2026-01-08) 状態: RGS（`--rgs-base-url`）による network graph 同期 + 永続化（`data_dir/ldk/network_graph.bin`）を追加し、regtest の 2 台起動→peer→channel→invoice→payment の smoke test 手順（`apps/ldk-lcp-node/regtest.md` と `apps/ldk-lcp-node/scripts/regtest-smoke.sh`）を追加した。次は `go-lcpd` 側の Lightning backend を `lnnode.v1` の gRPC client に差し替えて LCP E2E を回す。
 
 ## Context and Orientation
 
@@ -349,8 +358,9 @@ MVP 完了後、安定運用に必要な要素を入れます。
       --grpc-addr 127.0.0.1:10010 \
       --p2p-listen 0.0.0.0:9736 \
       --network regtest \
-      --esplora-base-url http://127.0.0.1:3000 \
-      --rgs-base-url http://127.0.0.1:3000
+      --esplora-base-url http://127.0.0.1:3000
+
+（補足）RGS は regtest では通常使わない。mainnet/testnet/signet で使う場合は `--rgs-base-url https://rapidsync.lightningdevkit.org` を指定する。
 
 ## Validation and Acceptance
 
@@ -371,7 +381,8 @@ MVP 完了後、安定運用に必要な要素を入れます。
 
 - 主要ログ断片
 - `lcpdctl` での確認コマンド例
-- regtest の手順書（最短手順）
+- regtest の手順書（最短手順）: `apps/ldk-lcp-node/regtest.md`
+- regtest smoke test スクリプト（nigiri + grpcurl）: `apps/ldk-lcp-node/scripts/regtest-smoke.sh`
 
 ## Interfaces and Dependencies
 
@@ -400,3 +411,4 @@ Plan changes:
 
 - (2026-01-06) ユーザー要望により、lnd shim 案から「独立 LDK ノード + go-lcpd 変更許容」へ方針転換し、MVP の責務にチャネル open/close を含めた。
 - (2026-01-07) 進捗反映のため、`lnnode.v1` proto と `apps/ldk-lcp-node` skeleton 追加に合わせて Progress / Outcomes を更新した。
+- (2026-01-08) regtest smoke test 手順と RGS 実装の反映のため、Progress / Concrete Steps / Artifacts / Outcomes を更新した。

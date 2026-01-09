@@ -5,7 +5,23 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+bdk_esplora = { version = "0.22.1", features = ["async-https-rustls", "tokio"] }
+bdk_wallet = { version = "2.3.0", features = ["file_store"] }
+bitcoin = "0.32"
 clap = { version = "4", features = ["derive", "env"] }
+esplora-client = { version = "0.12.1", default-features = false, features = ["async", "async-https-rustls", "tokio"] }
+lightning = "0.2.0"
+lightning-background-processor = "0.2.0"
+lightning-custom-message = "0.2.0"
+lightning-invoice = "0.34.0"
+lightning-net-tokio = "0.2.0"
+lightning-persister = "0.2.0"
+lightning-rapid-gossip-sync = "0.2.0"
+lightning-transaction-sync = { version = "0.2.0", features = ["esplora-async-https"] }
+rand = "0.9.2"
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tonic = { version = "0.11", features = ["transport"] }
 tokio-stream = "0.1"

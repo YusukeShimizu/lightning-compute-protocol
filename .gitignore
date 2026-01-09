@@ -36,4 +36,5 @@ go.work.sum
 
 # nix / local devnet state
 .data/
+dev-data/
 result
