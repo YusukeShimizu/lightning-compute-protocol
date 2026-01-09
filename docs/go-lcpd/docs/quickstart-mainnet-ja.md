@@ -99,7 +99,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 ```
 
-## 6) Provider が対応する model を確認（任意）
+## 6) Provider が対応する method を確認（任意）
 
 別ターミナルで:
 
@@ -108,14 +108,15 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50051 -o prettyjson
 ```
 
-`peers[].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` に Provider の model（広告されている場合）が入っています。
+`peers[].remoteManifest.supportedMethods[].method` に Provider の method（広告されている場合）が入っています。
 
 注意:
 
-- `supportedTasks` は `lcp_manifest` の任意フィールドです。Provider が `llm.models` を設定していない（または Provider モードが disabled）場合、`supported_tasks` を広告しません。
-- `-o prettyjson` は空フィールドを省略するため、仕様上フィールドが absent であっても `supportedTasks` が見えない場合があります。
+- `supportedMethods` は Provider が対応する LCP method を列挙します（例: `openai.chat_completions.v1`）。
+- LCP v0.3 の manifest は model を広告しません。送信する `model` は Provider のドキュメント/ポリシー（または自分の allowlist）で判断してください。
+- `-o prettyjson` は空フィールドを省略するため、peer が descriptor を広告していない場合は `supportedMethods` が表示されないことがあります。
 
-## 7) ジョブを 1 回実行（Quote → Pay → Result）
+## 7) コールを 1 回実行（Quote → Pay → Stream）
 
 別ターミナルで:
 
@@ -153,5 +154,5 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
 ## トラブルシューティング
 
 - `peer is not ready for lcp`: `lnd` が Provider に接続できているか（`lncli listpeers`）確認し、`lcpdctl list-lcp-peers` でも見えることを確認してください。
-- `lcp_error code=2: unsupported model ...`: `-model` を Provider がサポートする値にしてください（手順 6 を参照）。
+- `unsupported model` / `unsupported method`: `-model` / method を Provider がサポートする値にしてください（Provider 側でポリシー検証されます）。
 - `payment failed`: チャネル / ルート / 流動性が不足している可能性があります。`lncli walletbalance` と `lncli listchannels` を確認してください。

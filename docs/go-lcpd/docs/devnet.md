@@ -131,7 +131,7 @@ Once the two `lnd` nodes are connected as peers, start `go-lcpd` on both sides.
 This triggers `lcp_manifest` exchange over BOLT #1 custom messages.
 You can observe it via `ListLCPPeers`.
 
-In this walkthrough, Alice runs as a Provider, streams the result, and sends `lcp_result` without external dependencies.
+In this walkthrough, Alice runs as a Provider, streams the response, and sends `lcp_complete` without external dependencies.
 It uses `LCPD_BACKEND=deterministic`.
 
 Provider configuration is YAML-first (`LCPD_PROVIDER_CONFIG_PATH`).
@@ -193,9 +193,11 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
-If you can see `gpt-5.2` under `peers[0].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model`, it means the Provider successfully advertised the model.
+If you can see `openai.chat_completions.v1` under `peers[0].remoteManifest.supportedMethods[].method`, it means the Provider successfully advertised the method.
 
-### 4) Send one job from Bob to Alice (Quote → Pay → Stream)
+Note: LCP v0.3 manifests do not advertise models.
+
+### 4) Send one call from Bob to Alice (Quote → Pay → Stream)
 
 ```sh
 cd go-lcpd

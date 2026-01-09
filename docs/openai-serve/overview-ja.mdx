@@ -34,7 +34,7 @@ lcpd-grpcd（Requester）  --- Lightning --- Provider peer（lcpd-grpcd Provider
 ログはセンシティブとして扱います。`openai-serve` は、生のユーザー入力を永続化しなくても診断できるように設計しています。
 
 - ログには、生のプロンプト（`messages[].content`）や生のモデル出力を残してはいけません。
-- ログは運用メタデータ（model/peer/job id、価格、時間、byte/token カウント）のみに寄せます。
+- ログは運用メタデータ（model/peer/call id、価格、時間、byte/token カウント）のみに寄せます。
 - `OPENAI_SERVE_LOG_LEVEL=debug` はリクエストログがより詳細になります。運用では（必要になるまで）デフォルトの `info` を推奨します。
 
 ## 対応エンドポイント
@@ -169,6 +169,6 @@ llm -m lcp-gpt-5.2 "Say hello in Japanese."
 `POST /v1/chat/completions` と `POST /v1/responses` のレスポンスには以下が含まれます:
 
 - `X-Lcp-Peer-Id`: 選択された Provider の peer id
-- `X-Lcp-Job-Id`: job id（hex）
+- `X-Lcp-Call-Id`: call id（hex）
 - `X-Lcp-Price-Msat`: 受諾した quote の価格
 - `X-Lcp-Terms-Hash`: 受諾した quote の terms hash（hex）

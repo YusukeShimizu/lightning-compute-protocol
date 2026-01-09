@@ -33,7 +33,7 @@ Notes:
 Logs are treated as sensitive. `openai-serve` is designed to be diagnosable without persisting raw user content.
 
 - Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
-- Logs include only operational metadata (model/peer/job ids, price, timings, and byte/token counts).
+- Logs include only operational metadata (model/peer/call ids, price, timings, and byte/token counts).
 - `OPENAI_SERVE_LOG_LEVEL=debug` enables more verbose request logging; keep `info` (default) for production unless needed.
 
 ## Supported endpoints
@@ -166,6 +166,6 @@ For configuration, routing rules, and safety knobs (max price, timeouts, model a
 `POST /v1/chat/completions` and `POST /v1/responses` responses include:
 
 - `X-Lcp-Peer-Id`: chosen Provider peer id
-- `X-Lcp-Job-Id`: job id (hex)
+- `X-Lcp-Call-Id`: call id (hex)
 - `X-Lcp-Price-Msat`: accepted quote price
 - `X-Lcp-Terms-Hash`: accepted quote terms hash (hex)
