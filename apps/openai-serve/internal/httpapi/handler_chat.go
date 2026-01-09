@@ -25,7 +25,7 @@ const (
 	providerReturnedNonOKStatusMessage = "provider returned non-ok status"
 )
 
-type buildTaskFunc func(c *gin.Context, model string, reqBytes []byte) (*lcpdv1.Task, bool)
+type buildCallFunc func(c *gin.Context, model string, reqBytes []byte) (*lcpdv1.CallSpec, bool)
 
 func (s *Server) handleChatCompletions(c *gin.Context) {
 	if c.Request.Method != http.MethodPost {
@@ -45,11 +45,11 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 	s.handleOpenAIPassthrough(
 		c,
 		started,
-		lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
+		lcpMethodOpenAIChatCompletionsV1,
 		model,
 		reqBytes,
 		streaming,
-		s.buildLCPOpenAIChatCompletionsV1Task,
+		s.buildLCPOpenAIChatCompletionsV1Call,
 		"chat completion",
 	)
 }
@@ -57,34 +57,34 @@ func (s *Server) handleChatCompletions(c *gin.Context) {
 func (s *Server) handleOpenAIPassthrough(
 	c *gin.Context,
 	started time.Time,
-	taskKind lcpdv1.LCPTaskKind,
+	method string,
 	model string,
 	reqBytes []byte,
 	streaming bool,
-	buildTask buildTaskFunc,
+	buildCall buildCallFunc,
 	operation string,
 ) {
 	requestBytes := len(reqBytes)
 	requestTokens := openai.ApproxTokensFromBytes(requestBytes)
 
-	peerID, ok := s.resolvePeerForTaskKindAndModel(c, taskKind, model)
+	peerID, ok := s.resolvePeerForMethodAndModel(c, method, model)
 	if !ok {
 		return
 	}
 
-	task, ok := buildTask(c, model, reqBytes)
+	call, ok := buildCall(c, model, reqBytes)
 	if !ok {
 		return
 	}
 
 	quoteStart := time.Now()
-	quote, ok := s.requestQuoteAndValidatePrice(c, peerID, task)
+	quote, ok := s.requestQuoteAndValidatePrice(c, peerID, call)
 	if !ok {
 		return
 	}
 	quoteLatency := time.Since(quoteStart)
 
-	jobID := copyBytes(quote.GetTerms().GetJobId())
+	callID := copyBytes(quote.GetQuote().GetCallId())
 
 	if streaming {
 		s.handleOpenAIStreaming(
@@ -93,7 +93,7 @@ func (s *Server) handleOpenAIPassthrough(
 			operation,
 			model,
 			peerID,
-			jobID,
+			callID,
 			quote,
 			requestBytes,
 			requestTokens,
@@ -108,7 +108,7 @@ func (s *Server) handleOpenAIPassthrough(
 		operation,
 		model,
 		peerID,
-		jobID,
+		callID,
 		quote,
 		requestBytes,
 		requestTokens,
@@ -122,29 +122,29 @@ func (s *Server) handleOpenAIStreaming(
 	operation string,
 	model string,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
 	requestBytes int,
 	requestTokens int,
 	quoteLatency time.Duration,
 ) {
 	execStart := time.Now()
-	grpcStream, cancel, err := s.acceptAndExecuteStream(c, peerID, jobID)
+	grpcStream, cancel, err := s.acceptAndExecuteStream(c, peerID, callID)
 	if err != nil {
 		cancel()
-		s.cancelJobIfRequestCanceled(c, peerID, jobID, err)
+		s.cancelJobIfRequestCanceled(c, peerID, callID, err)
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return
 	}
 	defer cancel()
 
-	writeLCPHeaders(c, peerID, jobID, quote)
+	writeLCPHeaders(c, peerID, callID, quote)
 
 	streamed, streamErr := s.writeLCPStreamToHTTP(c, grpcStream)
 	execLatency := time.Since(execStart)
 
 	if streamErr != nil {
-		s.cancelJobIfRequestCanceled(c, peerID, jobID, streamErr)
+		s.cancelJobIfRequestCanceled(c, peerID, callID, streamErr)
 		if !streamed.wroteBody {
 			writeOpenAIError(c, httpStatusFromGRPC(streamErr), "server_error", grpcErrMessage(streamErr))
 		}
@@ -161,7 +161,7 @@ func (s *Server) handleOpenAIStreaming(
 		started,
 		model,
 		peerID,
-		jobID,
+		callID,
 		quote,
 		requestBytes,
 		requestTokens,
@@ -177,14 +177,14 @@ func (s *Server) handleOpenAINonStreaming(
 	operation string,
 	model string,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
 	requestBytes int,
 	requestTokens int,
 	quoteLatency time.Duration,
 ) {
 	execStart := time.Now()
-	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, jobID)
+	execResp, ok := s.acceptAndExecuteWithCancelOnFailure(c, peerID, callID)
 	if !ok {
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleOpenAINonStreaming(
 		started,
 		model,
 		peerID,
-		jobID,
+		callID,
 		quote,
 		requestBytes,
 		requestTokens,
@@ -217,20 +217,20 @@ func (s *Server) cancelJobIfRequestCanceled(c *gin.Context, peerID string, jobID
 	}
 }
 
-func validateStreamedTerminalResult(c *gin.Context, streamed streamWriteResult) (*lcpdv1.Result, bool) {
-	if streamed.terminalResult == nil {
+func validateStreamedTerminalResult(c *gin.Context, streamed streamWriteResult) (*lcpdv1.Complete, bool) {
+	if streamed.terminalComplete == nil {
 		writeOpenAIErrorIfNoBody(c, streamed.wroteBody, http.StatusBadGateway, providerReturnedNoResultMessage)
 		return nil, false
 	}
-	if streamed.terminalResult.GetStatus() != lcpdv1.Result_STATUS_OK {
-		msg := strings.TrimSpace(streamed.terminalResult.GetMessage())
+	if streamed.terminalComplete.GetStatus() != lcpdv1.Complete_STATUS_OK {
+		msg := strings.TrimSpace(streamed.terminalComplete.GetMessage())
 		if msg == "" {
 			msg = providerReturnedNonOKStatusMessage
 		}
 		writeOpenAIErrorIfNoBody(c, streamed.wroteBody, http.StatusBadGateway, msg)
 		return nil, false
 	}
-	return streamed.terminalResult, true
+	return streamed.terminalComplete, true
 }
 
 func writeOpenAIErrorIfNoBody(c *gin.Context, wroteBody bool, status int, message string) {
@@ -240,12 +240,16 @@ func writeOpenAIErrorIfNoBody(c *gin.Context, wroteBody bool, status int, messag
 	writeOpenAIError(c, status, "server_error", message)
 }
 
-func writeLCPHeaders(c *gin.Context, peerID string, jobID []byte, quote *lcpdv1.RequestQuoteResponse) {
-	price := quote.GetTerms().GetPriceMsat()
-	jobIDHex := hex.EncodeToString(jobID)
-	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+func writeLCPHeaders(c *gin.Context, peerID string, callID []byte, quote *lcpdv1.RequestQuoteResponse) {
+	q := quote.GetQuote()
+	if q == nil {
+		return
+	}
+	price := q.GetPriceMsat()
+	callIDHex := hex.EncodeToString(callID)
+	termsHashHex := hex.EncodeToString(q.GetTermsHash())
 	c.Header("X-Lcp-Peer-Id", peerID)
-	c.Header("X-Lcp-Job-Id", jobIDHex)
+	c.Header("X-Lcp-Call-Id", callIDHex)
 	c.Header("X-Lcp-Price-Msat", strconv.FormatUint(price, 10))
 	c.Header("X-Lcp-Terms-Hash", termsHashHex)
 }
@@ -256,7 +260,7 @@ func (s *Server) logStreamResult(
 	started time.Time,
 	model string,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
 	requestBytes int,
 	requestTokens int,
@@ -266,21 +270,25 @@ func (s *Server) logStreamResult(
 ) {
 	ctx := c.Request.Context()
 
-	price := quote.GetTerms().GetPriceMsat()
+	q := quote.GetQuote()
+	if q == nil {
+		return
+	}
+	price := q.GetPriceMsat()
 	totalLatency := time.Since(started)
 
 	streamedTokens := openai.ApproxTokensFromBytes(streamedBytes)
 	totalTokens := requestTokens + streamedTokens
 
-	jobIDHex := hex.EncodeToString(jobID)
-	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+	callIDHex := hex.EncodeToString(callID)
+	termsHashHex := hex.EncodeToString(q.GetTermsHash())
 
 	s.log.InfoContext(
 		ctx,
 		operation,
 		"model", model,
 		"peer_id", peerID,
-		"job_id", jobIDHex,
+		"call_id", callIDHex,
 		"price_msat", price,
 		"terms_hash", termsHashHex,
 		"request_bytes", requestBytes,
@@ -311,9 +319,9 @@ func decodeAndValidateChatRequest(c *gin.Context) ([]byte, openai.ChatCompletion
 	return body, parsed, true
 }
 
-func (s *Server) resolvePeerForTaskKindAndModel(
+func (s *Server) resolvePeerForMethodAndModel(
 	c *gin.Context,
-	taskKind lcpdv1.LCPTaskKind,
+	method string,
 	model string,
 ) (string, bool) {
 	peersResp, err := s.listPeers(c)
@@ -321,11 +329,11 @@ func (s *Server) resolvePeerForTaskKindAndModel(
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return "", false
 	}
-	if modelErr := s.validateModelForTaskKind(model, taskKind, peersResp); modelErr != nil {
+	if modelErr := s.validateModelForMethod(model, method, peersResp); modelErr != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", modelErr.Error())
 		return "", false
 	}
-	peerID, err := s.resolvePeerIDForTaskKind(model, taskKind, peersResp)
+	peerID, err := s.resolvePeerIDForMethod(model, method, peersResp)
 	if err != nil {
 		writeOpenAIError(c, http.StatusServiceUnavailable, "server_error", err.Error())
 		return "", false
@@ -333,31 +341,36 @@ func (s *Server) resolvePeerForTaskKindAndModel(
 	return peerID, true
 }
 
-func (s *Server) buildLCPOpenAIChatCompletionsV1Task(
+func (s *Server) buildLCPOpenAIChatCompletionsV1Call(
 	c *gin.Context,
 	model string,
 	reqBytes []byte,
-) (*lcpdv1.Task, bool) {
-	task, err := buildLCPOpenAIChatCompletionsV1Task(model, reqBytes)
+) (*lcpdv1.CallSpec, bool) {
+	call, err := buildLCPOpenAIChatCompletionsV1Call(model, reqBytes)
 	if err != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, false
 	}
-	return task, true
+	return call, true
 }
 
 func (s *Server) requestQuoteAndValidatePrice(
 	c *gin.Context,
 	peerID string,
-	task *lcpdv1.Task,
+	call *lcpdv1.CallSpec,
 ) (*lcpdv1.RequestQuoteResponse, bool) {
-	quote, err := s.requestQuote(c, peerID, task)
+	quote, err := s.requestQuote(c, peerID, call)
 	if err != nil {
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return nil, false
 	}
 
-	price := quote.GetTerms().GetPriceMsat()
+	q := quote.GetQuote()
+	if q == nil {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no quote")
+		return nil, false
+	}
+	price := q.GetPriceMsat()
 	if s.cfg.MaxPriceMsat > 0 && price > s.cfg.MaxPriceMsat {
 		writeOpenAIError(
 			c,
@@ -373,12 +386,12 @@ func (s *Server) requestQuoteAndValidatePrice(
 func (s *Server) acceptAndExecuteWithCancelOnFailure(
 	c *gin.Context,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 ) (*lcpdv1.AcceptAndExecuteResponse, bool) {
-	execResp, err := s.acceptAndExecute(c, peerID, jobID)
+	execResp, err := s.acceptAndExecute(c, peerID, callID)
 	if err != nil {
 		if shouldCancelAfterExecuteError(c, err) {
-			s.cancelJobAsync(peerID, jobID)
+			s.cancelJobAsync(peerID, callID)
 		}
 		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", grpcErrMessage(err))
 		return nil, false
@@ -389,13 +402,13 @@ func (s *Server) acceptAndExecuteWithCancelOnFailure(
 func validateResult(
 	c *gin.Context,
 	execResp *lcpdv1.AcceptAndExecuteResponse,
-) (*lcpdv1.Result, bool) {
-	result := execResp.GetResult()
+) (*lcpdv1.Complete, bool) {
+	result := execResp.GetComplete()
 	if result == nil {
 		writeOpenAIError(c, http.StatusBadGateway, "server_error", providerReturnedNoResultMessage)
 		return nil, false
 	}
-	if result.GetStatus() != lcpdv1.Result_STATUS_OK {
+	if result.GetStatus() != lcpdv1.Complete_STATUS_OK {
 		msg := strings.TrimSpace(result.GetMessage())
 		if msg == "" {
 			msg = providerReturnedNonOKStatusMessage
@@ -412,33 +425,38 @@ func (s *Server) logAndWriteResult(
 	started time.Time,
 	model string,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 	quote *lcpdv1.RequestQuoteResponse,
 	requestBytes int,
 	requestTokens int,
 	quoteLatency time.Duration,
 	execLatency time.Duration,
-	result *lcpdv1.Result,
+	result *lcpdv1.Complete,
 ) bool {
 	ctx := c.Request.Context()
 
-	price := quote.GetTerms().GetPriceMsat()
+	q := quote.GetQuote()
+	if q == nil {
+		writeOpenAIError(c, http.StatusBadGateway, "server_error", "provider returned no quote")
+		return false
+	}
+	price := q.GetPriceMsat()
 	totalLatency := time.Since(started)
 
-	resultBytes := result.GetResult()
+	resultBytes := result.GetResponseBytes()
 	completionBytes := len(resultBytes)
 	completionTokens := openai.ApproxTokensFromBytes(completionBytes)
 	totalTokens := requestTokens + completionTokens
 
-	jobIDHex := hex.EncodeToString(jobID)
-	termsHashHex := hex.EncodeToString(quote.GetTerms().GetTermsHash())
+	callIDHex := hex.EncodeToString(callID)
+	termsHashHex := hex.EncodeToString(q.GetTermsHash())
 
 	s.log.InfoContext(
 		ctx,
 		operation,
 		"model", model,
 		"peer_id", peerID,
-		"job_id", jobIDHex,
+		"call_id", callIDHex,
 		"price_msat", price,
 		"terms_hash", termsHashHex,
 		"request_bytes", requestBytes,
@@ -451,14 +469,14 @@ func (s *Server) logAndWriteResult(
 		"total_ms", totalLatency.Milliseconds(),
 	)
 
-	writeLCPHeaders(c, peerID, jobID, quote)
+	writeLCPHeaders(c, peerID, callID, quote)
 
-	if enc := strings.TrimSpace(result.GetContentEncoding()); enc != "" && enc != contentEncodingIdentity {
+	if enc := strings.TrimSpace(result.GetResponseContentEncoding()); enc != "" && enc != contentEncodingIdentity {
 		writeOpenAIError(c, http.StatusBadGateway, "server_error", fmt.Sprintf("unsupported content encoding: %q", enc))
 		return false
 	}
 
-	contentType := strings.TrimSpace(result.GetContentType())
+	contentType := strings.TrimSpace(result.GetResponseContentType())
 	if contentType == "" {
 		contentType = "application/json; charset=utf-8"
 	}
@@ -472,37 +490,41 @@ func (s *Server) listPeers(c *gin.Context) (*lcpdv1.ListLCPPeersResponse, error)
 	return s.lcpd.ListLCPPeers(ctx, &lcpdv1.ListLCPPeersRequest{})
 }
 
-func (s *Server) requestQuote(c *gin.Context, peerID string, task *lcpdv1.Task) (*lcpdv1.RequestQuoteResponse, error) {
+func (s *Server) requestQuote(
+	c *gin.Context,
+	peerID string,
+	call *lcpdv1.CallSpec,
+) (*lcpdv1.RequestQuoteResponse, error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.TimeoutQuote)
 	defer cancel()
 	return s.lcpd.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   task,
+		Call:   call,
 	})
 }
 
 func (s *Server) acceptAndExecute(
 	c *gin.Context,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 ) (*lcpdv1.AcceptAndExecuteResponse, error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.TimeoutExecute)
 	defer cancel()
 	return s.lcpd.AcceptAndExecute(ctx, &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     peerID,
-		JobId:      jobID,
+		CallId:     callID,
 		PayInvoice: true,
 	})
 }
 
-func (s *Server) cancelJobAsync(peerID string, jobID []byte) {
-	jobIDCopy := copyBytes(jobID)
+func (s *Server) cancelJobAsync(peerID string, callID []byte) {
+	callIDCopy := copyBytes(callID)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), cancelJobTimeout)
 		defer cancel()
 		_, err := s.lcpd.CancelJob(ctx, &lcpdv1.CancelJobRequest{
 			PeerId: peerID,
-			JobId:  jobIDCopy,
+			CallId: callIDCopy,
 			Reason: cancelReasonRequestCanceled,
 		})
 		if err != nil {
@@ -524,22 +546,25 @@ func shouldCancelAfterExecuteError(c *gin.Context, err error) bool {
 	return false
 }
 
-func buildLCPOpenAIChatCompletionsV1Task(model string, requestJSON []byte) (*lcpdv1.Task, error) {
+func buildLCPOpenAIChatCompletionsV1Call(model string, requestJSON []byte) (*lcpdv1.CallSpec, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, errors.New("model is required")
 	}
 	if len(requestJSON) == 0 {
 		return nil, errors.New("request body is required")
 	}
-	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-				RequestJson: requestJSON,
-				Params: &lcpdv1.OpenAIChatCompletionsV1Params{
-					Model: model,
-				},
-			},
-		},
+
+	paramsBytes, err := encodeOpenAIModelParamsTLV(model)
+	if err != nil {
+		return nil, err
+	}
+
+	return &lcpdv1.CallSpec{
+		Method:                 lcpMethodOpenAIChatCompletionsV1,
+		Params:                 paramsBytes,
+		RequestBytes:           requestJSON,
+		RequestContentType:     requestContentTypeJSONUTF8,
+		RequestContentEncoding: contentEncodingIdentity,
 	}, nil
 }
 

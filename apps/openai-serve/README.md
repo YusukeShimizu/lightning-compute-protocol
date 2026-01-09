@@ -87,8 +87,8 @@ High-level data flow:
 
 1. Your client calls the OpenAI-compatible HTTP endpoint (`/v1/chat/completions` or `/v1/responses`).
 2. `openai-serve` forwards the raw request body bytes as an LCP `openai.chat_completions.v1` or
-   `openai.responses.v1` task.
-3. `openai-serve` forwards the task to a local `lcpd-grpcd` (Requester) over gRPC.
+   `openai.responses.v1` method call.
+3. `openai-serve` forwards the call to a local `lcpd-grpcd` (Requester) over gRPC.
 4. The Requester talks to an LCP Provider over Lightning custom messages, requests a quote, pays, and receives the result.
 5. `openai-serve` returns the raw Provider response bytes (no re-encoding) and includes LCP metadata in response headers.
 
@@ -125,16 +125,15 @@ For a given `model`, the peer is chosen in this order:
 
 1. `OPENAI_SERVE_MODEL_MAP` (`model=peer_id;...`) if the peer is connected/LCP-ready.
 2. `OPENAI_SERVE_DEFAULT_PEER_ID` if set and connected/LCP-ready.
-3. A peer that advertises the model in `supported_tasks` (if any).
-4. Fallback to the first connected peer.
+3. A peer that advertises the required method in `supported_methods` (if any).
+4. Fallback to any connected peer.
 
 If there are no connected peers, the request fails.
 
 ### Model validation
 
 - If `OPENAI_SERVE_MODEL_ALLOWLIST` is set: `model` must be in the allowlist (unless `OPENAI_SERVE_ALLOW_UNLISTED_MODELS=true`).
-- Otherwise: if any connected peers advertise `supported_tasks`, the model must be advertised by at least one peer.
-  If no peers advertise `supported_tasks`, validation is skipped to keep the gateway usable.
+- Otherwise: validation is skipped (LCP v0.3 manifests do not advertise models; Providers enforce their own model policies).
 
 ## Safety knobs
 
@@ -147,7 +146,7 @@ If there are no connected peers, the request fails.
 This service treats logs as sensitive.
 
 - Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
-- Logs include only operational metadata (e.g., peer id, job id, price, durations, and byte/token counts).
+- Logs include only operational metadata (e.g., peer id, call id, price, durations, and byte/token counts).
 - `OPENAI_SERVE_LOG_LEVEL=debug` enables more verbose request logging; keep `info` (default) for production unless needed.
 
 ## Response metadata headers
@@ -155,7 +154,7 @@ This service treats logs as sensitive.
 `POST /v1/chat/completions` and `POST /v1/responses` include LCP metadata headers:
 
 - `X-Lcp-Peer-Id`: the chosen Provider peer id
-- `X-Lcp-Job-Id`: the job id (hex)
+- `X-Lcp-Call-Id`: the call id (hex)
 - `X-Lcp-Price-Msat`: the accepted quote price
 - `X-Lcp-Terms-Hash`: the accepted quote terms hash (hex)
 

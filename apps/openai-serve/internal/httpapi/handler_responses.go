@@ -30,11 +30,11 @@ func (s *Server) handleResponses(c *gin.Context) {
 	s.handleOpenAIPassthrough(
 		c,
 		started,
-		lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
+		lcpMethodOpenAIResponsesV1,
 		model,
 		reqBytes,
 		streaming,
-		s.buildLCPOpenAIResponsesV1Task,
+		s.buildLCPOpenAIResponsesV1Call,
 		"response",
 	)
 }
@@ -58,34 +58,37 @@ func decodeAndValidateResponsesRequest(c *gin.Context) ([]byte, openai.Responses
 	return body, parsed, true
 }
 
-func (s *Server) buildLCPOpenAIResponsesV1Task(
+func (s *Server) buildLCPOpenAIResponsesV1Call(
 	c *gin.Context,
 	model string,
 	reqBytes []byte,
-) (*lcpdv1.Task, bool) {
-	task, err := buildLCPOpenAIResponsesV1Task(model, reqBytes)
+) (*lcpdv1.CallSpec, bool) {
+	call, err := buildLCPOpenAIResponsesV1Call(model, reqBytes)
 	if err != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, false
 	}
-	return task, true
+	return call, true
 }
 
-func buildLCPOpenAIResponsesV1Task(model string, requestJSON []byte) (*lcpdv1.Task, error) {
+func buildLCPOpenAIResponsesV1Call(model string, requestJSON []byte) (*lcpdv1.CallSpec, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, errors.New("model is required")
 	}
 	if len(requestJSON) == 0 {
 		return nil, errors.New("request body is required")
 	}
-	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_OpenaiResponsesV1{
-			OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1TaskSpec{
-				RequestJson: requestJSON,
-				Params: &lcpdv1.OpenAIResponsesV1Params{
-					Model: model,
-				},
-			},
-		},
+
+	paramsBytes, err := encodeOpenAIModelParamsTLV(model)
+	if err != nil {
+		return nil, err
+	}
+
+	return &lcpdv1.CallSpec{
+		Method:                 lcpMethodOpenAIResponsesV1,
+		Params:                 paramsBytes,
+		RequestBytes:           requestJSON,
+		RequestContentType:     requestContentTypeJSONUTF8,
+		RequestContentEncoding: contentEncodingIdentity,
 	}, nil
 }

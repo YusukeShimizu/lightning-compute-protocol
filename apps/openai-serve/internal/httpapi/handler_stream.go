@@ -21,18 +21,18 @@ type streamWriteResult struct {
 	contentType     string
 	contentEncoding string
 
-	terminalResult *lcpdv1.Result
+	terminalComplete *lcpdv1.Complete
 }
 
 func (s *Server) acceptAndExecuteStream(
 	c *gin.Context,
 	peerID string,
-	jobID []byte,
+	callID []byte,
 ) (lcpdv1.LCPDService_AcceptAndExecuteStreamClient, context.CancelFunc, error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.TimeoutExecute)
 	stream, err := s.lcpd.AcceptAndExecuteStream(ctx, &lcpdv1.AcceptAndExecuteStreamRequest{
 		PeerId:     peerID,
-		JobId:      jobID,
+		CallId:     callID,
 		PayInvoice: true,
 	})
 	if err != nil {
@@ -83,8 +83,8 @@ func newStreamWriteResult() streamWriteResult {
 
 func finishStreamWrite(out streamWriteResult, err error) (streamWriteResult, error) {
 	if errors.Is(err, io.EOF) {
-		if out.terminalResult == nil {
-			return out, errors.New("stream ended without a terminal result")
+		if out.terminalComplete == nil {
+			return out, errors.New("stream ended without a terminal complete")
 		}
 		return out, nil
 	}
@@ -97,23 +97,23 @@ func (s *Server) handleStreamMessage(
 	msg *lcpdv1.AcceptAndExecuteStreamResponse,
 ) (bool, error) {
 	switch ev := msg.GetEvent().(type) {
-	case *lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin:
-		applyStreamBegin(out, ev.ResultBegin)
+	case *lcpdv1.AcceptAndExecuteStreamResponse_ResponseBegin:
+		applyStreamBegin(out, ev.ResponseBegin)
 		return false, nil
-	case *lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk:
-		return false, writeStreamChunk(c, out, ev.ResultChunk)
-	case *lcpdv1.AcceptAndExecuteStreamResponse_Result:
-		out.terminalResult = ev.Result
-		return true, nil
-	case *lcpdv1.AcceptAndExecuteStreamResponse_ResultEnd:
+	case *lcpdv1.AcceptAndExecuteStreamResponse_ResponseChunk:
+		return false, writeStreamChunk(c, out, ev.ResponseChunk)
+	case *lcpdv1.AcceptAndExecuteStreamResponse_ResponseEnd:
 		// Metadata only (hash/len). Ignored by the HTTP passthrough.
 		return false, nil
+	case *lcpdv1.AcceptAndExecuteStreamResponse_Complete:
+		out.terminalComplete = ev.Complete
+		return true, nil
 	default:
 		return false, nil
 	}
 }
 
-func applyStreamBegin(out *streamWriteResult, begin *lcpdv1.ResultStreamBegin) {
+func applyStreamBegin(out *streamWriteResult, begin *lcpdv1.ResponseStreamBegin) {
 	if begin == nil {
 		return
 	}
@@ -125,7 +125,7 @@ func applyStreamBegin(out *streamWriteResult, begin *lcpdv1.ResultStreamBegin) {
 	}
 }
 
-func writeStreamChunk(c *gin.Context, out *streamWriteResult, chunk *lcpdv1.ResultStreamChunk) error {
+func writeStreamChunk(c *gin.Context, out *streamWriteResult, chunk *lcpdv1.ResponseStreamChunk) error {
 	if chunk == nil {
 		return nil
 	}

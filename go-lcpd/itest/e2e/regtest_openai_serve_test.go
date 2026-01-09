@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lnd/lnrpc"
 	"github.com/bruwbird/lcp/go-lcpd/itest/harness/lcpd"
 	"github.com/bruwbird/lcp/go-lcpd/itest/harness/openaiserve"
@@ -134,35 +135,42 @@ func TestE2E_Regtest_OpenAIServe_StreamAndResponses(t *testing.T) {
 	_ = regtest.WaitForLCPPeers(ctx, t, bobClient)
 
 	maxPriceMsat := uint64(0)
-	for _, task := range []*lcpdv1.Task{
+	chatParams, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(lcpwire.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"})
+	if err != nil {
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
+	}
+	respParams, err := lcpwire.EncodeOpenAIResponsesV1Params(lcpwire.OpenAIResponsesV1Params{Model: "gpt-5.2"})
+	if err != nil {
+		t.Fatalf("EncodeOpenAIResponsesV1Params: %v", err)
+	}
+
+	for _, call := range []*lcpdv1.CallSpec{
 		{
-			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-					RequestJson: []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"preflight"}]}`),
-					Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"},
-				},
-			},
+			Method:                 "openai.chat_completions.v1",
+			Params:                 chatParams,
+			RequestBytes:           []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"preflight"}]}`),
+			RequestContentType:     "application/json; charset=utf-8",
+			RequestContentEncoding: "identity",
 		},
 		{
-			Spec: &lcpdv1.Task_OpenaiResponsesV1{
-				OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1TaskSpec{
-					RequestJson: []byte(`{"model":"gpt-5.2","input":"preflight"}`),
-					Params:      &lcpdv1.OpenAIResponsesV1Params{Model: "gpt-5.2"},
-				},
-			},
+			Method:                 "openai.responses.v1",
+			Params:                 respParams,
+			RequestBytes:           []byte(`{"model":"gpt-5.2","input":"preflight"}`),
+			RequestContentType:     "application/json; charset=utf-8",
+			RequestContentEncoding: "identity",
 		},
 	} {
 		quoteResp, quoteErr := aliceClient.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 			PeerId: bobPubKey,
-			Task:   task,
+			Call:   call,
 		})
 		if quoteErr != nil {
 			t.Fatalf("RequestQuote (preflight): %v", quoteErr)
 		}
-		if quoteResp.GetTerms() == nil {
-			t.Fatalf("RequestQuote (preflight): terms is nil")
+		if quoteResp.GetQuote() == nil {
+			t.Fatalf("RequestQuote (preflight): quote is nil")
 		}
-		price := quoteResp.GetTerms().GetPriceMsat()
+		price := quoteResp.GetQuote().GetPriceMsat()
 		if price > maxPriceMsat {
 			maxPriceMsat = price
 		}
@@ -209,11 +217,11 @@ func TestE2E_Regtest_OpenAIServe_StreamAndResponses(t *testing.T) {
 			t.Fatalf("peer-id header mismatch (-want +got):\n%s", diff)
 		}
 
-		if diff := cmp.Diff(lcp.Hash32Len*2, len(resp.Header.Get("X-Lcp-Job-Id"))); diff != "" {
-			t.Fatalf("job-id header length mismatch (-want +got):\n%s", diff)
+		if diff := cmp.Diff(lcp.Hash32Len*2, len(resp.Header.Get("X-Lcp-Call-Id"))); diff != "" {
+			t.Fatalf("call-id header length mismatch (-want +got):\n%s", diff)
 		}
-		if _, decodeErr := hex.DecodeString(resp.Header.Get("X-Lcp-Job-Id")); decodeErr != nil {
-			t.Fatalf("job-id header is not hex: %v", decodeErr)
+		if _, decodeErr := hex.DecodeString(resp.Header.Get("X-Lcp-Call-Id")); decodeErr != nil {
+			t.Fatalf("call-id header is not hex: %v", decodeErr)
 		}
 		if diff := cmp.Diff(lcp.Hash32Len*2, len(resp.Header.Get("X-Lcp-Terms-Hash"))); diff != "" {
 			t.Fatalf("terms-hash header length mismatch (-want +got):\n%s", diff)

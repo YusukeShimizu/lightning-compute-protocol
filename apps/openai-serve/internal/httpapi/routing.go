@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,28 +8,28 @@ import (
 	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 )
 
-func (s *Server) discoverModels(ctx context.Context) (map[string]struct{}, error) {
+func (s *Server) discoverModels() map[string]struct{} {
 	if len(s.cfg.ModelAllowlist) > 0 {
-		return copySet(s.cfg.ModelAllowlist), nil
+		return copySet(s.cfg.ModelAllowlist)
 	}
 
-	resp, err := s.lcpd.ListLCPPeers(ctx, &lcpdv1.ListLCPPeersRequest{})
-	if err != nil {
-		return nil, err
+	if len(s.cfg.ModelMap) != 0 {
+		out := make(map[string]struct{}, len(s.cfg.ModelMap))
+		for model := range s.cfg.ModelMap {
+			out[model] = struct{}{}
+		}
+		return out
 	}
-	return collectModelsFromPeersForKinds(
-		resp,
-		[]lcpdv1.LCPTaskKind{
-			lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
-			lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
-		},
-	), nil
+
+	// LCP v0.3 manifests do not advertise available models. If no allowlist or
+	// explicit model map is configured, return an empty list.
+	return nil
 }
 
-func (s *Server) validateModelForTaskKind(
+func (s *Server) validateModelForMethod(
 	model string,
-	taskKind lcpdv1.LCPTaskKind,
-	peersResp *lcpdv1.ListLCPPeersResponse,
+	_ string,
+	_ *lcpdv1.ListLCPPeersResponse,
 ) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -47,25 +46,22 @@ func (s *Server) validateModelForTaskKind(
 		)
 	}
 
-	discovered := collectModelsFromPeersForKind(peersResp, taskKind)
-	if len(discovered) == 0 {
-		// Some providers do not advertise supported_tasks. If we have no allowlist
-		// and no discovery signal, skip validation to keep the gateway usable.
-		return nil
-	}
-
-	if _, ok := discovered[model]; ok || s.cfg.AllowUnlistedModels {
-		return nil
-	}
-	return fmt.Errorf("model is not advertised by any connected LCP peer: %q", model)
+	// LCP v0.3 manifests do not advertise models. Without an explicit allowlist,
+	// skip validation to keep the gateway usable (providers enforce their own
+	// model policies).
+	return nil
 }
 
-func (s *Server) resolvePeerIDForTaskKind(
+func (s *Server) resolvePeerIDForMethod(
 	model string,
-	taskKind lcpdv1.LCPTaskKind,
+	method string,
 	peersResp *lcpdv1.ListLCPPeersResponse,
 ) (string, error) {
 	model = strings.TrimSpace(model)
+	method = strings.TrimSpace(method)
+	if method == "" {
+		return "", errors.New("method is required")
+	}
 
 	if peerID, ok, err := s.resolvePeerIDFromModelMap(model, peersResp); ok || err != nil {
 		return peerID, err
@@ -75,7 +71,7 @@ func (s *Server) resolvePeerIDForTaskKind(
 		return peerID, err
 	}
 
-	if peerID, ok := resolvePeerIDFromSupportedTasks(peersResp, taskKind, model); ok {
+	if peerID, ok := resolvePeerIDFromSupportedMethods(peersResp, method); ok {
 		return peerID, nil
 	}
 
@@ -118,19 +114,20 @@ func (s *Server) resolvePeerIDFromDefaultPeer(
 	return defaultPeerID, true, nil
 }
 
-func resolvePeerIDFromSupportedTasks(
+func resolvePeerIDFromSupportedMethods(
 	peersResp *lcpdv1.ListLCPPeersResponse,
-	taskKind lcpdv1.LCPTaskKind,
-	model string,
+	method string,
 ) (string, bool) {
 	for _, p := range peersResp.GetPeers() {
-		for _, tmpl := range p.GetRemoteManifest().GetSupportedTasks() {
-			if tmpl.GetKind() != taskKind {
+		m := p.GetRemoteManifest()
+		if m == nil {
+			continue
+		}
+		for _, desc := range m.GetSupportedMethods() {
+			if strings.TrimSpace(desc.GetMethod()) != method {
 				continue
 			}
-			if advertisedModel := modelFromTaskTemplate(taskKind, tmpl); strings.TrimSpace(advertisedModel) == model {
-				return p.GetPeerId(), true
-			}
+			return p.GetPeerId(), true
 		}
 	}
 	return "", false
@@ -141,66 +138,6 @@ func resolvePeerIDFromAnyPeer(peersResp *lcpdv1.ListLCPPeersResponse) (string, b
 		return peers[0].GetPeerId(), true
 	}
 	return "", false
-}
-
-func modelFromTaskTemplate(kind lcpdv1.LCPTaskKind, tmpl *lcpdv1.LCPTaskTemplate) string {
-	if tmpl == nil {
-		return ""
-	}
-
-	switch kind {
-	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_UNSPECIFIED:
-		return ""
-	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1:
-		return tmpl.GetOpenaiChatCompletionsV1().GetModel()
-	case lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1:
-		return tmpl.GetOpenaiResponsesV1().GetModel()
-	}
-	return ""
-}
-
-func collectModelsFromPeersForKinds(resp *lcpdv1.ListLCPPeersResponse, kinds []lcpdv1.LCPTaskKind) map[string]struct{} {
-	if resp == nil {
-		return nil
-	}
-
-	out := make(map[string]struct{})
-	for _, kind := range kinds {
-		for model := range collectModelsFromPeersForKind(resp, kind) {
-			out[model] = struct{}{}
-		}
-	}
-
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func collectModelsFromPeersForKind(resp *lcpdv1.ListLCPPeersResponse, kind lcpdv1.LCPTaskKind) map[string]struct{} {
-	if resp == nil {
-		return nil
-	}
-
-	out := make(map[string]struct{})
-	for _, p := range resp.GetPeers() {
-		for _, tmpl := range p.GetRemoteManifest().GetSupportedTasks() {
-			if tmpl.GetKind() != kind {
-				continue
-			}
-
-			model := strings.TrimSpace(modelFromTaskTemplate(kind, tmpl))
-			if model == "" {
-				continue
-			}
-			out[model] = struct{}{}
-		}
-	}
-
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func peerInList(resp *lcpdv1.ListLCPPeersResponse, peerID string) bool {

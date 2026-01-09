@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"net/http"
 	"sort"
 	"time"
@@ -16,15 +15,7 @@ func (s *Server) handleModels(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.TimeoutQuote)
-	defer cancel()
-
-	models, err := s.discoverModels(ctx)
-	if err != nil {
-		s.log.ErrorContext(ctx, "models discovery failed", "err", err)
-		writeOpenAIError(c, httpStatusFromGRPC(err), "server_error", "failed to list models")
-		return
-	}
+	models := s.discoverModels()
 
 	ids := make([]string, 0, len(models))
 	for id := range models {
