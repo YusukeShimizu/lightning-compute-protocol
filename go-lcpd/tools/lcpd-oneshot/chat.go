@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 )
 
@@ -83,17 +84,22 @@ func (s *chatSession) Turn(
 		return chatTurnOutput{Trimmed: trimmed}, err
 	}
 
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: s.baseOpts.Model},
+	)
+	if err != nil {
+		s.history = s.history[:len(s.history)-1]
+		return chatTurnOutput{Trimmed: trimmed}, fmt.Errorf("encode openai.chat_completions.v1 params: %w", err)
+	}
+
 	quoteResp, err := client.RequestQuote(turnCtx, &lcpdv1.RequestQuoteRequest{
 		PeerId: s.baseOpts.PeerID,
-		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-					RequestJson: requestJSON,
-					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
-						Model: s.baseOpts.Model,
-					},
-				},
-			},
+		Call: &lcpdv1.CallSpec{
+			Method:                 "openai.chat_completions.v1",
+			Params:                 paramsBytes,
+			RequestBytes:           requestJSON,
+			RequestContentType:     "application/json; charset=utf-8",
+			RequestContentEncoding: "identity",
 		},
 	})
 	if err != nil {
@@ -101,15 +107,15 @@ func (s *chatSession) Turn(
 		return chatTurnOutput{Trimmed: trimmed}, fmt.Errorf("request quote: %w", err)
 	}
 
-	terms := quoteResp.GetTerms()
-	if terms == nil {
+	quote := quoteResp.GetQuote()
+	if quote == nil {
 		s.history = s.history[:len(s.history)-1]
-		return chatTurnOutput{Trimmed: trimmed}, errors.New("request quote: response terms is nil")
+		return chatTurnOutput{Trimmed: trimmed}, errors.New("request quote: response quote is nil")
 	}
 
 	execResp, err := client.AcceptAndExecute(turnCtx, &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     s.baseOpts.PeerID,
-		JobId:      terms.GetJobId(),
+		CallId:     quote.GetCallId(),
 		PayInvoice: true,
 	})
 	if err != nil {
@@ -120,12 +126,22 @@ func (s *chatSession) Turn(
 		s.history = s.history[:len(s.history)-1]
 		return chatTurnOutput{Trimmed: trimmed}, errors.New("accept and execute: response is nil")
 	}
-	if execResp.GetResult() == nil {
+	if execResp.GetComplete() == nil {
 		s.history = s.history[:len(s.history)-1]
-		return chatTurnOutput{Trimmed: trimmed}, errors.New("accept and execute: result is nil")
+		return chatTurnOutput{Trimmed: trimmed}, errors.New("accept and execute: complete is nil")
 	}
 
-	replyBytes := execResp.GetResult().GetResult()
+	complete := execResp.GetComplete()
+	if complete.GetStatus() != lcpdv1.Complete_STATUS_OK {
+		s.history = s.history[:len(s.history)-1]
+		return chatTurnOutput{Trimmed: trimmed}, fmt.Errorf(
+			"accept and execute: status=%s message=%s",
+			complete.GetStatus().String(),
+			strings.TrimSpace(complete.GetMessage()),
+		)
+	}
+
+	replyBytes := complete.GetResponseBytes()
 	reply := strings.TrimSpace(extractAssistantContentFromChatCompletionsResponse(replyBytes))
 	if reply == "" {
 		reply = normalizeAssistantReply(string(replyBytes))
@@ -134,12 +150,12 @@ func (s *chatSession) Turn(
 	}
 	reply = strings.TrimRight(reply, "\r\n")
 
-	s.totalMsat += terms.GetPriceMsat()
+	s.totalMsat += quote.GetPriceMsat()
 	s.history = append(s.history, chatMessage{Role: chatRoleAssistant, Content: reply})
 
 	return chatTurnOutput{
 		Reply:     reply,
-		PriceMsat: terms.GetPriceMsat(),
+		PriceMsat: quote.GetPriceMsat(),
 		TotalMsat: s.totalMsat,
 		Trimmed:   trimmed,
 	}, nil

@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"time"
 
@@ -688,51 +687,16 @@ func localManifestForProvider(providerCfg provider.Config) *lcpwire.Manifest {
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
 		MaxPayloadBytes: defaultMaxPayloadBytes,
 		MaxStreamBytes:  defaultMaxStreamBytes,
-		MaxJobBytes:     defaultMaxJobBytes,
+		MaxCallBytes:    defaultMaxJobBytes,
 	}
 
 	if !providerCfg.Enabled || len(providerCfg.Models) == 0 {
 		return manifest
 	}
 
-	models := make([]string, 0, len(providerCfg.Models))
-	for model := range providerCfg.Models {
-		models = append(models, model)
-	}
-	slices.Sort(models)
-
-	manifest.SupportedTasks = make(
-		[]lcpwire.TaskTemplate,
-		0,
-		len(models),
-	)
-	for _, modelKey := range models {
-		model := strings.TrimSpace(modelKey)
-		if model == "" {
-			continue
-		}
-
-		chatParams, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
-			lcpwire.OpenAIChatCompletionsV1Params{Model: model},
-		)
-		if err == nil {
-			paramsBytes := chatParams
-			manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
-				TaskKind:    "openai.chat_completions.v1",
-				ParamsBytes: &paramsBytes,
-			})
-		}
-
-		responsesParams, err := lcpwire.EncodeOpenAIResponsesV1Params(
-			lcpwire.OpenAIResponsesV1Params{Model: model},
-		)
-		if err == nil {
-			paramsBytes := responsesParams
-			manifest.SupportedTasks = append(manifest.SupportedTasks, lcpwire.TaskTemplate{
-				TaskKind:    "openai.responses.v1",
-				ParamsBytes: &paramsBytes,
-			})
-		}
+	manifest.SupportedMethods = []lcpwire.MethodDescriptor{
+		{Method: "openai.chat_completions.v1"},
+		{Method: "openai.responses.v1"},
 	}
 	return manifest
 }

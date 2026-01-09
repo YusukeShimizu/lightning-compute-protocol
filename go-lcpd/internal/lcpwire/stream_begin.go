@@ -21,12 +21,12 @@ const (
 )
 
 func EncodeStreamBegin(b StreamBegin) ([]byte, error) {
-	envelopeRecords, err := encodeJobEnvelope(b.Envelope)
+	envelopeRecords, err := encodeCallEnvelope(b.Envelope)
 	if err != nil {
 		return nil, err
 	}
 
-	if b.Kind != StreamKindInput && b.Kind != StreamKindResult {
+	if b.Kind != StreamKindRequest && b.Kind != StreamKindResponse {
 		return nil, fmt.Errorf("invalid stream_kind: %d", b.Kind)
 	}
 	if b.ContentType == "" {
@@ -72,7 +72,7 @@ func DecodeStreamBegin(payload []byte) (StreamBegin, error) {
 		return StreamBegin{}, err
 	}
 
-	env, err := decodeJobEnvelope(m)
+	env, err := decodeCallEnvelope(m)
 	if err != nil {
 		return StreamBegin{}, err
 	}
@@ -105,7 +105,7 @@ func decodeStreamBeginBody(m map[uint64][]byte) (StreamBegin, error) {
 		return StreamBegin{}, fmt.Errorf("stream_kind: %w", err)
 	}
 	kind := StreamKind(streamKindU16)
-	if kind != StreamKindInput && kind != StreamKindResult {
+	if kind != StreamKindRequest && kind != StreamKindResponse {
 		return StreamBegin{}, fmt.Errorf("invalid stream_kind: %d", streamKindU16)
 	}
 

@@ -6,20 +6,24 @@
 ## これは何？
 
 `go-lcpd` は LCP（Lightning Compute Protocol）の参照実装（daemon）です。
-Lightning の BOLT #1 カスタムメッセージを `lnd` のピア接続上でやり取りし、Requester 側のフロー（quote → pay → result）をローカル gRPC API で操作できるようにします。
+Lightning の BOLT #1 カスタムメッセージを `lnd` のピア接続上でやり取りし、
+Requester 側のフロー（call → quote → pay → stream(response) → complete）をローカル gRPC API で操作できるようにします。
+
+同じバイナリは Provider モードとしても動作でき、`lcp_call` と request stream を受け取り、見積もり（`lcp_quote`）と
+支払い確認のあとに response stream と `lcp_complete` を返します。
 
 ## 主要ポイント（抜粋）
 
 - 単一の真実（SSOT）:
   - gRPC API: `go-lcpd/proto/lcpd/v1/lcpd.proto`
-  - wire protocol: `protocol/protocol.md`（LCP v0.1, `protocol_version=1`）
+  - wire protocol: `protocol/protocol.md`（LCP v0.3, `protocol_version=3`）
 - transport:
   - 独自 TCP/UDP transport は実装しません（peer messaging は `lnd` に委譲）
 - 互換性:
   - unknown odd message を無視、unknown even を切断（BOLT #1 parity）
   - unknown TLV は無視（forward compatibility）
 - セキュリティ:
-  - 支払い前に invoice の `description_hash == terms_hash` 等を検証
+  - 支払い前に invoice の `description_hash == terms_hash` 等を検証（invoice swapping 防止）
   - quote expiry / envelope expiry の制限と重複排除で replay/DoS を軽減
   - ログには生のプロンプト/出力や秘密情報（API key / macaroon / invoice 文字列など）を残さない
 - テスト:

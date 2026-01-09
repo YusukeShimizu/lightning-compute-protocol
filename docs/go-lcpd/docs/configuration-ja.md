@@ -42,7 +42,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 
 - `LCPD_LOG_LEVEL` で詳細度を制御します（`debug` / `info` / `warn` / `error`。デフォルトは `info`）。
 - ログには、生のプロンプト / 生のモデル出力 / API key / macaroon / BOLT11 invoice を残してはいけません。
-- 生データを残さなくても、ログにはメタデータ（peer id / job id / 価格 / 時間など）が残ります。
+- 生データを残さなくても、ログにはメタデータ（peer id / call id / 価格 / 時間など）が残ります。
 
 詳細: [ログとプライバシー](/go-lcpd/docs/logging-ja)。
 
@@ -116,9 +116,8 @@ llm:
 
 - `model` は OpenAI の model ID です。
 - 出現箇所:
-  - wire の `openai_chat_completions_v1_params_tlvs.model`（`params_bytes`）
-  - input stream bytes に入る OpenAI request JSON の `request_json.model`
-  - gRPC の `LCPManifest.supported_tasks[].openai_chat_completions_v1.model`（広告）
+  - wire の `openai_chat_completions_v1_params_tlvs.model`（`lcp_call.params` 内）
+  - request stream bytes に入る OpenAI request JSON の `request_json.model`
 - Provider は `model` を allowlist / pricing / backend routing に使います。
 
 ### フィールドリファレンス
@@ -130,7 +129,7 @@ llm:
   - `per_job_bps`: `threshold` を超えた 1 job あたりの加算倍率（bps。10,000 = 1.0x）。`0` の場合は無効。
   - `max_multiplier_bps`: 総倍率の上限（bps）。`0` の場合は安全なデフォルト上限が使われます。
 - `llm.max_output_tokens`: Provider 全体の max output tokens 上限。quote 時の推定と request validation に使います。デフォルト 4096。
-- `llm.models`: 許可/広告する `openai.chat_completions.v1` model ID のマップ。空の場合、任意の `model` を受け付けますが manifest では広告しません。
+- `llm.models`: 許可する `openai.*` model ID のマップ。空の場合、任意の `model` を受け付けます（ただし Provider 側のポリシーにより拒否される場合があります）。
   - `max_output_tokens`: 任意の model ごとの上書き（0 より大きいこと）。
   - `price`: model ごとの価格（msat / 100 万トークン）。`input_msat_per_mtok` と `output_msat_per_mtok` は必須、`cached_input_msat_per_mtok` は任意。
 
@@ -142,20 +141,20 @@ YAML がない場合、内蔵の価格表（msat / 100 万トークン）を使�
 ### Quote → Execute フロー（`openai.chat_completions.v1`）
 
 1. QuoteRequest を検証し、model が許可されているか確認します。
-2. input stream bytes を OpenAI request JSON として受信・検証します（`request_json.model` / `request_json.messages` / `request_json.stream=false`）。
+2. request stream bytes を OpenAI request JSON として受信・検証します（`request_json.model` / `request_json.messages` / optional `request_json.stream`）。
 3. quote 時の推定に使う `max_output_tokens` を決定します:
    - `llm.max_output_tokens`（任意で model ごとの上書き）を上限とする
    - request が output token 上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`）を指定している場合、Provider 上限以下であることを検証し、その値で推定する
 4. `UsageEstimator`（`approx.v1`: `ceil(len(bytes)/4)`）でトークン使用量を推定します。
 5. `QuotePrice(model, estimate, cached=0, price_table)` で msat 価格を計算し、任意で `pricing.in_flight_surge` を適用してから TermsHash / invoice binding に埋め込みます。
-6. 支払いが確定したら、passthrough request を backend で実行し、result stream を返して `lcp_result` で完了します。
+6. 支払いが確定したら、passthrough request を backend で実行し、response stream を返して `lcp_complete` で完了します。
 
 ## backend に関する補足
 
 - `openai`: 外部 API を呼び出します（課金 / レート制限 / ネットワーク依存）。
   - OpenAI 互換 Chat Completions API（`POST /v1/chat/completions`）を使用します。
-  - LCP input stream の raw request body bytes をそのまま送信します（non-streaming）。
-  - OpenAI 互換の response body bytes をそのまま返します（non-streaming JSON）。
+  - LCP request stream の raw request body bytes をそのまま送信します（upstream streaming の有無は request JSON に依存）。
+  - OpenAI 互換の response body bytes をそのまま返します（streaming の場合は `text/event-stream`）。
 - `deterministic`: 開発用の固定出力 backend（外部 API なし）。
 - `disabled`: 実行しません（Requester のみ運用で便利）。
 

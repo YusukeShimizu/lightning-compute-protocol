@@ -47,16 +47,19 @@ func TestRunPipeline_RequestQuoteOnly(t *testing.T) {
 	if diff := cmp.Diff(opts.PeerID, fake.requestQuoteReq.GetPeerId()); diff != "" {
 		t.Fatalf("peer_id mismatch (-want +got):\n%s", diff)
 	}
-	openaiTask := fake.requestQuoteReq.GetTask().GetOpenaiChatCompletionsV1()
-	if openaiTask == nil {
-		t.Fatalf("task.openai_chat_completions_v1 is nil")
+	call := fake.requestQuoteReq.GetCall()
+	if call == nil {
+		t.Fatalf("call is nil")
 	}
-	params := openaiTask.GetParams()
-	if params == nil {
-		t.Fatalf("task.openai_chat_completions_v1.params is nil")
+	if diff := cmp.Diff("openai.chat_completions.v1", call.GetMethod()); diff != "" {
+		t.Fatalf("call.method mismatch (-want +got):\n%s", diff)
 	}
 
-	if diff := cmp.Diff(opts.Model, params.GetModel()); diff != "" {
+	decodedParams, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(call.GetParams())
+	if err != nil {
+		t.Fatalf("DecodeOpenAIChatCompletionsV1Params: %v", err)
+	}
+	if diff := cmp.Diff(opts.Model, decodedParams.Model); diff != "" {
 		t.Fatalf("params.model mismatch (-want +got):\n%s", diff)
 	}
 
@@ -69,7 +72,7 @@ func TestRunPipeline_RequestQuoteOnly(t *testing.T) {
 		Temperature *float64 `json:"temperature,omitempty"`
 		MaxTokens   *uint32  `json:"max_tokens,omitempty"`
 	}
-	if unmarshalErr := json.Unmarshal(openaiTask.GetRequestJson(), &req); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(call.GetRequestBytes(), &req); unmarshalErr != nil {
 		t.Fatalf("unmarshal request_json: %v", unmarshalErr)
 	}
 	if diff := cmp.Diff(opts.Model, req.Model); diff != "" {
@@ -99,11 +102,11 @@ func TestRunPipeline_RequestQuoteOnly(t *testing.T) {
 		t.Fatalf("request_json.max_tokens mismatch (-want +got):\n%s", diff)
 	}
 
-	if res.Terms == nil {
-		t.Fatalf("Terms is nil")
+	if res.Quote == nil {
+		t.Fatalf("Quote is nil")
 	}
-	if res.Result != nil {
-		t.Fatalf("Result must be nil when pay-invoice=false")
+	if res.Complete != nil {
+		t.Fatalf("Complete must be nil when pay-invoice=false")
 	}
 }
 
@@ -139,18 +142,18 @@ func TestRunPipeline_RequestQuoteAndAcceptAndExecute(t *testing.T) {
 	if diff := cmp.Diff(opts.PeerID, fake.acceptReq.GetPeerId()); diff != "" {
 		t.Fatalf("accept peer_id mismatch (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(fake.terms.GetJobId(), fake.acceptReq.GetJobId()); diff != "" {
-		t.Fatalf("accept job_id mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(fake.quote.GetCallId(), fake.acceptReq.GetCallId()); diff != "" {
+		t.Fatalf("accept call_id mismatch (-want +got):\n%s", diff)
 	}
 	if got := fake.acceptReq.GetPayInvoice(); got != true {
 		t.Fatalf("accept pay_invoice: got %v want true", got)
 	}
 
-	if res.Result == nil {
-		t.Fatalf("Result is nil")
+	if res.Complete == nil {
+		t.Fatalf("Complete is nil")
 	}
-	if diff := cmp.Diff([]byte(fake.resultText), res.Result.GetResult()); diff != "" {
-		t.Fatalf("result mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]byte(fake.resultText), res.Complete.GetResponseBytes()); diff != "" {
+		t.Fatalf("response mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -215,15 +218,19 @@ func TestFormatHumanSummary(t *testing.T) {
 
 	res := pipelineResult{
 		PeerID: strings.Repeat("a", 66),
-		Terms: &lcpdv1.Terms{
-			JobId:          bytes.Repeat([]byte{0xbb}, 32),
+		Quote: &lcpdv1.Quote{
+			CallId:         bytes.Repeat([]byte{0xbb}, 32),
 			TermsHash:      bytes.Repeat([]byte{0xaa}, 32),
 			PriceMsat:      1500,
 			PaymentRequest: "lnbc1testinvoice",
 		},
-		Result: &lcpdv1.Result{
-			Result:      []byte("hello"),
-			ContentType: "text/plain; charset=utf-8",
+		Complete: &lcpdv1.Complete{
+			Status:        lcpdv1.Complete_STATUS_OK,
+			ResponseBytes: []byte("hello"),
+			ResponseContentType: func() *string {
+				ct := "text/plain; charset=utf-8"
+				return &ct
+			}(),
 		},
 	}
 
@@ -233,10 +240,11 @@ func TestFormatHumanSummary(t *testing.T) {
 		"peer_id=" + strings.Repeat("a", 66),
 		"price_msat=1500",
 		"terms_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"job_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"call_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		"payment_request:\nlnbc1testinvoice",
+		"status=STATUS_OK",
 		"content_type=text/plain; charset=utf-8",
-		"result:\nhello",
+		"response:\nhello",
 	} {
 		if !strings.Contains(out, substr) {
 			t.Fatalf("formatHumanSummary missing substring %q\noutput:\n%s", substr, out)
@@ -252,7 +260,7 @@ type fakeClient struct {
 	requestQuoteReq *lcpdv1.RequestQuoteRequest
 	acceptReq       *lcpdv1.AcceptAndExecuteRequest
 
-	terms      *lcpdv1.Terms
+	quote      *lcpdv1.Quote
 	acceptResp *lcpdv1.AcceptAndExecuteResponse
 }
 
@@ -263,18 +271,18 @@ func (f *fakeClient) RequestQuote(
 ) (*lcpdv1.RequestQuoteResponse, error) {
 	f.requestQuoteReq = req
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           bytes.Repeat([]byte{0x01}, 32),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          bytes.Repeat([]byte{0x01}, 32),
 		PriceMsat:       1500,
 		TermsHash:       bytes.Repeat([]byte{0x02}, 32),
 		PaymentRequest:  "lnbc1fakeinvoice",
 	}
-	f.terms = terms
+	f.quote = quote
 
 	return &lcpdv1.RequestQuoteResponse{
 		PeerId: req.GetPeerId(),
-		Terms:  terms,
+		Quote:  quote,
 	}, nil
 }
 
@@ -289,9 +297,13 @@ func (f *fakeClient) AcceptAndExecute(
 	}
 
 	f.acceptResp = &lcpdv1.AcceptAndExecuteResponse{
-		Result: &lcpdv1.Result{
-			Result:      []byte(f.resultText),
-			ContentType: f.contentType,
+		Complete: &lcpdv1.Complete{
+			Status:        lcpdv1.Complete_STATUS_OK,
+			ResponseBytes: []byte(f.resultText),
+			ResponseContentType: func() *string {
+				ct := f.contentType
+				return &ct
+			}(),
 		},
 	}
 	return f.acceptResp, nil

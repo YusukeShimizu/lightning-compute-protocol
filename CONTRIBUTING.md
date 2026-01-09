@@ -7,7 +7,7 @@ If you are new to Lightning, Go, or protocol work, open an issue or a draft PR a
 
 ## Quick links
 
-- Protocol draft (LCP v0.2): `docs/protocol/protocol.md`
+- Protocol draft (LCP v0.3): `docs/protocol/protocol.md`
 - Reference implementation (daemon): `go-lcpd/`
 - go-lcpd developer docs: `docs/go-lcpd/docs/`
 

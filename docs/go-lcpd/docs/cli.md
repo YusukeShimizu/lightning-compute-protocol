@@ -30,10 +30,10 @@ All command examples below use:
 - `lcpd-grpcd` serves plaintext gRPC (no TLS, no auth). Bind to `127.0.0.1` or protect it via SSH/VPN/reverse-proxy if you must access it remotely.
 - `AcceptAndExecute` pays a BOLT11 invoice via your `lnd`. On mainnet this spends real funds. Start with regtest and use small amounts.
 - LCP messaging requires an active Lightning peer connection to the Provider, and the Provider must support LCP (manifest observed).
-- The only supported task type is `openai.chat_completions.v1` (raw OpenAI-compatible request/response JSON bytes passthrough).
-- Quote execution is time-bounded by `terms.quoteExpiry`; calls after expiry are expected to fail.
-- LCP peer messaging enforces payload/stream limits (`max_payload_bytes`, `max_stream_bytes`, `max_job_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes payload, `4 MiB` stream, `8 MiB` job.
-- `job_id` CLI flags are base64 (proto `bytes`), matching protojson encoding.
+- The primary supported methods are `openai.chat_completions.v1` and `openai.responses.v1` (raw OpenAI-compatible request/response JSON bytes passthrough).
+- Quote execution is time-bounded by `quote.quoteExpiry`; calls after expiry are expected to fail.
+- LCP peer messaging enforces payload/stream limits (`max_payload_bytes`, `max_stream_bytes`, `max_call_bytes` in the manifest). `go-lcpd` defaults to `16384` bytes payload, `4 MiB` stream, `8 MiB` call.
+- `call_id` CLI flags are base64 (proto `bytes`), matching protojson encoding.
 - `lcpdctl --timeout` is a dial timeout (not an RPC deadline). Cancel long-running RPCs with Ctrl-C, or use `lcpd-oneshot -timeout ...` for an overall deadline.
 
 Note about older docs:
@@ -190,7 +190,7 @@ Tip:
 
 ## Quickstart (RequestQuote → AcceptAndExecute)
 
-This section shows the full flow using only `lcpdctl lcpd ...` (quote → pay → stream(result) → `lcp_result`).
+This section shows the full flow using only `lcpdctl lcpd ...` (call → quote → pay → stream(response) → `lcp_complete`).
 
 - The examples do not write files (stdout only).
 - No Python is needed (we use `jq` to format JSON).
@@ -210,6 +210,7 @@ cd go-lcpd
 SERVER_ADDR="127.0.0.1:50051"
 PEER_ID="<provider_pubkey_hex>"
 MODEL="gpt-5.2"
+METHOD="openai.chat_completions.v1"
 
 PROMPT="Say hello in one word."
 
@@ -217,12 +218,19 @@ request_json="$(jq -nc --arg model "$MODEL" --arg prompt "$PROMPT" \
   '{model:$model, messages:[{role:"user", content:$prompt}]}' )"
 request_json_b64="$(printf '%s' "$request_json" | base64 | tr -d '\n')"
 
+# For openai.* methods, call.params is a method-defined TLV stream (BOLT-style TLVs).
+# For openai.chat_completions.v1, params currently include the model as TLV type=1.
+# This value is base64 for: 0x01 0x07 "gpt-5.2"
+call_params_b64="AQdncHQtNS4y"
+
 quote_json="$(./bin/lcpdctl lcpd request-quote \
   -s "$SERVER_ADDR" \
   --peer-id "$PEER_ID" \
-  --task-openai-chat-completions-v1 \
-  --task-openai-chat-completions-v1-params-model "$MODEL" \
-  --task-openai-chat-completions-v1-request-json "$request_json_b64" \
+  --call-method "$METHOD" \
+  --call-params "$call_params_b64" \
+  --call-request-bytes "$request_json_b64" \
+  --call-request-content-type "application/json; charset=utf-8" \
+  --call-request-content-encoding "identity" \
   -o json)"
 echo "$quote_json" | jq -C .
 # If you don't have `jq` installed, use: echo "$quote_json"
@@ -230,28 +238,28 @@ echo "$quote_json" | jq -C .
 
 #### 2) AcceptAndExecute (pay invoice and wait for result)
 
-`jobId` is base64 in protojson (because `job_id` is `bytes`).
+`callId` is base64 in protojson (because `call_id` is `bytes`).
 
 ```sh
 cd go-lcpd
 
-job_id_b64="$(echo "$quote_json" | jq -r '.terms.jobId')"
+call_id_b64="$(echo "$quote_json" | jq -r '.quote.callId')"
 
 exec_json="$(./bin/lcpdctl lcpd accept-and-execute \
   -s "$SERVER_ADDR" \
   --peer-id "$PEER_ID" \
-  --job-id "$job_id_b64" \
+  --call-id "$call_id_b64" \
   --pay-invoice \
   -o json)"
 echo "$exec_json" | jq -C .
 # If you don't have `jq` installed, use: echo "$exec_json"
 ```
 
-Note: `AcceptAndExecuteResponse.result.result` is base64-encoded bytes in JSON output.
+Note: `AcceptAndExecuteResponse.complete.responseBytes` is base64-encoded bytes in JSON output.
 To decode and pretty-print the raw OpenAI response JSON:
 
 ```sh
-result_b64="$(echo "$exec_json" | jq -r '.result.result')"
+result_b64="$(echo "$exec_json" | jq -r '.complete.responseBytes')"
 
 # GNU coreutils:
 # echo "$result_b64" | base64 -d | jq -C .

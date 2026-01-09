@@ -3,8 +3,10 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -199,6 +201,63 @@ func mustDiff[T any](t *testing.T, want, got T, opts ...cmp.Option) {
 	}
 }
 
+func mustDecodeOpenAIModelParamsTLV(t *testing.T, payload []byte) string {
+	t.Helper()
+
+	typ, n, err := decodeBigSize(payload)
+	if err != nil {
+		t.Fatalf("decode params type: %v", err)
+	}
+	if typ != 1 {
+		t.Fatalf("unexpected params tlv type: got %d want 1", typ)
+	}
+
+	length, m, err := decodeBigSize(payload[n:])
+	if err != nil {
+		t.Fatalf("decode params length: %v", err)
+	}
+
+	offset := n + m
+	if offset > len(payload) {
+		t.Fatalf("params payload is truncated")
+	}
+	if length > uint64(len(payload)-offset) {
+		t.Fatalf("params length exceeds payload: length=%d remaining=%d", length, len(payload)-offset)
+	}
+
+	modelBytes := payload[offset : offset+int(length)]
+	return string(modelBytes)
+}
+
+func decodeBigSize(b []byte) (uint64, int, error) {
+	if len(b) == 0 {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+
+	switch b[0] {
+	case 0xfd:
+		if len(b) < 3 {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		return uint64(binary.BigEndian.Uint16(b[1:3])), 3, nil
+	case 0xfe:
+		if len(b) < 5 {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		return uint64(binary.BigEndian.Uint32(b[1:5])), 5, nil
+	case 0xff:
+		if len(b) < 9 {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		return binary.BigEndian.Uint64(b[1:9]), 9, nil
+	default:
+		if b[0] > 0xfc {
+			return 0, 0, errors.New("invalid bigsize prefix")
+		}
+		return uint64(b[0]), 1, nil
+	}
+}
+
 func TestChatCompletions_Success(t *testing.T) {
 	const (
 		model    = "gpt-5.2"
@@ -223,12 +282,9 @@ func TestChatCompletions_Success(t *testing.T) {
 				{
 					PeerId: peerID,
 					RemoteManifest: &lcpdv1.LCPManifest{
-						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+						SupportedMethods: []*lcpdv1.MethodDescriptor{
 							{
-								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
-								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
-									OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
-								},
+								Method: "openai.chat_completions.v1",
 							},
 						},
 					},
@@ -237,18 +293,24 @@ func TestChatCompletions_Success(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobIDStr),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobIDStr),
 				PriceMsat: priceMsat123,
 				TermsHash: []byte(termsStr),
 			},
 		},
 		acceptResp: &lcpdv1.AcceptAndExecuteResponse{
-			Result: &lcpdv1.Result{
-				Status:          lcpdv1.Result_STATUS_OK,
-				Result:          wantRespBytes,
-				ContentType:     "application/json; charset=utf-8",
-				ContentEncoding: "identity",
+			Complete: &lcpdv1.Complete{
+				Status:        lcpdv1.Complete_STATUS_OK,
+				ResponseBytes: wantRespBytes,
+				ResponseContentType: func() *string {
+					ct := "application/json; charset=utf-8"
+					return &ct
+				}(),
+				ResponseContentEncoding: func() *string {
+					ce := "identity"
+					return &ce
+				}(),
 			},
 		},
 	}
@@ -276,7 +338,7 @@ func TestChatCompletions_Success(t *testing.T) {
 	mustDiff(t, wantRespBytes, rec.Body.Bytes())
 
 	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
-	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Call-Id"))
 	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
 	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
 
@@ -289,15 +351,18 @@ func TestChatCompletions_Success(t *testing.T) {
 
 	mustDiff(t, peerID, client.requestQuoteReq.GetPeerId())
 	mustDiff(t, peerID, client.acceptReq.GetPeerId())
-	mustDiff(t, []byte(jobIDStr), client.acceptReq.GetJobId())
+	mustDiff(t, []byte(jobIDStr), client.acceptReq.GetCallId())
 	mustDiff(t, true, client.acceptReq.GetPayInvoice())
 
-	openaiTask := client.requestQuoteReq.GetTask().GetOpenaiChatCompletionsV1()
-	if openaiTask == nil {
-		t.Fatalf("expected openai_chat_completions_v1 task")
+	call := client.requestQuoteReq.GetCall()
+	if call == nil {
+		t.Fatalf("expected call")
 	}
-	mustDiff(t, model, openaiTask.GetParams().GetModel())
-	mustDiff(t, reqBody, openaiTask.GetRequestJson())
+	mustDiff(t, "openai.chat_completions.v1", call.GetMethod())
+	mustDiff(t, model, mustDecodeOpenAIModelParamsTLV(t, call.GetParams()))
+	mustDiff(t, reqBody, call.GetRequestBytes())
+	mustDiff(t, "application/json; charset=utf-8", call.GetRequestContentType())
+	mustDiff(t, "identity", call.GetRequestContentEncoding())
 }
 
 func TestChatCompletions_Passthrough_AllowsExtraFields(t *testing.T) {
@@ -343,14 +408,9 @@ func TestChatCompletions_Passthrough_AllowsExtraFields(t *testing.T) {
 						{
 							PeerId: peerID,
 							RemoteManifest: &lcpdv1.LCPManifest{
-								SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+								SupportedMethods: []*lcpdv1.MethodDescriptor{
 									{
-										Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
-										ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
-											OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{
-												Model: model,
-											},
-										},
+										Method: "openai.chat_completions.v1",
 									},
 								},
 							},
@@ -359,18 +419,24 @@ func TestChatCompletions_Passthrough_AllowsExtraFields(t *testing.T) {
 				},
 				requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 					PeerId: peerID,
-					Terms: &lcpdv1.Terms{
-						JobId:     []byte("job-1"),
+					Quote: &lcpdv1.Quote{
+						CallId:    []byte("job-1"),
 						PriceMsat: priceMsat123,
 						TermsHash: []byte("terms-1"),
 					},
 				},
 				acceptResp: &lcpdv1.AcceptAndExecuteResponse{
-					Result: &lcpdv1.Result{
-						Status:          lcpdv1.Result_STATUS_OK,
-						Result:          wantRespBytes,
-						ContentType:     "application/json; charset=utf-8",
-						ContentEncoding: "identity",
+					Complete: &lcpdv1.Complete{
+						Status:        lcpdv1.Complete_STATUS_OK,
+						ResponseBytes: wantRespBytes,
+						ResponseContentType: func() *string {
+							ct := "application/json; charset=utf-8"
+							return &ct
+						}(),
+						ResponseContentEncoding: func() *string {
+							ce := "identity"
+							return &ce
+						}(),
 					},
 				},
 			}
@@ -398,11 +464,11 @@ func TestChatCompletions_Passthrough_AllowsExtraFields(t *testing.T) {
 			mustDiff(t, http.StatusOK, rec.Code)
 			mustDiff(t, wantRespBytes, rec.Body.Bytes())
 
-			openaiTask := client.requestQuoteReq.GetTask().GetOpenaiChatCompletionsV1()
-			if openaiTask == nil {
-				t.Fatalf("expected openai_chat_completions_v1 task")
+			call := client.requestQuoteReq.GetCall()
+			if call == nil {
+				t.Fatalf("expected call")
 			}
-			mustDiff(t, reqBody, openaiTask.GetRequestJson())
+			mustDiff(t, reqBody, call.GetRequestBytes())
 		})
 	}
 }
@@ -424,12 +490,9 @@ func TestChatCompletions_StreamSuccess(t *testing.T) {
 				{
 					PeerId: peerID,
 					RemoteManifest: &lcpdv1.LCPManifest{
-						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+						SupportedMethods: []*lcpdv1.MethodDescriptor{
 							{
-								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
-								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
-									OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
-								},
+								Method: "openai.chat_completions.v1",
 							},
 						},
 					},
@@ -438,8 +501,8 @@ func TestChatCompletions_StreamSuccess(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobIDStr),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobIDStr),
 				PriceMsat: priceMsat123,
 				TermsHash: []byte(termsStr),
 			},
@@ -447,26 +510,26 @@ func TestChatCompletions_StreamSuccess(t *testing.T) {
 		acceptStreamClient: &staticStreamClient{
 			responses: []*lcpdv1.AcceptAndExecuteStreamResponse{
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
-						ResultBegin: &lcpdv1.ResultStreamBegin{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseBegin{
+						ResponseBegin: &lcpdv1.ResponseStreamBegin{
 							ContentType:     "text/event-stream; charset=utf-8",
 							ContentEncoding: "identity",
 						},
 					},
 				},
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
-						ResultChunk: &lcpdv1.ResultStreamChunk{Data: chunk1},
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseChunk{
+						ResponseChunk: &lcpdv1.ResponseStreamChunk{Data: chunk1},
 					},
 				},
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
-						ResultChunk: &lcpdv1.ResultStreamChunk{Data: chunk2},
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseChunk{
+						ResponseChunk: &lcpdv1.ResponseStreamChunk{Data: chunk2},
 					},
 				},
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{
-						Result: &lcpdv1.Result{Status: lcpdv1.Result_STATUS_OK},
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Complete{
+						Complete: &lcpdv1.Complete{Status: lcpdv1.Complete_STATUS_OK},
 					},
 				},
 			},
@@ -497,7 +560,7 @@ func TestChatCompletions_StreamSuccess(t *testing.T) {
 	mustDiff(t, append(chunk1, chunk2...), rec.Body.Bytes())
 
 	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
-	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Call-Id"))
 	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
 	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
 
@@ -531,12 +594,9 @@ func TestResponses_Success(t *testing.T) {
 				{
 					PeerId: peerID,
 					RemoteManifest: &lcpdv1.LCPManifest{
-						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+						SupportedMethods: []*lcpdv1.MethodDescriptor{
 							{
-								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
-								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
-									OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{Model: model},
-								},
+								Method: "openai.responses.v1",
 							},
 						},
 					},
@@ -545,18 +605,24 @@ func TestResponses_Success(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobIDStr),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobIDStr),
 				PriceMsat: priceMsat123,
 				TermsHash: []byte(termsStr),
 			},
 		},
 		acceptResp: &lcpdv1.AcceptAndExecuteResponse{
-			Result: &lcpdv1.Result{
-				Status:          lcpdv1.Result_STATUS_OK,
-				Result:          wantRespBytes,
-				ContentType:     "application/json; charset=utf-8",
-				ContentEncoding: "identity",
+			Complete: &lcpdv1.Complete{
+				Status:        lcpdv1.Complete_STATUS_OK,
+				ResponseBytes: wantRespBytes,
+				ResponseContentType: func() *string {
+					ct := "application/json; charset=utf-8"
+					return &ct
+				}(),
+				ResponseContentEncoding: func() *string {
+					ce := "identity"
+					return &ce
+				}(),
 			},
 		},
 	}
@@ -582,15 +648,17 @@ func TestResponses_Success(t *testing.T) {
 	mustDiff(t, wantRespBytes, rec.Body.Bytes())
 
 	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
-	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Call-Id"))
 	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
 	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
 
-	openaiTask := client.requestQuoteReq.GetTask().GetOpenaiResponsesV1()
-	if openaiTask == nil {
-		t.Fatalf("expected openai_responses_v1 task")
+	call := client.requestQuoteReq.GetCall()
+	if call == nil {
+		t.Fatalf("expected call")
 	}
-	mustDiff(t, reqBody, openaiTask.GetRequestJson())
+	mustDiff(t, "openai.responses.v1", call.GetMethod())
+	mustDiff(t, model, mustDecodeOpenAIModelParamsTLV(t, call.GetParams()))
+	mustDiff(t, reqBody, call.GetRequestBytes())
 }
 
 func TestResponses_StreamSuccess(t *testing.T) {
@@ -609,12 +677,9 @@ func TestResponses_StreamSuccess(t *testing.T) {
 				{
 					PeerId: peerID,
 					RemoteManifest: &lcpdv1.LCPManifest{
-						SupportedTasks: []*lcpdv1.LCPTaskTemplate{
+						SupportedMethods: []*lcpdv1.MethodDescriptor{
 							{
-								Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
-								ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
-									OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{Model: model},
-								},
+								Method: "openai.responses.v1",
 							},
 						},
 					},
@@ -623,8 +688,8 @@ func TestResponses_StreamSuccess(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobIDStr),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobIDStr),
 				PriceMsat: priceMsat123,
 				TermsHash: []byte(termsStr),
 			},
@@ -632,21 +697,21 @@ func TestResponses_StreamSuccess(t *testing.T) {
 		acceptStreamClient: &staticStreamClient{
 			responses: []*lcpdv1.AcceptAndExecuteStreamResponse{
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
-						ResultBegin: &lcpdv1.ResultStreamBegin{
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseBegin{
+						ResponseBegin: &lcpdv1.ResponseStreamBegin{
 							ContentType:     "text/event-stream; charset=utf-8",
 							ContentEncoding: "identity",
 						},
 					},
 				},
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
-						ResultChunk: &lcpdv1.ResultStreamChunk{Data: streamData},
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseChunk{
+						ResponseChunk: &lcpdv1.ResponseStreamChunk{Data: streamData},
 					},
 				},
 				{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{
-						Result: &lcpdv1.Result{Status: lcpdv1.Result_STATUS_OK},
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_Complete{
+						Complete: &lcpdv1.Complete{Status: lcpdv1.Complete_STATUS_OK},
 					},
 				},
 			},
@@ -675,7 +740,7 @@ func TestResponses_StreamSuccess(t *testing.T) {
 	mustDiff(t, streamData, rec.Body.Bytes())
 
 	mustDiff(t, peerID, rec.Header().Get("X-Lcp-Peer-Id"))
-	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Job-Id"))
+	mustDiff(t, hex.EncodeToString([]byte(jobIDStr)), rec.Header().Get("X-Lcp-Call-Id"))
 	mustDiff(t, "123", rec.Header().Get("X-Lcp-Price-Msat"))
 	mustDiff(t, hex.EncodeToString([]byte(termsStr)), rec.Header().Get("X-Lcp-Terms-Hash"))
 
@@ -846,8 +911,8 @@ func TestChatCompletions_RejectsQuotePriceOverLimit(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte("job"),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte("job"),
 				PriceMsat: priceMsatOverLimit,
 				TermsHash: []byte("terms"),
 			},
@@ -897,8 +962,8 @@ func TestChatCompletions_CancelsJobOnCanceledExecute(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobID),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobID),
 				PriceMsat: uint64(len("x")),
 				TermsHash: []byte("terms"),
 			},
@@ -936,7 +1001,7 @@ func TestChatCompletions_CancelsJobOnCanceledExecute(t *testing.T) {
 	select {
 	case cancelReq := <-cancelCh:
 		mustDiff(t, peerID, cancelReq.GetPeerId())
-		mustDiff(t, []byte(jobID), cancelReq.GetJobId())
+		mustDiff(t, []byte(jobID), cancelReq.GetCallId())
 	case <-time.After(cancelWaitTimeout):
 		t.Fatalf("expected CancelJob to be called")
 	}
@@ -958,16 +1023,16 @@ func TestChatCompletions_DoesNotLogPromptOrCompletion(t *testing.T) {
 		},
 		requestQuoteResp: &lcpdv1.RequestQuoteResponse{
 			PeerId: peerID,
-			Terms: &lcpdv1.Terms{
-				JobId:     []byte(jobIDStr),
+			Quote: &lcpdv1.Quote{
+				CallId:    []byte(jobIDStr),
 				PriceMsat: priceMsat123,
 				TermsHash: []byte(termsStr),
 			},
 		},
 		acceptResp: &lcpdv1.AcceptAndExecuteResponse{
-			Result: &lcpdv1.Result{
-				Status: lcpdv1.Result_STATUS_OK,
-				Result: []byte(outputText),
+			Complete: &lcpdv1.Complete{
+				Status:        lcpdv1.Complete_STATUS_OK,
+				ResponseBytes: []byte(outputText),
 			},
 		},
 	}

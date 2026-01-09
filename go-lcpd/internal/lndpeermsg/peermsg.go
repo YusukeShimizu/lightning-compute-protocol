@@ -111,10 +111,10 @@ type PeerMessaging struct {
 }
 
 const (
-	defaultProtocolVersion = lcpwire.ProtocolVersionV02
+	defaultProtocolVersion = lcpwire.ProtocolVersionV03
 	defaultMaxPayloadBytes = uint32(16384)
 	defaultMaxStreamBytes  = uint64(4_194_304)
-	defaultMaxJobBytes     = uint64(8_388_608)
+	defaultMaxCallBytes    = uint64(8_388_608)
 
 	subscriptionLoops = 2
 )
@@ -135,7 +135,7 @@ func New(p Params) (*PeerMessaging, error) {
 		ProtocolVersion: defaultProtocolVersion,
 		MaxPayloadBytes: maxPayloadBytes,
 		MaxStreamBytes:  defaultMaxStreamBytes,
-		MaxJobBytes:     defaultMaxJobBytes,
+		MaxCallBytes:    defaultMaxCallBytes,
 	}
 	if p.LocalManifest != nil {
 		localManifest = *p.LocalManifest
@@ -469,12 +469,12 @@ func (p *PeerMessaging) HandleCustomMessage(ctx context.Context, msg *lnrpc.Cust
 				"err", err,
 			)
 		}
-	case lcpmsgrouter.RouteActionDispatchQuoteRequest,
-		lcpmsgrouter.RouteActionDispatchQuoteResponse,
+	case lcpmsgrouter.RouteActionDispatchCall,
+		lcpmsgrouter.RouteActionDispatchQuote,
 		lcpmsgrouter.RouteActionDispatchStreamBegin,
 		lcpmsgrouter.RouteActionDispatchStreamChunk,
 		lcpmsgrouter.RouteActionDispatchStreamEnd,
-		lcpmsgrouter.RouteActionDispatchResult,
+		lcpmsgrouter.RouteActionDispatchComplete,
 		lcpmsgrouter.RouteActionDispatchCancel,
 		lcpmsgrouter.RouteActionDispatchError:
 		p.dispatchInbound(ctx, customMsg, decision)

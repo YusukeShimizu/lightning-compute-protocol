@@ -67,7 +67,7 @@ func TestStore_UpdateState(t *testing.T) {
 	}
 }
 
-func TestStore_SetQuoteResponse(t *testing.T) {
+func TestStore_SetQuote(t *testing.T) {
 	t.Parallel()
 
 	store := jobstore.New()
@@ -81,10 +81,10 @@ func TestStore_SetQuoteResponse(t *testing.T) {
 		State:      jobstore.StateQuoted,
 	})
 
-	quoteResp := lcpwire.QuoteResponse{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+	quote := lcpwire.Quote{
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          77,
 		},
@@ -94,22 +94,22 @@ func TestStore_SetQuoteResponse(t *testing.T) {
 		PaymentRequest: "bolt11",
 	}
 
-	if ok := store.SetQuoteResponse(key, quoteResp); !ok {
-		t.Fatalf("SetQuoteResponse returned false for existing job")
+	if ok := store.SetQuote(key, quote); !ok {
+		t.Fatalf("SetQuote returned false for existing job")
 	}
 
 	got, ok := store.Get(key)
 	if !ok {
-		t.Fatalf("job not found after SetQuoteResponse")
+		t.Fatalf("job not found after SetQuote")
 	}
-	if got.QuoteExpiry != quoteResp.QuoteExpiry {
-		t.Fatalf("QuoteExpiry mismatch: got %d want %d", got.QuoteExpiry, quoteResp.QuoteExpiry)
+	if got.QuoteExpiry != quote.QuoteExpiry {
+		t.Fatalf("QuoteExpiry mismatch: got %d want %d", got.QuoteExpiry, quote.QuoteExpiry)
 	}
-	if got.QuoteResponse == nil {
-		t.Fatalf("QuoteResponse not stored")
+	if got.Quote == nil {
+		t.Fatalf("Quote not stored")
 	}
-	if diff := cmp.Diff(quoteResp, *got.QuoteResponse); diff != "" {
-		t.Fatalf("QuoteResponse mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(quote, *got.Quote); diff != "" {
+		t.Fatalf("Quote mismatch (-want +got):\n%s", diff)
 	}
 	if got.TermsHash == nil {
 		t.Fatalf("TermsHash not stored")

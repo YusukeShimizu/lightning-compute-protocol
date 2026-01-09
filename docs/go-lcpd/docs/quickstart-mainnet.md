@@ -99,7 +99,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 ./bin/lcpd-grpcd -grpc_addr=127.0.0.1:50051
 ```
 
-## 6) Inspect Provider supported models (optional)
+## 6) Inspect Provider supported methods (optional)
 
 In another terminal:
 
@@ -108,12 +108,13 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:50051 -o prettyjson
 ```
 
-`peers[].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` contains the Provider models (if advertised).
+`peers[].remoteManifest.supportedMethods[].method` contains the Provider methods (if advertised).
 
 Notes:
 
-- `supportedTasks` is an optional field in `lcp_manifest`. If the Provider does not configure `llm.models` (or Provider mode is disabled), it will not advertise `supported_tasks`.
-- `-o prettyjson` omits empty fields, so it may not show `supportedTasks` even if the field is absent by design.
+- `supportedMethods` lists the Provider's supported LCP methods (for example `openai.chat_completions.v1`).
+- LCP v0.3 manifests do **not** advertise available models. Use Provider documentation/policy (or your own allowlist) to decide which `model` values to send.
+- `-o prettyjson` omits empty fields, so it may not show `supportedMethods` if the peer doesn't advertise any descriptors.
 
 ## 7) Run one job (Quote → Pay → Stream)
 
@@ -153,5 +154,5 @@ PROVIDER_PUBKEY="03737b4a2e44b45f786a18e43c3cf462ab97891e9f8992a0d493394691ac0db
 ## Troubleshooting
 
 - `peer is not ready for lcp`: check that `lnd` is connected to the Provider (`lncli listpeers`), and confirm `lcpdctl list-lcp-peers` sees it.
-- `lcp_error code=2: unsupported model ...`: set `-model` to a value the Provider supports (see step 6).
+- `unsupported model` / `unsupported method`: set `-model` / method to a value the Provider supports (providers enforce their own policy).
 - `payment failed`: you may have no channel / no route / insufficient liquidity. Check `lncli walletbalance` and `lncli listchannels`.

@@ -27,19 +27,19 @@ func TestRouter_Route_KnownMessages(t *testing.T) {
 			},
 		},
 		{
-			name:    "quote_request",
-			msgType: lcpwire.MessageTypeQuoteRequest,
+			name:    "call",
+			msgType: lcpwire.MessageTypeCall,
 			want: lcpmsgrouter.RouteDecision{
-				Action: lcpmsgrouter.RouteActionDispatchQuoteRequest,
-				Reason: "lcp_quote_request",
+				Action: lcpmsgrouter.RouteActionDispatchCall,
+				Reason: "lcp_call",
 			},
 		},
 		{
-			name:    "quote_response",
-			msgType: lcpwire.MessageTypeQuoteResponse,
+			name:    "quote",
+			msgType: lcpwire.MessageTypeQuote,
 			want: lcpmsgrouter.RouteDecision{
-				Action: lcpmsgrouter.RouteActionDispatchQuoteResponse,
-				Reason: "lcp_quote_response",
+				Action: lcpmsgrouter.RouteActionDispatchQuote,
+				Reason: "lcp_quote",
 			},
 		},
 		{
@@ -67,11 +67,11 @@ func TestRouter_Route_KnownMessages(t *testing.T) {
 			},
 		},
 		{
-			name:    "result",
-			msgType: lcpwire.MessageTypeResult,
+			name:    "complete",
+			msgType: lcpwire.MessageTypeComplete,
 			want: lcpmsgrouter.RouteDecision{
-				Action: lcpmsgrouter.RouteActionDispatchResult,
-				Reason: "lcp_result",
+				Action: lcpmsgrouter.RouteActionDispatchComplete,
+				Reason: "lcp_complete",
 			},
 		},
 		{

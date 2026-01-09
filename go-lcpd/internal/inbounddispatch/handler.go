@@ -30,16 +30,16 @@ func (h *Handler) HandleInboundCustomMessage(
 	}
 
 	// Note: lndpeermsg.PeerMessaging already handles `lcp_manifest` and unknown-even
-	// disconnect behavior via its Router. This handler only wires job-scope
+	// disconnect behavior via its Router. This handler only wires call-scope
 	// messages to the correct subsystem per spec.
 	switch lcpwire.MessageType(msg.MsgType) {
-	case lcpwire.MessageTypeQuoteRequest,
+	case lcpwire.MessageTypeCall,
 		lcpwire.MessageTypeCancel:
 		if h.provider != nil {
 			h.provider.HandleInboundCustomMessage(ctx, msg)
 		}
-	case lcpwire.MessageTypeQuoteResponse,
-		lcpwire.MessageTypeResult,
+	case lcpwire.MessageTypeQuote,
+		lcpwire.MessageTypeComplete,
 		lcpwire.MessageTypeError:
 		if h.requester != nil {
 			h.requester.HandleInboundCustomMessage(ctx, msg)

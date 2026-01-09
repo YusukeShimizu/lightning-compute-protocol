@@ -9,7 +9,7 @@
 手順が失敗したら、`./.data/devnet/` 配下のログ/状態を確認してください。
 必要に応じて `LCPD_LOG_LEVEL=debug` で再実行してください。
 
-このドキュメントでは、2 つの役割で最小の Quote → Pay → Result を実行します:
+このドキュメントでは、2 つの役割で最小の Quote → Pay → Stream を実行します:
 
 - Alice: Provider。Provider モードは Alice のみ有効化します。外部 API を避けるため `LCPD_BACKEND=deterministic` を使います。
 - Bob: Requester。
@@ -125,13 +125,13 @@ PAY_REQ="$(./scripts/devnet lncli alice addinvoice --amt 1000 | jq -r .payment_r
 ./scripts/devnet lncli bob payinvoice "$PAY_REQ"
 ```
 
-## go-lcpd を試す（カスタムメッセージ / Quote → Pay → Result）
+## go-lcpd を試す（カスタムメッセージ / Quote → Pay → Stream）
 
 2 つの `lnd` ノードがピアとして接続できたら、両側で `go-lcpd` を起動します。
 これにより BOLT #1 のカスタムメッセージ上で `lcp_manifest` が交換されます。
 `ListLCPPeers` で観測できます。
 
-この手順では Alice を Provider として起動し、外部依存なしで `lcp_result` を返します。
+この手順では Alice を Provider として起動し、外部依存なしで `lcp_complete` を返します。
 `LCPD_BACKEND=deterministic` を使います。
 
 Provider 設定は YAML 優先（`LCPD_PROVIDER_CONFIG_PATH`）です。
@@ -193,9 +193,11 @@ cd go-lcpd
 ./bin/lcpdctl lcpd list-lcp-peers -s 127.0.0.1:23052 -o prettyjson
 ```
 
-`peers[0].remoteManifest.supportedTasks[].openaiChatCompletionsV1.model` に `gpt-5.2` が見えれば、Provider が model を広告できています。
+`peers[0].remoteManifest.supportedMethods[].method` に `openai.chat_completions.v1` が見えれば、Provider が method を広告できています。
 
-### 4) Bob から Alice にジョブを 1 つ送る（Quote → Pay → Result）
+注: LCP v0.3 の manifest は model を広告しません。
+
+### 4) Bob から Alice にコールを 1 つ送る（Quote → Pay → Stream）
 
 ```sh
 cd go-lcpd

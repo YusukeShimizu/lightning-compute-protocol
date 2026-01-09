@@ -42,7 +42,7 @@ export LCPD_LND_ADMIN_MACAROON_PATH="$HOME/.lnd/data/chain/bitcoin/mainnet/admin
 
 - `LCPD_LOG_LEVEL` controls verbosity (`debug`, `info`, `warn`, `error`; default is `info`).
 - Logs MUST NOT contain raw prompts, raw model outputs, API keys, macaroons, or BOLT11 invoices.
-- Even with content redaction, logs still contain metadata (peer ids, job ids, prices, timings).
+- Even with content redaction, logs still contain metadata (peer ids, call ids, prices, timings).
 
 Details: [Logging & privacy](/go-lcpd/docs/logging).
 
@@ -116,9 +116,8 @@ llm:
 
 - `model` is the OpenAI model ID.
 - It appears in:
-  - `openai_chat_completions_v1_params_tlvs.model` on the wire (in `params_bytes`)
-  - the OpenAI request JSON (`request_json.model`) carried in the input stream bytes
-  - gRPC `LCPManifest.supported_tasks[].openai_chat_completions_v1.model` (model advertising)
+  - `openai_chat_completions_v1_params_tlvs.model` on the wire (in `lcp_call.params`)
+  - the OpenAI request JSON (`request_json.model`) carried in the request stream bytes
 - The Provider uses `model` for allowlisting, pricing, and routing to the compute backend.
 
 ### Field reference
@@ -130,7 +129,7 @@ llm:
   - `per_job_bps`: Additive multiplier per job above `threshold` (basis points; 10,000 = 1.0x). If `0`, surge is disabled.
   - `max_multiplier_bps`: Caps the total multiplier in basis points. If `0`, a safe default cap is used.
 - `llm.max_output_tokens`: Provider-wide default for output token limits, used for quote-time estimation and request validation. Default is 4096.
-- `llm.models`: Map of allowed/advertised `openai.chat_completions.v1` model IDs. If empty, accepts any `model` but does not advertise `supported_tasks`.
+- `llm.models`: Map of allowed `openai.*` model IDs. If empty, accepts any `model` (providers may still apply their own policy).
   - `max_output_tokens`: Optional per-model override (must be > 0).
   - `price`: Required per-model pricing (msat per 1M tokens). `input_msat_per_mtok` and `output_msat_per_mtok` are required; `cached_input_msat_per_mtok` is optional.
 
@@ -142,13 +141,13 @@ If YAML is not provided, a built-in price table is used (msat per 1M tokens):
 ### Quote → Execute flow (`openai.chat_completions.v1`)
 
 1. Validate the QuoteRequest and check the model is allowed.
-2. Receive and validate the input stream as OpenAI request JSON bytes (`request_json.model`, `request_json.messages`, `request_json.stream=false`).
+2. Receive and validate the request stream as OpenAI request JSON bytes (`request_json.model`, `request_json.messages`, optional `request_json.stream`).
 3. Determine `max_output_tokens` for quote-time estimation:
    - Start from `llm.max_output_tokens` (and optional per-model override).
    - If the request sets an output-token cap (`max_completion_tokens` / `max_tokens` / `max_output_tokens`), it must be `<=` the Provider max, and that value is used for estimation.
 4. Estimate token usage via `UsageEstimator` (`approx.v1`: `ceil(len(bytes)/4)`).
 5. Compute price in msat via `QuotePrice(model, estimate, cached=0, price_table)` and apply optional `pricing.in_flight_surge`, then embed it into TermsHash / invoice binding.
-6. After payment settles, execute the passthrough request in the backend, stream the result (`lcp_stream_*`), and finalize with `lcp_result`.
+6. After payment settles, execute the passthrough request in the backend, stream the response (`lcp_stream_*`), and finalize with `lcp_complete`.
 
 ## Backend notes
 

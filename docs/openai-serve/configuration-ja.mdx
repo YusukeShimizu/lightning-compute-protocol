@@ -28,7 +28,7 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 `openai-serve` のログは、生のユーザー入力を永続化しなくても運用できるように設計しています。
 
 - ログには、生のプロンプト（`messages[].content`）や生のモデル出力を残してはいけません。
-- `info` は、運用メタデータ（model/peer/job id、価格、時間、byte/token カウント）を記録します。
+- `info` は、運用メタデータ（model/peer/call id、価格、時間、byte/token カウント）を記録します。
 - `debug` は HTTP リクエストログがより詳細になり（`client_ip` を含むことがあります）、よりセンシティブとして扱ってください。
 
 ## ルーティング（peer の選び方）
@@ -37,8 +37,8 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 
 1. `OPENAI_SERVE_MODEL_MAP`（マップ先の peer が connected/LCP-ready の場合）
 2. `OPENAI_SERVE_DEFAULT_PEER_ID`（設定されており connected/LCP-ready の場合）
-3. manifest の `supported_tasks` で model を広告している peer（存在する場合）
-4. フォールバックとして、接続されている peer の先頭
+3. manifest の `supported_methods` で必要な method を広告している peer（存在する場合）
+4. フォールバックとして、接続されている peer のいずれか
 
 接続中の LCP peers が 0 の場合、リクエストは失敗します。
 
@@ -48,8 +48,7 @@ description: 環境変数、ルーティング、モデル検証、上限（Safe
 
 - `OPENAI_SERVE_MODEL_ALLOWLIST` が設定されている場合: allowlist に含まれる `model` のみ許可します
   （ただし `OPENAI_SERVE_ALLOW_UNLISTED_MODELS=true` の場合は例外）。
-- それ以外の場合: 接続 peer が `supported_tasks` を広告しているなら、少なくとも 1 peer が広告している `model` のみ許可します。
-  もし全 peer が `supported_tasks` を広告していない場合は、ゲートウェイを使える状態に保つため検証をスキップします。
+- それ以外の場合: model の検証はスキップします（LCP v0.3 の manifest では model を広告しないため。Provider 側で model ポリシーを検証します）。
 
 ## Safety limits
 

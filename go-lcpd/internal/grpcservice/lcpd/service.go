@@ -12,7 +12,6 @@ import (
 	"buf.build/go/protovalidate"
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/envconfig"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lcptasks"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lightningrpc"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
@@ -191,10 +190,7 @@ func (s *Service) RequestQuote(
 	}
 
 	peerID := strings.TrimSpace(req.GetPeerId())
-	task := req.GetTask()
-	if err := lcptasks.ValidateTask(task); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
+	call := req.GetCall()
 
 	started := time.Now()
 
@@ -204,15 +200,15 @@ func (s *Service) RequestQuote(
 	}
 	remoteManifest := peer.RemoteManifest
 
-	summary := summarizeTask(task)
+	summary := summarizeCall(call)
 
-	jobID, expiry, wireTask, inputStream, payload, err := s.buildQuoteRequestPayload(task)
+	jobID, expiry, callCommit, requestStream, payload, err := s.buildCallPayload(call)
 	if err != nil {
 		return nil, err
 	}
 	payloadBytes := len(payload)
 
-	if limitsErr := validateQuoteRequestRemoteLimits(remoteManifest, payload, inputStream); limitsErr != nil {
+	if limitsErr := validateQuoteRequestRemoteLimits(remoteManifest, payload, requestStream); limitsErr != nil {
 		return nil, limitsErr
 	}
 
@@ -220,7 +216,7 @@ func (s *Service) RequestQuote(
 		return nil, status.Error(codes.Unavailable, "peer messaging not configured")
 	}
 
-	sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeQuoteRequest, payload)
+	sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeCall, payload)
 	if sendErr != nil {
 		return nil, grpcStatusFromPeerSendError(ctx, sendErr)
 	}
@@ -230,7 +226,7 @@ func (s *Service) RequestQuote(
 		peerID,
 		jobID,
 		expiry,
-		inputStream,
+		requestStream,
 		remoteManifest,
 	); sendStreamErr != nil {
 		return nil, sendStreamErr
@@ -244,21 +240,21 @@ func (s *Service) RequestQuote(
 	if outcome.Error != nil {
 		return nil, s.requestQuoteLCPError(peerID, jobID, summary, outcome.Error)
 	}
-	if outcome.QuoteResponse == nil {
+	if outcome.Quote == nil {
 		return nil, status.Error(codes.Internal, "quote waiter returned empty outcome")
 	}
 
-	terms, err := termsFromQuoteResponse(wireTask, inputStream, *outcome.QuoteResponse)
+	quote, err := quoteFromWireQuoteResponse(callCommit, requestStream, *outcome.Quote)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
-	if putErr := s.jobs.PutQuote(peerID, task, terms); putErr != nil {
+	if putErr := s.jobs.PutQuote(peerID, call, quote); putErr != nil {
 		s.logger.Errorw(
 			"put quote failed",
 			"peer_id",
 			peerID,
-			"job_id",
+			"call_id",
 			jobID.String(),
 			"err",
 			putErr,
@@ -266,45 +262,57 @@ func (s *Service) RequestQuote(
 		return nil, status.Error(codes.Internal, "put quote failed")
 	}
 
-	s.logQuoteReceived(peerID, jobID, summary, payloadBytes, terms, started)
+	s.logQuoteReceived(peerID, jobID, summary, payloadBytes, quote, started)
 
 	return &lcpdv1.RequestQuoteResponse{
 		PeerId: peerID,
-		Terms:  terms,
+		Quote:  quote,
 	}, nil
 }
 
 func validateQuoteRequestRemoteLimits(
 	remoteManifest lcpwire.Manifest,
 	payload []byte,
-	inputStream lcptasks.InputStream,
+	requestStream requestStream,
 ) error {
 	if remoteManifest.MaxPayloadBytes != 0 &&
 		len(payload) > int(remoteManifest.MaxPayloadBytes) {
 		return status.Error(
 			codes.ResourceExhausted,
-			"quote_request payload exceeds peer max_payload_bytes",
+			"call payload exceeds peer max_payload_bytes",
 		)
 	}
 
-	inputLen := uint64(len(inputStream.DecodedBytes))
-	if inputLen > remoteManifest.MaxStreamBytes || inputLen > remoteManifest.MaxJobBytes {
+	inputLen := uint64(len(requestStream.DecodedBytes))
+	if inputLen > remoteManifest.MaxStreamBytes || inputLen > remoteManifest.MaxCallBytes {
 		return status.Error(
 			codes.ResourceExhausted,
-			"input stream exceeds peer max_stream_bytes/max_job_bytes",
+			"request stream exceeds peer max_stream_bytes/max_call_bytes",
 		)
 	}
 
 	return nil
 }
 
-func (s *Service) buildQuoteRequestPayload(
-	task *lcpdv1.Task,
-) (lcp.JobID, uint64, lcptasks.QuoteRequestTask, lcptasks.InputStream, []byte, error) {
+type callCommit struct {
+	Method            string
+	ParamsBytes       []byte
+	ParamsContentType string
+}
+
+type requestStream struct {
+	DecodedBytes    []byte
+	ContentType     string
+	ContentEncoding string
+}
+
+func (s *Service) buildCallPayload(
+	call *lcpdv1.CallSpec,
+) (lcp.JobID, uint64, callCommit, requestStream, []byte, error) {
 	jobID, err := protocolcompat.NewJobID()
 	if err != nil {
 		s.logger.Errorw("generate job_id failed", "err", err)
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.Internal,
 			"generate job_id failed",
 		)
@@ -313,7 +321,7 @@ func (s *Service) buildQuoteRequestPayload(
 	msgID, err := newMsgID()
 	if err != nil {
 		s.logger.Errorw("generate msg_id failed", "err", err)
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.Internal,
 			"generate msg_id failed",
 		)
@@ -322,49 +330,82 @@ func (s *Service) buildQuoteRequestPayload(
 	expiry, err := s.newEnvelopeExpiry()
 	if err != nil {
 		s.logger.Errorw("generate envelope expiry failed", "err", err)
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.Internal,
 			"generate envelope expiry failed",
 		)
 	}
 
-	wireTask, err := lcptasks.ToWireQuoteRequestTask(task)
-	if err != nil {
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+	if call == nil {
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.InvalidArgument,
-			err.Error(),
+			"call is required",
+		)
+	}
+	method := call.GetMethod()
+	if strings.TrimSpace(method) == "" {
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
+			codes.InvalidArgument,
+			"method is required",
 		)
 	}
 
-	inputStream, err := lcptasks.ToWireInputStream(task)
-	if err != nil {
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+	input := requestStream{
+		DecodedBytes:    append([]byte(nil), call.GetRequestBytes()...),
+		ContentType:     strings.TrimSpace(call.GetRequestContentType()),
+		ContentEncoding: strings.TrimSpace(call.GetRequestContentEncoding()),
+	}
+	if input.ContentType == "" {
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.InvalidArgument,
-			err.Error(),
+			"request_content_type is required",
+		)
+	}
+	if input.ContentEncoding == "" {
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
+			codes.InvalidArgument,
+			"request_content_encoding is required",
 		)
 	}
 
-	paramsBytes := wireTask.ParamsBytes
-	quoteReq := lcpwire.QuoteRequest{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+	paramsBytes := append([]byte(nil), call.GetParams()...)
+	var paramsBytesPtr *[]byte
+	if len(paramsBytes) > 0 {
+		paramsBytesPtr = &paramsBytes
+	}
+
+	paramsContentType := strings.TrimSpace(call.GetParamsContentType())
+	var paramsContentTypePtr *string
+	if paramsContentType != "" {
+		paramsContentTypePtr = &paramsContentType
+	}
+
+	quoteReq := lcpwire.Call{
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
-		TaskKind:    wireTask.TaskKind,
-		ParamsBytes: &paramsBytes,
+		Method:            method,
+		ParamsBytes:       paramsBytesPtr,
+		ParamsContentType: paramsContentTypePtr,
 	}
 
-	payload, err := lcpwire.EncodeQuoteRequest(quoteReq)
+	payload, err := lcpwire.EncodeCall(quoteReq)
 	if err != nil {
-		return lcp.JobID{}, 0, lcptasks.QuoteRequestTask{}, lcptasks.InputStream{}, nil, status.Error(
+		return lcp.JobID{}, 0, callCommit{}, requestStream{}, nil, status.Error(
 			codes.InvalidArgument,
 			err.Error(),
 		)
 	}
 
-	return jobID, expiry, wireTask, inputStream, payload, nil
+	commit := callCommit{
+		Method:            method,
+		ParamsBytes:       paramsBytes,
+		ParamsContentType: paramsContentType,
+	}
+	return jobID, expiry, commit, input, payload, nil
 }
 
 func (s *Service) sendInputStream(
@@ -372,7 +413,7 @@ func (s *Service) sendInputStream(
 	peerID string,
 	jobID lcp.JobID,
 	expiry uint64,
-	inputStream lcptasks.InputStream,
+	inputStream requestStream,
 	remoteManifest lcpwire.Manifest,
 ) error {
 	if s.messenger == nil {
@@ -437,7 +478,7 @@ func (s *Service) sendInputStreamBegin(
 	peerID string,
 	jobID lcp.JobID,
 	expiry uint64,
-	inputStream lcptasks.InputStream,
+	inputStream requestStream,
 	streamID lcp.Hash32,
 	totalLen uint64,
 	inputHash lcp.Hash32,
@@ -449,14 +490,14 @@ func (s *Service) sendInputStreamBegin(
 	}
 
 	begin := lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           beginMsgID,
 			Expiry:          expiry,
 		},
 		StreamID:        streamID,
-		Kind:            lcpwire.StreamKindInput,
+		Kind:            lcpwire.StreamKindRequest,
 		TotalLen:        &totalLen,
 		SHA256:          &inputHash,
 		ContentType:     inputStream.ContentType,
@@ -524,9 +565,9 @@ func (s *Service) sendInputStreamEnd(
 	}
 
 	end := lcpwire.StreamEnd{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           endMsgID,
 			Expiry:          expiry,
 		},
@@ -562,9 +603,9 @@ func encodeFittingInputStreamChunk(
 
 	for {
 		chunk := lcpwire.StreamChunk{
-			Envelope: lcpwire.JobEnvelope{
-				ProtocolVersion: lcpwire.ProtocolVersionV02,
-				JobID:           jobID,
+			Envelope: lcpwire.CallEnvelope{
+				ProtocolVersion: lcpwire.ProtocolVersionV03,
+				CallID:          jobID,
 				Expiry:          expiry,
 			},
 			StreamID: streamID,
@@ -606,7 +647,7 @@ func (s *Service) AcceptAndExecute(
 		return nil, status.Error(codes.InvalidArgument, "pay_invoice must be true")
 	}
 
-	jobID, err := toJobID(req.GetJobId())
+	jobID, err := toJobID(req.GetCallId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -617,12 +658,12 @@ func (s *Service) AcceptAndExecute(
 
 	started := time.Now()
 
-	terms, err := s.jobs.GetTerms(peerID, jobID)
+	quote, err := s.jobs.GetQuote(peerID, jobID)
 	if err != nil {
 		return nil, grpcStatusFromJobStoreError(err)
 	}
 
-	summary := s.summarizeStoredTask(peerID, jobID)
+	summary := s.summarizeStoredCall(peerID, jobID)
 
 	s.markJobState(peerID, jobID, requesterjobstore.StatePaying)
 	failed := true
@@ -632,13 +673,13 @@ func (s *Service) AcceptAndExecute(
 		}
 	}()
 
-	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms)
+	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, quote)
 	if verifyErr != nil {
 		return nil, s.acceptAndExecuteVerifyError(peerID, jobID, summary, verifyErr)
 	}
 
 	payStart := time.Now()
-	_, payErr := s.lightning.PayInvoice(ctx, terms.GetPaymentRequest())
+	_, payErr := s.lightning.PayInvoice(ctx, quote.GetPaymentRequest())
 	if payErr != nil {
 		return nil, s.acceptAndExecuteLightningError(ctx, peerID, jobID, summary, payErr)
 	}
@@ -655,11 +696,11 @@ func (s *Service) AcceptAndExecute(
 	if outcome.Error != nil {
 		return nil, s.acceptAndExecuteLCPError(peerID, jobID, summary, outcome.Error)
 	}
-	if outcome.Result == nil {
+	if outcome.Complete == nil {
 		return nil, status.Error(codes.Internal, "result waiter returned empty outcome")
 	}
 
-	res, err := protoResultFromTerminal(*outcome.Result, outcome.ResultBytes)
+	complete, err := protoCompleteFromTerminal(*outcome.Complete, outcome.ResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -667,9 +708,9 @@ func (s *Service) AcceptAndExecute(
 	s.markJobState(peerID, jobID, requesterjobstore.StateDone)
 	failed = false
 
-	s.logResultReceived(peerID, jobID, summary, terms, payDuration, waitDuration, res, started)
+	s.logCompleteReceived(peerID, jobID, summary, quote, payDuration, waitDuration, complete, started)
 
-	return &lcpdv1.AcceptAndExecuteResponse{Result: res}, nil
+	return &lcpdv1.AcceptAndExecuteResponse{Complete: complete}, nil
 }
 
 //nolint:gocognit,cyclop,funlen // Streaming flow handles many error branches; keep linear for clarity.
@@ -692,7 +733,7 @@ func (s *Service) AcceptAndExecuteStream(
 		return status.Error(codes.InvalidArgument, "pay_invoice must be true")
 	}
 
-	jobID, err := toJobID(req.GetJobId())
+	jobID, err := toJobID(req.GetCallId())
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -703,12 +744,12 @@ func (s *Service) AcceptAndExecuteStream(
 
 	started := time.Now()
 
-	terms, err := s.jobs.GetTerms(peerID, jobID)
+	quote, err := s.jobs.GetQuote(peerID, jobID)
 	if err != nil {
 		return grpcStatusFromJobStoreError(err)
 	}
 
-	summary := s.summarizeStoredTask(peerID, jobID)
+	summary := s.summarizeStoredCall(peerID, jobID)
 
 	s.markJobState(peerID, jobID, requesterjobstore.StatePaying)
 	failed := true
@@ -718,7 +759,7 @@ func (s *Service) AcceptAndExecuteStream(
 		}
 	}()
 
-	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, terms)
+	verifyErr := verifyInvoiceBinding(ctx, s.lightning, peerID, quote)
 	if verifyErr != nil {
 		return s.acceptAndExecuteVerifyError(peerID, jobID, summary, verifyErr)
 	}
@@ -731,7 +772,7 @@ func (s *Service) AcceptAndExecuteStream(
 	defer unsubscribe()
 
 	payStart := time.Now()
-	_, payErr := s.lightning.PayInvoice(ctx, terms.GetPaymentRequest())
+	_, payErr := s.lightning.PayInvoice(ctx, quote.GetPaymentRequest())
 	if payErr != nil {
 		return s.acceptAndExecuteLightningError(ctx, peerID, jobID, summary, payErr)
 	}
@@ -757,8 +798,8 @@ func (s *Service) AcceptAndExecuteStream(
 			return nil
 		case requesterwait.ResultStreamEventKindBegin:
 			return stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
-				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultBegin{
-					ResultBegin: &lcpdv1.ResultStreamBegin{
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseBegin{
+					ResponseBegin: &lcpdv1.ResponseStreamBegin{
 						ContentType:     ev.ContentType,
 						ContentEncoding: ev.ContentEncoding,
 					},
@@ -769,8 +810,8 @@ func (s *Service) AcceptAndExecuteStream(
 				return nil
 			}
 			return stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
-				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultChunk{
-					ResultChunk: &lcpdv1.ResultStreamChunk{Data: ev.Data},
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseChunk{
+					ResponseChunk: &lcpdv1.ResponseStreamChunk{Data: ev.Data},
 				},
 			})
 		default:
@@ -793,7 +834,7 @@ func (s *Service) AcceptAndExecuteStream(
 			if waited.outcome.Error != nil {
 				return s.acceptAndExecuteLCPError(peerID, jobID, summary, waited.outcome.Error)
 			}
-			if waited.outcome.Result == nil {
+			if waited.outcome.Complete == nil {
 				return status.Error(codes.Internal, "result waiter returned empty outcome")
 			}
 
@@ -811,17 +852,17 @@ func (s *Service) AcceptAndExecuteStream(
 			}
 
 		drained:
-			res, protoErr := protoResultFromTerminalMetadataOnly(*waited.outcome.Result)
+			res, protoErr := protoCompleteFromTerminalMetadataOnly(*waited.outcome.Complete)
 			if protoErr != nil {
 				return protoErr
 			}
 
-			if res.GetStatus() == lcpdv1.Result_STATUS_OK {
+			if res.GetStatus() == lcpdv1.Complete_STATUS_OK {
 				if sendErr := stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
-					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResultEnd{
-						ResultEnd: &lcpdv1.ResultStreamEnd{
-							ResultHash: res.GetResultHash(),
-							ResultLen:  res.GetResultLen(),
+					Event: &lcpdv1.AcceptAndExecuteStreamResponse_ResponseEnd{
+						ResponseEnd: &lcpdv1.ResponseStreamEnd{
+							ResponseHash: res.GetResponseHash(),
+							ResponseLen:  res.GetResponseLen(),
 						},
 					},
 				}); sendErr != nil {
@@ -830,7 +871,7 @@ func (s *Service) AcceptAndExecuteStream(
 			}
 
 			if sendErr := stream.Send(&lcpdv1.AcceptAndExecuteStreamResponse{
-				Event: &lcpdv1.AcceptAndExecuteStreamResponse_Result{Result: res},
+				Event: &lcpdv1.AcceptAndExecuteStreamResponse_Complete{Complete: res},
 			}); sendErr != nil {
 				return sendErr
 			}
@@ -838,7 +879,7 @@ func (s *Service) AcceptAndExecuteStream(
 			s.markJobState(peerID, jobID, requesterjobstore.StateDone)
 			failed = false
 
-			s.logResultReceived(peerID, jobID, summary, terms, payDuration, waitDuration, res, started)
+			s.logCompleteReceived(peerID, jobID, summary, quote, payDuration, waitDuration, res, started)
 
 			return nil
 		case <-ctx.Done():
@@ -847,64 +888,47 @@ func (s *Service) AcceptAndExecuteStream(
 	}
 }
 
-func protoResultFromTerminal(
-	terminal lcpwire.Result,
+func protoCompleteFromTerminal(
+	terminal lcpwire.Complete,
 	resultBytes []byte,
-) (*lcpdv1.Result, error) {
-	res := &lcpdv1.Result{}
-	switch terminal.Status {
-	case lcpwire.ResultStatusOK:
-		res.Status = lcpdv1.Result_STATUS_OK
-		if terminal.OK == nil {
-			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_result")
-		}
-		res.Result = append([]byte(nil), resultBytes...)
-		res.ResultHash = append([]byte(nil), terminal.OK.ResultHash[:]...)
-		res.ResultLen = terminal.OK.ResultLen
-		res.ContentType = terminal.OK.ResultContentType
-		res.ContentEncoding = terminal.OK.ResultContentEncoding
-	case lcpwire.ResultStatusFailed:
-		res.Status = lcpdv1.Result_STATUS_FAILED
-		if terminal.Message != nil {
-			res.Message = *terminal.Message
-		}
-	case lcpwire.ResultStatusCancelled:
-		res.Status = lcpdv1.Result_STATUS_CANCELLED
-		if terminal.Message != nil {
-			res.Message = *terminal.Message
-		}
-	default:
-		return nil, status.Error(codes.Internal, "unknown lcp_result status")
+) (*lcpdv1.Complete, error) {
+	complete, err := protoCompleteFromTerminalMetadataOnly(terminal)
+	if err != nil {
+		return nil, err
 	}
-	return res, nil
+	if complete.GetStatus() == lcpdv1.Complete_STATUS_OK {
+		complete.ResponseBytes = append([]byte(nil), resultBytes...)
+	}
+	return complete, nil
 }
 
-func protoResultFromTerminalMetadataOnly(
-	terminal lcpwire.Result,
-) (*lcpdv1.Result, error) {
-	res := &lcpdv1.Result{}
+func protoCompleteFromTerminalMetadataOnly(
+	terminal lcpwire.Complete,
+) (*lcpdv1.Complete, error) {
+	res := &lcpdv1.Complete{}
 	switch terminal.Status {
-	case lcpwire.ResultStatusOK:
-		res.Status = lcpdv1.Result_STATUS_OK
+	case lcpwire.CompleteStatusOK:
+		res.Status = lcpdv1.Complete_STATUS_OK
 		if terminal.OK == nil {
-			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_result")
+			return nil, status.Error(codes.Internal, "missing ok metadata in lcp_complete")
 		}
-		res.ResultHash = append([]byte(nil), terminal.OK.ResultHash[:]...)
-		res.ResultLen = terminal.OK.ResultLen
-		res.ContentType = terminal.OK.ResultContentType
-		res.ContentEncoding = terminal.OK.ResultContentEncoding
-	case lcpwire.ResultStatusFailed:
-		res.Status = lcpdv1.Result_STATUS_FAILED
+		res.ResponseStreamId = append([]byte(nil), terminal.OK.ResponseStreamID[:]...)
+		res.ResponseHash = append([]byte(nil), terminal.OK.ResponseHash[:]...)
+		res.ResponseLen = proto.Uint64(terminal.OK.ResponseLen)
+		res.ResponseContentType = proto.String(terminal.OK.ResponseContentType)
+		res.ResponseContentEncoding = proto.String(terminal.OK.ResponseContentEncoding)
+	case lcpwire.CompleteStatusFailed:
+		res.Status = lcpdv1.Complete_STATUS_FAILED
 		if terminal.Message != nil {
 			res.Message = *terminal.Message
 		}
-	case lcpwire.ResultStatusCancelled:
-		res.Status = lcpdv1.Result_STATUS_CANCELLED
+	case lcpwire.CompleteStatusCancelled:
+		res.Status = lcpdv1.Complete_STATUS_CANCELLED
 		if terminal.Message != nil {
 			res.Message = *terminal.Message
 		}
 	default:
-		return nil, status.Error(codes.Internal, "unknown lcp_result status")
+		return nil, status.Error(codes.Internal, "unknown lcp_complete status")
 	}
 	return res, nil
 }
@@ -921,7 +945,7 @@ func (s *Service) CancelJob(
 	}
 
 	peerID := strings.TrimSpace(req.GetPeerId())
-	jobID, err := toJobID(req.GetJobId())
+	jobID, err := toJobID(req.GetCallId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -960,9 +984,9 @@ func (s *Service) CancelJob(
 	}
 
 	cancel := lcpwire.Cancel{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
@@ -989,60 +1013,36 @@ func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 		ProtocolVersion: uint32(m.ProtocolVersion),
 		MaxPayloadBytes: m.MaxPayloadBytes,
 		MaxStreamBytes:  m.MaxStreamBytes,
-		MaxJobBytes:     m.MaxJobBytes,
+		MaxCallBytes:    m.MaxCallBytes,
 	}
-	if m.MaxInflightJobs != nil {
-		out.MaxInflightJobs = uint32(*m.MaxInflightJobs)
+	if m.MaxInflightCalls != nil {
+		out.MaxInflightCalls = uint32(*m.MaxInflightCalls)
 	}
-
-	if len(m.SupportedTasks) == 0 {
-		return out
-	}
-
-	out.SupportedTasks = make([]*lcpdv1.LCPTaskTemplate, 0, len(m.SupportedTasks))
-	for _, tmpl := range m.SupportedTasks {
-		switch tmpl.TaskKind {
-		case lcptasks.TaskKindOpenAIChatCompletionsV1:
-			if tmpl.ParamsBytes == nil {
-				continue
-			}
-
-			params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*tmpl.ParamsBytes)
-			if err != nil {
-				continue
-			}
-
-			out.SupportedTasks = append(out.SupportedTasks, &lcpdv1.LCPTaskTemplate{
-				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1,
-				ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiChatCompletionsV1{
-					OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1Params{
-						Model: params.Model,
-					},
-				},
-			})
-		case lcptasks.TaskKindOpenAIResponsesV1:
-			if tmpl.ParamsBytes == nil {
-				continue
-			}
-
-			params, err := lcpwire.DecodeOpenAIResponsesV1Params(*tmpl.ParamsBytes)
-			if err != nil {
-				continue
-			}
-
-			out.SupportedTasks = append(out.SupportedTasks, &lcpdv1.LCPTaskTemplate{
-				Kind: lcpdv1.LCPTaskKind_LCP_TASK_KIND_OPENAI_RESPONSES_V1,
-				ParamsTemplate: &lcpdv1.LCPTaskTemplate_OpenaiResponsesV1{
-					OpenaiResponsesV1: &lcpdv1.OpenAIResponsesV1Params{
-						Model: params.Model,
-					},
-				},
-			})
-		default:
-			continue
+	if len(m.SupportedMethods) != 0 {
+		out.SupportedMethods = make([]*lcpdv1.MethodDescriptor, 0, len(m.SupportedMethods))
+		for _, d := range m.SupportedMethods {
+			out.SupportedMethods = append(out.SupportedMethods, toProtoMethodDescriptor(d))
 		}
 	}
 
+	return out
+}
+
+func toProtoMethodDescriptor(d lcpwire.MethodDescriptor) *lcpdv1.MethodDescriptor {
+	out := &lcpdv1.MethodDescriptor{
+		Method:               d.Method,
+		RequestContentTypes:  append([]string(nil), d.RequestContentTypes...),
+		ResponseContentTypes: append([]string(nil), d.ResponseContentTypes...),
+	}
+	if d.DocsURI != nil {
+		out.DocsUri = proto.String(*d.DocsURI)
+	}
+	if d.DocsSHA256 != nil {
+		out.DocsSha256 = append([]byte(nil), d.DocsSHA256[:]...)
+	}
+	if d.PolicyNotice != nil {
+		out.PolicyNotice = proto.String(*d.PolicyNotice)
+	}
 	return out
 }
 
@@ -1085,7 +1085,7 @@ func (s *Service) requireReadyPeer(peerID string) (ReadyPeer, error) {
 		return ReadyPeer{}, status.Error(codes.FailedPrecondition, "peer is not ready for lcp")
 	}
 
-	if peer.RemoteManifest.ProtocolVersion != lcpwire.ProtocolVersionV02 {
+	if peer.RemoteManifest.ProtocolVersion != lcpwire.ProtocolVersionV03 {
 		return ReadyPeer{}, status.Error(codes.FailedPrecondition, "peer protocol_version mismatch")
 	}
 
@@ -1115,22 +1115,24 @@ func (s *Service) markJobState(peerID string, jobID lcp.JobID, state requesterjo
 	_ = s.jobs.MarkState(peerID, jobID, state)
 }
 
-func termsFromQuoteResponse(
-	wireTask lcptasks.QuoteRequestTask,
-	inputStream lcptasks.InputStream,
-	resp lcpwire.QuoteResponse,
-) (*lcpdv1.Terms, error) {
+func quoteFromWireQuoteResponse(
+	call callCommit,
+	requestStream requestStream,
+	resp lcpwire.Quote,
+) (*lcpdv1.Quote, error) {
 	wantHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: resp.Envelope.ProtocolVersion,
-		JobID:           resp.Envelope.JobID,
+		JobID:           resp.Envelope.CallID,
 		PriceMsat:       resp.PriceMsat,
 		QuoteExpiry:     resp.QuoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             wireTask.TaskKind,
-		Input:                inputStream.DecodedBytes,
-		InputContentType:     inputStream.ContentType,
-		InputContentEncoding: inputStream.ContentEncoding,
-		Params:               wireTask.ParamsBytes,
+		Method:                  call.Method,
+		Request:                 requestStream.DecodedBytes,
+		RequestContentType:      requestStream.ContentType,
+		RequestContentEncoding:  requestStream.ContentEncoding,
+		Params:                  call.ParamsBytes,
+		ResponseContentType:     resp.ResponseContentType,
+		ResponseContentEncoding: resp.ResponseContentEncoding,
 	})
 	if err != nil {
 		return nil, err
@@ -1145,30 +1147,37 @@ func termsFromQuoteResponse(
 	}
 
 	termsHashBytes := resp.TermsHash[:]
-	jobIDBytes := resp.Envelope.JobID[:]
+	jobIDBytes := resp.Envelope.CallID[:]
 
-	return &lcpdv1.Terms{
+	out := &lcpdv1.Quote{
 		ProtocolVersion: uint32(resp.Envelope.ProtocolVersion),
-		JobId:           append([]byte(nil), jobIDBytes...),
+		CallId:          append([]byte(nil), jobIDBytes...),
 		PriceMsat:       resp.PriceMsat,
 		QuoteExpiry:     ts,
 		TermsHash:       append([]byte(nil), termsHashBytes...),
 		PaymentRequest:  resp.PaymentRequest,
-	}, nil
+	}
+	if resp.ResponseContentType != nil {
+		out.ResponseContentType = proto.String(*resp.ResponseContentType)
+	}
+	if resp.ResponseContentEncoding != nil {
+		out.ResponseContentEncoding = proto.String(*resp.ResponseContentEncoding)
+	}
+	return out, nil
 }
 
 func verifyInvoiceBinding(
 	ctx context.Context,
 	ln LightningRPC,
 	peerID string,
-	terms *lcpdv1.Terms,
+	quote *lcpdv1.Quote,
 ) error {
-	info, err := ln.DecodePaymentRequest(ctx, terms.GetPaymentRequest())
+	info, err := ln.DecodePaymentRequest(ctx, quote.GetPaymentRequest())
 	if err != nil {
 		return grpcStatusFromLightningError(ctx, err)
 	}
 
-	termsHash, err := toHash32(terms.GetTermsHash())
+	termsHash, err := toHash32(quote.GetTermsHash())
 	if err != nil {
 		return status.Error(codes.Internal, "invalid stored terms_hash")
 	}
@@ -1183,7 +1192,7 @@ func verifyInvoiceBinding(
 		return status.Error(codes.FailedPrecondition, "invoice destination does not match peer_id")
 	}
 
-	priceMsat := terms.GetPriceMsat()
+	priceMsat := quote.GetPriceMsat()
 	if priceMsat == 0 {
 		return status.Error(codes.FailedPrecondition, "price_msat must be > 0")
 	}
@@ -1194,7 +1203,7 @@ func verifyInvoiceBinding(
 		return status.Error(codes.FailedPrecondition, "invoice amount does not match price_msat")
 	}
 
-	quoteExpiry := terms.GetQuoteExpiry()
+	quoteExpiry := quote.GetQuoteExpiry()
 	if quoteExpiry == nil {
 		return status.Error(codes.Internal, "invalid stored quote_expiry")
 	}
@@ -1268,11 +1277,11 @@ func grpcStatusFromLCPError(errMsg lcpwire.Error) error {
 
 func grpcCodeFromLCPErrorCode(code lcpwire.ErrorCode) codes.Code {
 	switch code {
-	case lcpwire.ErrorCodePayloadTooLarge, lcpwire.ErrorCodeRateLimited:
+	case lcpwire.ErrorCodePayloadTooLarge, lcpwire.ErrorCodeRateLimited, lcpwire.ErrorCodeStreamLimitExceeded:
 		return codes.ResourceExhausted
 	case lcpwire.ErrorCodeUnsupportedVersion,
-		lcpwire.ErrorCodeUnsupportedTask,
-		lcpwire.ErrorCodeUnsupportedParams,
+		lcpwire.ErrorCodeManifestRequired,
+		lcpwire.ErrorCodeUnsupportedMethod,
 		lcpwire.ErrorCodeUnsupportedEncoding,
 		lcpwire.ErrorCodeInvalidState,
 		lcpwire.ErrorCodeChunkOutOfOrder,
@@ -1323,7 +1332,7 @@ func grpcStatusFromPeerSendError(ctx context.Context, err error) error {
 
 func toJobID(b []byte) (lcp.JobID, error) {
 	if len(b) != lcp.Hash32Len {
-		return lcp.JobID{}, fmt.Errorf("job_id must be %d bytes, got %d", lcp.Hash32Len, len(b))
+		return lcp.JobID{}, fmt.Errorf("call_id must be %d bytes, got %d", lcp.Hash32Len, len(b))
 	}
 	var id lcp.JobID
 	copy(id[:], b)
@@ -1365,9 +1374,9 @@ const (
 
 func defaultLocalManifest() lcpwire.Manifest {
 	return lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		MaxPayloadBytes: defaultMaxPayloadBytes,
 		MaxStreamBytes:  defaultMaxStreamBytes,
-		MaxJobBytes:     defaultMaxJobBytes,
+		MaxCallBytes:    defaultMaxJobBytes,
 	}
 }

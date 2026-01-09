@@ -28,7 +28,7 @@ You can use `apps/openai-serve/.envrc.sample` (direnv) for local development.
 `openai-serve` logs are intentionally designed to avoid persisting raw user content.
 
 - Logs MUST NOT contain raw prompts (`messages[].content`) or raw model outputs.
-- `info` logs include request/job metadata (model, peer/job ids, price, timings, byte/token counts).
+- `info` logs include request metadata (model, peer/call ids, price, timings, byte/token counts).
 - `debug` may include HTTP request logs (including `client_ip`); treat debug logs as more sensitive.
 
 ## Routing and peer selection
@@ -37,8 +37,8 @@ For a given `model`, the Provider peer is selected in this order:
 
 1. `OPENAI_SERVE_MODEL_MAP` (if the mapped peer is connected/LCP-ready)
 2. `OPENAI_SERVE_DEFAULT_PEER_ID` (if set and connected/LCP-ready)
-3. A peer that advertises the model in its manifest `supported_tasks` (if any)
-4. Fallback to the first connected peer
+3. A peer that advertises the required method in its manifest `supported_methods` (if any)
+4. Fallback to any connected peer
 
 If there are no connected LCP peers, the request fails.
 
@@ -48,8 +48,7 @@ Model validation is designed to prevent accidental misrouting or unexpected char
 
 - If `OPENAI_SERVE_MODEL_ALLOWLIST` is set: `model` must be in the allowlist unless
   `OPENAI_SERVE_ALLOW_UNLISTED_MODELS=true`.
-- Otherwise: if any connected peers advertise `supported_tasks`, the model must be advertised by at least one peer.
-  If **no** peers advertise `supported_tasks`, validation is skipped to keep the gateway usable.
+- Otherwise: model validation is skipped (LCP v0.3 manifests do not advertise models; providers enforce their own model policies).
 
 ## Safety limits
 

@@ -21,27 +21,27 @@ func TestPutQuoteAndGetTerms(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobID := newJobID(0x01)
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobID[:],
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobID[:],
 		PriceMsat:       10,
 		QuoteExpiry:     timestamppb.New(now.Add(5 * time.Minute)),
 	}
-	task := newTestTask()
+	call := newTestCall()
 
-	if err := store.PutQuote("peer-a", task, terms); err != nil {
+	if err := store.PutQuote("peer-a", call, quote); err != nil {
 		t.Fatalf("PutQuote: %v", err)
 	}
 
-	gotTerms, err := store.GetTerms("peer-a", jobID)
+	gotQuote, err := store.GetQuote("peer-a", jobID)
 	if err != nil {
-		t.Fatalf("GetTerms: %v", err)
+		t.Fatalf("GetQuote: %v", err)
 	}
-	if diff := cmp.Diff(terms, gotTerms, protocmp.Transform()); diff != "" {
-		t.Fatalf("terms mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(quote, gotQuote, protocmp.Transform()); diff != "" {
+		t.Fatalf("quote mismatch (-want +got):\n%s", diff)
 	}
-	if gotTerms == terms {
-		t.Fatalf("GetTerms returned the same pointer")
+	if gotQuote == quote {
+		t.Fatalf("GetQuote returned the same pointer")
 	}
 
 	job, ok := store.Get("peer-a", jobID)
@@ -63,23 +63,23 @@ func TestGetTerms_Expired(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobID := newJobID(0x02)
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobID[:],
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobID[:],
 		PriceMsat:       20,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
 	}
 
-	task := newTestTask()
+	call := newTestCall()
 
-	if err := store.PutQuote("peer-b", task, terms); err != nil {
+	if err := store.PutQuote("peer-b", call, quote); err != nil {
 		t.Fatalf("PutQuote: %v", err)
 	}
 
-	_, err := store.GetTerms("peer-b", jobID)
+	_, err := store.GetQuote("peer-b", jobID)
 	if !errors.Is(err, requesterjobstore.ErrExpired) {
 		t.Fatalf(
-			"GetTerms error mismatch (-want +got):\n%s",
+			"GetQuote error mismatch (-want +got):\n%s",
 			cmp.Diff(requesterjobstore.ErrExpired, err),
 		)
 	}
@@ -107,15 +107,15 @@ func TestMarkState(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobID := newJobID(0x03)
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobID[:],
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobID[:],
 		PriceMsat:       30,
 		QuoteExpiry:     timestamppb.New(now.Add(10 * time.Minute)),
 	}
-	task := newTestTask()
+	call := newTestCall()
 
-	if err := store.PutQuote("peer-c", task, terms); err != nil {
+	if err := store.PutQuote("peer-c", call, quote); err != nil {
 		t.Fatalf("PutQuote: %v", err)
 	}
 
@@ -144,26 +144,26 @@ func TestGC_ExpiresQuotedJobsOnly(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobQuoted := newJobID(0x04)
-	quotedTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobQuoted[:],
+	quotedQuote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobQuoted[:],
 		PriceMsat:       40,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Second)),
 	}
 	jobDone := newJobID(0x05)
-	doneTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobDone[:],
+	doneQuote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobDone[:],
 		PriceMsat:       50,
 		QuoteExpiry:     timestamppb.New(now.Add(-time.Hour)),
 	}
 
-	task := newTestTask()
+	call := newTestCall()
 
-	if err := store.PutQuote("peer-d", task, quotedTerms); err != nil {
+	if err := store.PutQuote("peer-d", call, quotedQuote); err != nil {
 		t.Fatalf("PutQuote quoted: %v", err)
 	}
-	if err := store.PutQuote("peer-d", task, doneTerms); err != nil {
+	if err := store.PutQuote("peer-d", call, doneQuote); err != nil {
 		t.Fatalf("PutQuote done: %v", err)
 	}
 	if err := store.MarkState("peer-d", jobDone, requesterjobstore.StateDone); err != nil {
@@ -190,20 +190,20 @@ func TestPeerIsolation(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobID := newJobID(0x06)
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobID[:],
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobID[:],
 		PriceMsat:       60,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 	}
-	task := newTestTask()
+	call := newTestCall()
 
-	if err := store.PutQuote("peer-e", task, terms); err != nil {
+	if err := store.PutQuote("peer-e", call, quote); err != nil {
 		t.Fatalf("PutQuote peer-e: %v", err)
 	}
 
 	// Same job_id but different peer.
-	if err := store.PutQuote("peer-f", task, terms); err != nil {
+	if err := store.PutQuote("peer-f", call, quote); err != nil {
 		t.Fatalf("PutQuote peer-f: %v", err)
 	}
 
@@ -229,60 +229,60 @@ func TestPutQuote_Validation(t *testing.T) {
 	store := newStoreWithClock(now)
 
 	jobID := newJobID(0x07)
-	validTerms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           jobID[:],
+	validQuote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          jobID[:],
 		PriceMsat:       70,
 		QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 	}
-	task := newTestTask()
+	call := newTestCall()
 
 	tests := []struct {
 		name    string
 		peerID  string
-		task    *lcpdv1.Task
-		terms   *lcpdv1.Terms
+		call    *lcpdv1.CallSpec
+		quote   *lcpdv1.Quote
 		wantErr error
 	}{
 		{
 			name:    "missing peer id",
 			peerID:  "",
-			task:    task,
-			terms:   validTerms,
+			call:    call,
+			quote:   validQuote,
 			wantErr: requesterjobstore.ErrPeerIDRequired,
 		},
 		{
-			name:    "nil task",
+			name:    "nil call",
 			peerID:  "peer",
-			task:    nil,
-			terms:   validTerms,
-			wantErr: requesterjobstore.ErrTaskRequired,
+			call:    nil,
+			quote:   validQuote,
+			wantErr: requesterjobstore.ErrCallRequired,
 		},
 		{
-			name:    "nil terms",
+			name:    "nil quote",
 			peerID:  "peer",
-			task:    task,
-			terms:   nil,
-			wantErr: requesterjobstore.ErrTermsRequired,
+			call:    call,
+			quote:   nil,
+			wantErr: requesterjobstore.ErrQuoteRequired,
 		},
 		{
-			name:   "job_id wrong length",
+			name:   "call_id wrong length",
 			peerID: "peer",
-			task:   task,
-			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-				JobId:           []byte{0x01, 0x02},
+			call:   call,
+			quote: &lcpdv1.Quote{
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+				CallId:          []byte{0x01, 0x02},
 				QuoteExpiry:     timestamppb.New(now.Add(time.Hour)),
 			},
-			wantErr: requesterjobstore.ErrInvalidJobID,
+			wantErr: requesterjobstore.ErrInvalidCallID,
 		},
 		{
 			name:   "quote expiry nil",
 			peerID: "peer",
-			task:   task,
-			terms: &lcpdv1.Terms{
-				ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-				JobId:           jobID[:],
+			call:   call,
+			quote: &lcpdv1.Quote{
+				ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+				CallId:          jobID[:],
 			},
 			wantErr: requesterjobstore.ErrQuoteExpiryRequired,
 		},
@@ -292,7 +292,7 @@ func TestPutQuote_Validation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := store.PutQuote(tc.peerID, tc.task, tc.terms)
+			err := store.PutQuote(tc.peerID, tc.call, tc.quote)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("PutQuote error mismatch (-want +got):\n%s", cmp.Diff(tc.wantErr, err))
 			}
@@ -300,15 +300,13 @@ func TestPutQuote_Validation(t *testing.T) {
 	}
 }
 
-func newTestTask() *lcpdv1.Task {
-	const model = "gpt-5.2"
-	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-				RequestJson: []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`),
-				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
-			},
-		},
+func newTestCall() *lcpdv1.CallSpec {
+	return &lcpdv1.CallSpec{
+		Method:                 "openai.chat_completions.v1",
+		Params:                 []byte{0x01, 0x05, 'm', 'o', 'd', 'e', 'l'},
+		RequestBytes:           []byte(`{"model":"model","messages":[{"role":"user","content":"hi"}]}`),
+		RequestContentType:     "application/json; charset=utf-8",
+		RequestContentEncoding: "identity",
 	}
 }
 

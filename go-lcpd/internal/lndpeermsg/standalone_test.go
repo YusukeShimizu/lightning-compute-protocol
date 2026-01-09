@@ -41,7 +41,7 @@ func NewStandalone(
 		ProtocolVersion: defaultProtocolVersion,
 		MaxPayloadBytes: defaultMaxPayloadBytes,
 		MaxStreamBytes:  defaultMaxStreamBytes,
-		MaxJobBytes:     defaultMaxJobBytes,
+		MaxCallBytes:    defaultMaxCallBytes,
 	}
 	if localManifest != nil {
 		manifest = *localManifest

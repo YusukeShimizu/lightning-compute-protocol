@@ -8,7 +8,7 @@ import (
 )
 
 func EncodeStreamEnd(e StreamEnd) ([]byte, error) {
-	envelopeRecords, err := encodeJobEnvelope(e.Envelope)
+	envelopeRecords, err := encodeCallEnvelope(e.Envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func DecodeStreamEnd(payload []byte) (StreamEnd, error) {
 		return StreamEnd{}, err
 	}
 
-	env, err := decodeJobEnvelope(m)
+	env, err := decodeCallEnvelope(m)
 	if err != nil {
 		return StreamEnd{}, err
 	}

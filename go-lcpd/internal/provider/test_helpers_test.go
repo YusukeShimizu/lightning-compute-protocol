@@ -9,8 +9,8 @@ import (
 
 func newOpenAIChatCompletionsV1QuoteRequest(
 	model string,
-	opts ...func(*lcpwire.QuoteRequest),
-) lcpwire.QuoteRequest {
+	opts ...func(*lcpwire.Call),
+) lcpwire.Call {
 	var jobID lcp.JobID
 	for i := range jobID {
 		jobID[i] = 0x01
@@ -25,14 +25,14 @@ func newOpenAIChatCompletionsV1QuoteRequest(
 	}
 	encoded := mustEncodeOpenAIChatCompletionsV1Params(params)
 
-	req := lcpwire.QuoteRequest{
-		Envelope: lcpwire.JobEnvelope{
+	req := lcpwire.Call{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          1234,
 		},
-		TaskKind:    "openai.chat_completions.v1",
+		Method:      "openai.chat_completions.v1",
 		ParamsBytes: &encoded,
 	}
 
@@ -42,20 +42,20 @@ func newOpenAIChatCompletionsV1QuoteRequest(
 	return req
 }
 
-func withTaskKind(taskKind string) func(*lcpwire.QuoteRequest) {
-	return func(req *lcpwire.QuoteRequest) {
-		req.TaskKind = taskKind
+func withTaskKind(taskKind string) func(*lcpwire.Call) {
+	return func(req *lcpwire.Call) {
+		req.Method = taskKind
 		req.ParamsBytes = nil
 	}
 }
 
-func manifestWithTemplates(templates ...lcpwire.TaskTemplate) *lcpwire.Manifest {
+func manifestWithTemplates(templates ...lcpwire.MethodDescriptor) *lcpwire.Manifest {
 	m := &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
-		MaxPayloadBytes: 65535,
-		MaxStreamBytes:  4_194_304,
-		MaxJobBytes:     8_388_608,
-		SupportedTasks:  templates,
+		ProtocolVersion:  lcpwire.ProtocolVersionV02,
+		MaxPayloadBytes:  65535,
+		MaxStreamBytes:   4_194_304,
+		MaxCallBytes:     8_388_608,
+		SupportedMethods: templates,
 	}
 	return m
 }
@@ -75,7 +75,7 @@ func manifestPeerDirectory() *peerdirectory.Directory {
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
 		MaxPayloadBytes: 65535,
 		MaxStreamBytes:  4_194_304,
-		MaxJobBytes:     8_388_608,
+		MaxCallBytes:    8_388_608,
 	})
 	return peers
 }

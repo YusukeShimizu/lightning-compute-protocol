@@ -5,18 +5,18 @@
 LCP (Lightning Compute Protocol) is an application-layer protocol for paying for small compute jobs over Lightning.
 It uses BOLT #1 custom messages on a direct Lightning peer connection.
 
-LCP v0.2 defines a quote → pay → stream flow:
+LCP v0.3 defines a manifest → call → quote → pay → stream → complete flow:
 - Both sides exchange `lcp_manifest` (mandatory) to advertise limits.
-- The Requester sends `lcp_quote_request`, then streams the input (`lcp_stream_begin/chunk/end` with `stream_kind=input`).
-- The Provider replies with `lcp_quote_response` containing `price_msat`, `terms_hash`, and a BOLT11 invoice.
-- After settlement, the Provider streams the result (`stream_kind=result`) and then sends `lcp_result` (terminal completion + metadata).
+- The Requester sends `lcp_call`, then streams the request payload (`lcp_stream_begin/chunk/end` with `stream_kind=request`).
+- The Provider replies with `lcp_quote` containing `price_msat`, `terms_hash`, and a BOLT11 invoice.
+- After settlement, the Provider streams the response (`stream_kind=response`) and then sends `lcp_complete` (terminal completion + metadata).
 
 LCP binds payment to job terms by setting the invoice `description_hash` to `terms_hash`.
 
 Limitations:
-- Payloads are limited by the BOLT #1 custom message size (about 65 KB), but v0.2 supports large inputs/results via chunked streams bounded by peer-declared limits (`max_payload_bytes`, `max_stream_bytes`, `max_job_bytes`).
+- Payloads are limited by the BOLT #1 custom message size (about 65 KB), but v0.3 supports large request/response bodies via chunked streams bounded by peer-declared limits (`max_payload_bytes`, `max_stream_bytes`, `max_call_bytes`).
 - The Requester and Provider must be directly peered. This leaks metadata compared to onion messages or blinded paths.
-- Payment happens before execution. This is not an atomic swap (and v0.2 also requires sending the full input stream before quoting).
+- Payment happens before execution. This is not an atomic swap (and v0.3 also requires sending the full request stream before quoting).
 
 Reference: BOLT #1 messaging (`https://github.com/lightning/bolts/blob/master/01-messaging.md`).
 
@@ -44,7 +44,7 @@ This project is unaudited. Running it against real funds and real peers can lead
 - Configuration: [docs/go-lcpd/docs/configuration.md](docs/go-lcpd/docs/configuration.md)
 - Background run + logging: [docs/go-lcpd/docs/background.md](docs/go-lcpd/docs/background.md)
 - regtest walkthrough: [docs/go-lcpd/docs/regtest.md](docs/go-lcpd/docs/regtest.md)
-- Protocol spec (LCP v0.2): [docs/protocol/protocol.md](docs/protocol/protocol.md)
+- Protocol spec (LCP v0.3): [docs/protocol/protocol.md](docs/protocol/protocol.md)
 - One-shot client (demo): [go-lcpd/tools/lcpd-oneshot](go-lcpd/tools/lcpd-oneshot)
 
 ## Docs site (Mintlify)

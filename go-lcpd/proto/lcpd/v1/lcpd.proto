@@ -9,9 +9,9 @@ syntax = "proto3";
 //
 // LCP (Lightning Compute Protocol) is a Lightning L3 overlay protocol that
 // uses BOLT #1 custom messages carrying TLV streams to negotiate and execute
-// compute jobs (quote → payment → execution → result delivery).
+// method calls (manifest → call → quote → pay → stream → complete).
 //
-// This API is designed to be compatible with the LCP v0.2 wire protocol
+// This API is designed to be compatible with the LCP v0.3 wire protocol
 // described in `docs/protocol/protocol.md`.
 
 package lcpd.v1;
@@ -57,14 +57,14 @@ service LCPDService {
 
   // --- Core Flow ---
 
-  // RequestQuote sends an `lcp_quote_request` to a specific peer.
+  // RequestQuote sends an `lcp_call` and a request stream to a specific peer.
   //
-  // On success, it returns the provider's `lcp_quote_response` as `Terms`,
+  // On success, it returns the provider's `lcp_quote` as `Quote`,
   // including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`
   // (invoice swapping defense).
   // Errors:
   // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing
-  //   `task`, or invalid task spec).
+  //   `call`, or invalid call spec).
   //   Impact: No wire message is sent to the peer.
   // - NOT_FOUND: The target peer is unknown to the daemon.
   //   Impact: No wire message is sent to the peer.
@@ -76,22 +76,22 @@ service LCPDService {
   //   Impact: No quote is returned.
   // - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.
   //   Impact: Quote outcome is unknown to the caller; retry MAY result in a new
-  //   `job_id` and a different invoice unless the implementation provides idempotency.
+  //   `call_id` and a different invoice unless the implementation provides idempotency.
   // - UNAVAILABLE: Transient transport failure sending/receiving peer messages.
   //   Impact: Quote outcome is unknown; safe retries depend on idempotency.
   rpc RequestQuote(RequestQuoteRequest) returns (RequestQuoteResponse);
 
   // AcceptAndExecute pays the invoice associated with the quote and waits for
-  // the `lcp_result`.
+  // the terminal `lcp_complete` and (when available) the validated response stream.
   //
   // This is a blocking call. Clients SHOULD set a deadline and MAY cancel via
   // context cancellation (gRPC) or `CancelJob`.
   //
   // Errors:
-  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format),
+  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format),
   //   or `pay_invoice=false`.
   //   Impact: No payment attempt is made and no execution is started.
-  // - NOT_FOUND: The daemon has no known quote/payment data for the given `job_id`.
+  // - NOT_FOUND: The daemon has no known quote/payment data for the given `call_id`.
   //   Impact: No payment attempt is made.
   // - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the
   //   daemon refuses to pay/execute due to local policy.
@@ -108,9 +108,9 @@ service LCPDService {
   rpc AcceptAndExecute(AcceptAndExecuteRequest) returns (AcceptAndExecuteResponse);
 
   // AcceptAndExecuteStream pays the invoice associated with the quote and streams
-  // the decoded result stream bytes as they arrive.
+  // the decoded response stream bytes as they arrive.
   //
-  // The stream ends with a terminal `Result` event that indicates the final job
+  // The stream ends with a terminal `Complete` event that indicates the final job
   // status and (when available) the validated stream metadata (hash/len).
   //
   // Errors follow the same model as `AcceptAndExecute`, but note that streaming
@@ -124,7 +124,7 @@ service LCPDService {
   // Cancellation is best-effort: the provider may have already completed the job.
   //
   // Errors:
-  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format).
+  // - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format).
   //   Impact: No cancel message is sent.
   // - NOT_FOUND: The target peer is unknown to the daemon.
   //   Impact: No cancel message is sent.
@@ -141,105 +141,44 @@ service LCPDService {
 }
 
 // -----------------------------------------------------------------------------
-// 1. Task Definitions (Strict & Typed)
+// 1. Call Definitions (Client-Facing)
 // -----------------------------------------------------------------------------
 
-// LCPTaskKind enumerates the supported task types.
-// This is primarily used for Manifests and debugging.
-enum LCPTaskKind {
-  LCP_TASK_KIND_UNSPECIFIED = 0;
-  reserved 1;
-  reserved "LCP_TASK_KIND_LLM_CHAT";
-  LCP_TASK_KIND_OPENAI_CHAT_COMPLETIONS_V1 = 2; // "openai.chat_completions.v1"
-  LCP_TASK_KIND_OPENAI_RESPONSES_V1 = 3; // "openai.responses.v1"
-}
+// CallSpec describes the Requester's method call and the corresponding request
+// payload. The LCP wire protocol transmits the request payload via stream
+// messages; this gRPC API accepts the decoded bytes and streams them over LCP.
+message CallSpec {
+  // Method name (wire mapping: `lcp_call.method`).
+  string method = 1 [(buf.validate.field).string.min_len = 1];
 
-// Task is the strict container for a job request.
-// It uses `oneof` to enforce that only one valid task specification is provided.
-message Task {
-  reserved 1;
-  reserved "llm_chat";
+  // Opaque method params bytes (wire mapping: `lcp_call.params`).
+  // For LCP v0.3, params are method-defined opaque bytes (often a TLV stream).
+  bytes params = 2;
 
-  oneof spec {
-    option (buf.validate.oneof).required = true;
+  // Optional params content type hint (wire mapping: `lcp_call.params_content_type`).
+  string params_content_type = 3;
 
-    // Structured specification for "openai.chat_completions.v1"
-    OpenAIChatCompletionsV1TaskSpec openai_chat_completions_v1 = 2;
+  // Decoded request bytes to send in the request stream.
+  bytes request_bytes = 4 [(buf.validate.field).bytes.min_len = 1];
 
-    // Structured specification for "openai.responses.v1"
-    OpenAIResponsesV1TaskSpec openai_responses_v1 = 3;
-  }
-}
+  // Request stream content type (wire mapping: `lcp_stream_begin.content_type`).
+  string request_content_type = 5 [(buf.validate.field).string.min_len = 1];
 
-// OpenAIChatCompletionsV1TaskSpec defines a passthrough OpenAI-compatible
-// Chat Completions request. It maps to:
-//   - input: raw HTTP request body bytes (JSON)
-//   - params: TLV encoded parameters
-message OpenAIChatCompletionsV1TaskSpec {
-  // Raw HTTP request body bytes for `POST /v1/chat/completions`.
-  bytes request_json = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).bytes.min_len = 1
-  ];
-
-  // The configuration parameters for routing/validation.
-  OpenAIChatCompletionsV1Params params = 2 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).required = true
-  ];
-}
-
-// OpenAIChatCompletionsV1Params defines the tunable parameters for
-// "openai.chat_completions.v1".
-message OpenAIChatCompletionsV1Params {
-  // "model" (TLV type 1).
-  // Identifier for the execution target (for example, an OpenAI model ID).
-  string model = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).string.min_len = 1
-  ];
-}
-
-// OpenAIResponsesV1TaskSpec defines a passthrough OpenAI-compatible
-// Responses request. It maps to:
-//   - input: raw HTTP request body bytes (JSON)
-//   - params: TLV encoded parameters
-message OpenAIResponsesV1TaskSpec {
-  // Raw HTTP request body bytes for `POST /v1/responses`.
-  bytes request_json = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).bytes.min_len = 1
-  ];
-
-  // The configuration parameters for routing/validation.
-  OpenAIResponsesV1Params params = 2 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).required = true
-  ];
-}
-
-// OpenAIResponsesV1Params defines the tunable parameters for
-// "openai.responses.v1".
-message OpenAIResponsesV1Params {
-  // "model" (TLV type 1).
-  // Identifier for the execution target (for example, an OpenAI model ID).
-  string model = 1 [
-    (google.api.field_behavior) = REQUIRED,
-    (buf.validate.field).string.min_len = 1
-  ];
+  // Request stream content encoding (wire mapping: `lcp_stream_begin.content_encoding`).
+  string request_content_encoding = 6 [(buf.validate.field).string.min_len = 1];
 }
 
 // -----------------------------------------------------------------------------
-// 2. Protocol Objects (Terms, Result, Manifest)
+// 2. Protocol Objects (Quote, Complete, Manifest)
 // -----------------------------------------------------------------------------
 
-// Terms represents the commitment returned by the Provider in `lcp_quote_response`.
-message Terms {
-  // LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
-  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 2];
+// Quote represents the commitment returned by the Provider in `lcp_quote`.
+message Quote {
+  // LCP protocol version (v0.3 = 3; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 3];
 
-  // Job ID (32 bytes).
-  bytes job_id = 2 [(buf.validate.field).bytes.len = 32];
+  // Call ID (32 bytes).
+  bytes call_id = 2 [(buf.validate.field).bytes.len = 32];
 
   // Price in millisatoshis.
   uint64 price_msat = 3;
@@ -255,16 +194,22 @@ message Terms {
     (buf.validate.field).cel_expression = "this.nanos == 0"
   ];
 
-  // The SHA256 commitment over the canonical TLV stream of Terms.
+  // The SHA256 commitment over the canonical TLV stream of terms_tlvs.
   // Must match the BOLT11 invoice's description_hash.
   bytes terms_hash = 5 [(buf.validate.field).bytes.len = 32];
 
   // The BOLT11 invoice string provided by the peer.
   string payment_request = 6 [(buf.validate.field).string.min_len = 1];
+
+  // Optional provider commitment to response stream encoding.
+  optional string response_content_type = 7 [(buf.validate.field).string.min_len = 1];
+  optional string response_content_encoding = 8 [(buf.validate.field).string.min_len = 1];
 }
 
-// Result represents the output from `lcp_result`.
-message Result {
+// Complete represents the terminal completion state from `lcp_complete`.
+// For status=OK, it also includes the validated response stream metadata and
+// (for unary RPCs) the reconstructed decoded response bytes.
+message Complete {
   // Status represents the job completion state.
   enum Status {
     STATUS_UNSPECIFIED = 0;
@@ -276,18 +221,35 @@ message Result {
   // Completion status for the job.
   Status status = 1 [(buf.validate.field).required = true];
 
-  // If status=OK, the decoded result bytes reconstructed from the result stream.
-  // For "openai.chat_completions.v1", the client should interpret this as raw JSON bytes.
-  bytes result = 2;
+  // If status=OK, the decoded response bytes reconstructed from the response stream.
+  bytes response_bytes = 2;
 
-  // If status=OK, these fields reflect the validated result stream metadata.
-  bytes result_hash = 3 [(buf.validate.field).bytes.max_len = 32];
-  uint64 result_len = 4;
-  string content_type = 5;
-  string content_encoding = 6;
+  // If status=OK, these fields reflect the validated response stream metadata.
+  optional bytes response_stream_id = 3 [(buf.validate.field).bytes.len = 32];
+  optional bytes response_hash = 4 [(buf.validate.field).bytes.len = 32];
+  optional uint64 response_len = 5;
+  optional string response_content_type = 6 [(buf.validate.field).string.min_len = 1];
+  optional string response_content_encoding = 7 [(buf.validate.field).string.min_len = 1];
 
   // If status!=OK, optional human-readable message.
-  string message = 7;
+  string message = 8;
+}
+
+// MethodDescriptor represents one entry of `supported_methods` in `lcp_manifest`.
+message MethodDescriptor {
+  // Method name.
+  string method = 1 [(buf.validate.field).string.min_len = 1];
+
+  // Optional hints for request/response stream content type selection.
+  repeated string request_content_types = 2;
+  repeated string response_content_types = 3;
+
+  // Optional documentation metadata.
+  optional string docs_uri = 4 [(buf.validate.field).string.min_len = 1];
+  optional bytes docs_sha256 = 5 [(buf.validate.field).bytes.len = 32];
+
+  // Optional human-readable policy notice (for example, pricing or limits).
+  optional string policy_notice = 6 [(buf.validate.field).string.min_len = 1];
 }
 
 // LCPPeer represents a connected peer node.
@@ -310,8 +272,8 @@ message LCPPeer {
 
 // LCPManifest represents the capabilities declared by a peer via `lcp_manifest`.
 message LCPManifest {
-  // LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
-  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 2];
+  // LCP protocol version (v0.3 = 3; encoding: major*100 + minor).
+  uint32 protocol_version = 1 [(buf.validate.field).uint32.const = 3];
 
   // Maximum supported BOLT #1 custom message payload size in bytes.
   uint32 max_payload_bytes = 11 [
@@ -323,31 +285,14 @@ message LCPManifest {
   uint64 max_stream_bytes = 14 [(buf.validate.field).uint64.gt = 0];
 
   // Maximum total decoded bytes supported across all streams in a job.
-  uint64 max_job_bytes = 15 [(buf.validate.field).uint64.gt = 0];
+  uint64 max_call_bytes = 15 [(buf.validate.field).uint64.gt = 0];
 
   // Optional maximum concurrent in-flight jobs supported per connection.
   // 0 means "unspecified".
-  uint32 max_inflight_jobs = 16 [(buf.validate.field).uint32.lte = 65535];
+  uint32 max_inflight_calls = 16 [(buf.validate.field).uint32.lte = 65535];
 
-  // Task templates supported by this peer.
-  repeated LCPTaskTemplate supported_tasks = 12;
-}
-
-// LCPTaskTemplate describes a task kind supported by a peer.
-message LCPTaskTemplate {
-  // The kind of task supported.
-  LCPTaskKind kind = 1 [(buf.validate.field).required = true];
-
-  // The parameter template/defaults supported for this kind.
-  oneof params_template {
-    option (buf.validate.oneof).required = true;
-
-    OpenAIChatCompletionsV1Params openai_chat_completions_v1 = 3;
-    OpenAIResponsesV1Params openai_responses_v1 = 4;
-  }
-
-  reserved 2;
-  reserved "llm_chat";
+  // Methods supported by this peer.
+  repeated MethodDescriptor supported_methods = 12;
 }
 
 // -----------------------------------------------------------------------------
@@ -388,8 +333,8 @@ message RequestQuoteRequest {
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
   ];
 
-  // The strict task definition.
-  Task task = 2 [
+  // The method call specification.
+  CallSpec call = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).required = true
   ];
@@ -403,8 +348,8 @@ message RequestQuoteResponse {
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
   ];
 
-  // The agreed terms and invoice.
-  Terms terms = 2 [
+  // The agreed quote and invoice.
+  Quote quote = 2 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).required = true
   ];
@@ -418,8 +363,8 @@ message AcceptAndExecuteRequest {
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
   ];
 
-  // The job_id to execute (must match a previously received Quote).
-  bytes job_id = 2 [
+  // The call_id to execute (must match a previously received Quote).
+  bytes call_id = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).bytes.len = 32
   ];
@@ -439,8 +384,8 @@ message AcceptAndExecuteStreamRequest {
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
   ];
 
-  // The job_id to execute (must match a previously received Quote).
-  bytes job_id = 2 [
+  // The call_id to execute (must match a previously received Quote).
+  bytes call_id = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).bytes.len = 32
   ];
@@ -455,7 +400,7 @@ message AcceptAndExecuteStreamRequest {
 // AcceptAndExecuteResponse is the response message for `LCPDService.AcceptAndExecute`.
 message AcceptAndExecuteResponse {
   // The execution result.
-  Result result = 1 [
+  Complete complete = 1 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).required = true
   ];
@@ -467,45 +412,45 @@ message AcceptAndExecuteStreamResponse {
   oneof event {
     option (buf.validate.oneof).required = true;
 
-    ResultStreamBegin result_begin = 1;
-    ResultStreamChunk result_chunk = 2;
-    ResultStreamEnd result_end = 3;
-    Result result = 4;
+    ResponseStreamBegin response_begin = 1;
+    ResponseStreamChunk response_chunk = 2;
+    ResponseStreamEnd response_end = 3;
+    Complete complete = 4;
   }
 }
 
-// ResultStreamBegin marks the start of the decoded result stream.
-message ResultStreamBegin {
-  // Content type of the decoded result stream bytes.
+// ResponseStreamBegin marks the start of the decoded response stream.
+message ResponseStreamBegin {
+  // Content type of the decoded response stream bytes.
   string content_type = 1 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).string.min_len = 1
   ];
 
-  // Content encoding of the decoded result stream bytes.
+  // Content encoding of the decoded response stream bytes.
   string content_encoding = 2 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).string.min_len = 1
   ];
 }
 
-// ResultStreamChunk carries a contiguous slice of decoded result stream bytes.
-message ResultStreamChunk {
+// ResponseStreamChunk carries a contiguous slice of decoded response stream bytes.
+message ResponseStreamChunk {
   bytes data = 1 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).bytes.min_len = 1
   ];
 }
 
-// ResultStreamEnd marks the end of the decoded result stream and contains the
+// ResponseStreamEnd marks the end of the decoded response stream and contains the
 // validated stream metadata.
-message ResultStreamEnd {
-  bytes result_hash = 1 [
+message ResponseStreamEnd {
+  bytes response_hash = 1 [
     (google.api.field_behavior) = OUTPUT_ONLY,
     (buf.validate.field).bytes.len = 32
   ];
 
-  uint64 result_len = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+  uint64 response_len = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
 }
 
 // CancelJobRequest is the request message for `LCPDService.CancelJob`.
@@ -516,8 +461,8 @@ message CancelJobRequest {
     (buf.validate.field).string.pattern = "^[0-9a-fA-F]{66}$"
   ];
 
-  // The job_id to cancel.
-  bytes job_id = 2 [
+  // The call_id to cancel.
+  bytes call_id = 2 [
     (google.api.field_behavior) = REQUIRED,
     (buf.validate.field).bytes.len = 32
   ];

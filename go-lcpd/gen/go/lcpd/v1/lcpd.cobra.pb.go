@@ -117,7 +117,7 @@ func _LCPDServiceRequestQuoteCommand(cfg *client.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cfg.CommandNamer("RequestQuote"),
 		Short: "RequestQuote RPC client",
-		Long:  "RequestQuote sends an `lcp_quote_request` to a specific peer.\n\n On success, it returns the provider's `lcp_quote_response` as `Terms`,\n including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`\n (invoice swapping defense).\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing\n   `task`, or invalid task spec).\n   Impact: No wire message is sent to the peer.\n - NOT_FOUND: The target peer is unknown to the daemon.\n   Impact: No wire message is sent to the peer.\n - FAILED_PRECONDITION: The target peer is not connected and ready for LCP\n   (e.g. no manifest observed, protocol mismatch, or LCP disabled).\n   Impact: No quote is returned; clients may retry after resolving the condition.\n - RESOURCE_EXHAUSTED: The request would exceed a payload/size limit (local\n   or remote `max_payload_bytes`), or the daemon refuses due to local policy.\n   Impact: No quote is returned.\n - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.\n   Impact: Quote outcome is unknown to the caller; retry MAY result in a new\n   `job_id` and a different invoice unless the implementation provides idempotency.\n - UNAVAILABLE: Transient transport failure sending/receiving peer messages.\n   Impact: Quote outcome is unknown; safe retries depend on idempotency.",
+		Long:  "RequestQuote sends an `lcp_call` and a request stream to a specific peer.\n\n On success, it returns the provider's `lcp_quote` as `Quote`,\n including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`\n (invoice swapping defense).\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing\n   `call`, or invalid call spec).\n   Impact: No wire message is sent to the peer.\n - NOT_FOUND: The target peer is unknown to the daemon.\n   Impact: No wire message is sent to the peer.\n - FAILED_PRECONDITION: The target peer is not connected and ready for LCP\n   (e.g. no manifest observed, protocol mismatch, or LCP disabled).\n   Impact: No quote is returned; clients may retry after resolving the condition.\n - RESOURCE_EXHAUSTED: The request would exceed a payload/size limit (local\n   or remote `max_payload_bytes`), or the daemon refuses due to local policy.\n   Impact: No quote is returned.\n - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.\n   Impact: Quote outcome is unknown to the caller; retry MAY result in a new\n   `call_id` and a different invoice unless the implementation provides idempotency.\n - UNAVAILABLE: Transient transport failure sending/receiving peer messages.\n   Impact: Quote outcome is unknown; safe retries depend on idempotency.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.UseEnvVars {
 				if err := flag.SetFlagsFromEnv(cmd.Parent().PersistentFlags(), true, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService"); err != nil {
@@ -149,43 +149,19 @@ func _LCPDServiceRequestQuoteCommand(cfg *client.Config) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID (Pubkey).")
-	_Task := &Task{}
-	_Task_OpenaiChatCompletionsV1 := &OpenAIChatCompletionsV1TaskSpec{}
-	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task OpenaiChatCompletionsV1"), false, "")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
-	})
-	flag.BytesBase64Var(cmd.PersistentFlags(), &_Task_OpenaiChatCompletionsV1.RequestJson, cfg.FlagNamer("Task OpenaiChatCompletionsV1 RequestJson"), "Raw HTTP request body bytes for `POST /v1/chat/completions`.")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1 RequestJson"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
-	})
-	_Task_OpenaiChatCompletionsV1_Params := &OpenAIChatCompletionsV1Params{}
-	cmd.PersistentFlags().StringVar(&_Task_OpenaiChatCompletionsV1_Params.Model, cfg.FlagNamer("Task OpenaiChatCompletionsV1 Params Model"), "", "\"model\" (TLV type 1).\n Identifier for the execution target (for example, an OpenAI model ID).")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiChatCompletionsV1 Params Model"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiChatCompletionsV1{OpenaiChatCompletionsV1: _Task_OpenaiChatCompletionsV1}
-		_Task_OpenaiChatCompletionsV1.Params = _Task_OpenaiChatCompletionsV1_Params
-	})
-	_Task_OpenaiResponsesV1 := &OpenAIResponsesV1TaskSpec{}
-	cmd.PersistentFlags().Bool(cfg.FlagNamer("Task OpenaiResponsesV1"), false, "")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
-	})
-	flag.BytesBase64Var(cmd.PersistentFlags(), &_Task_OpenaiResponsesV1.RequestJson, cfg.FlagNamer("Task OpenaiResponsesV1 RequestJson"), "Raw HTTP request body bytes for `POST /v1/responses`.")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1 RequestJson"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
-	})
-	_Task_OpenaiResponsesV1_Params := &OpenAIResponsesV1Params{}
-	cmd.PersistentFlags().StringVar(&_Task_OpenaiResponsesV1_Params.Model, cfg.FlagNamer("Task OpenaiResponsesV1 Params Model"), "", "\"model\" (TLV type 1).\n Identifier for the execution target (for example, an OpenAI model ID).")
-	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Task OpenaiResponsesV1 Params Model"), func() {
-		req.Task = _Task
-		_Task.Spec = &Task_OpenaiResponsesV1{OpenaiResponsesV1: _Task_OpenaiResponsesV1}
-		_Task_OpenaiResponsesV1.Params = _Task_OpenaiResponsesV1_Params
-	})
+	_Call := &CallSpec{}
+	cmd.PersistentFlags().StringVar(&_Call.Method, cfg.FlagNamer("Call Method"), "", "Method name (wire mapping: `lcp_call.method`).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call Method"), func() { req.Call = _Call })
+	flag.BytesBase64Var(cmd.PersistentFlags(), &_Call.Params, cfg.FlagNamer("Call Params"), "Opaque method params bytes (wire mapping: `lcp_call.params`).\n For LCP v0.3, params are method-defined opaque bytes (often a TLV stream).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call Params"), func() { req.Call = _Call })
+	cmd.PersistentFlags().StringVar(&_Call.ParamsContentType, cfg.FlagNamer("Call ParamsContentType"), "", "Optional params content type hint (wire mapping: `lcp_call.params_content_type`).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call ParamsContentType"), func() { req.Call = _Call })
+	flag.BytesBase64Var(cmd.PersistentFlags(), &_Call.RequestBytes, cfg.FlagNamer("Call RequestBytes"), "Decoded request bytes to send in the request stream.")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call RequestBytes"), func() { req.Call = _Call })
+	cmd.PersistentFlags().StringVar(&_Call.RequestContentType, cfg.FlagNamer("Call RequestContentType"), "", "Request stream content type (wire mapping: `lcp_stream_begin.content_type`).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call RequestContentType"), func() { req.Call = _Call })
+	cmd.PersistentFlags().StringVar(&_Call.RequestContentEncoding, cfg.FlagNamer("Call RequestContentEncoding"), "", "Request stream content encoding (wire mapping: `lcp_stream_begin.content_encoding`).")
+	flag.WithPostSetHook(cmd.PersistentFlags(), cfg.FlagNamer("Call RequestContentEncoding"), func() { req.Call = _Call })
 
 	return cmd
 }
@@ -196,7 +172,7 @@ func _LCPDServiceAcceptAndExecuteCommand(cfg *client.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cfg.CommandNamer("AcceptAndExecute"),
 		Short: "AcceptAndExecute RPC client",
-		Long:  "AcceptAndExecute pays the invoice associated with the quote and waits for\n the `lcp_result`.\n\n This is a blocking call. Clients SHOULD set a deadline and MAY cancel via\n context cancellation (gRPC) or `CancelJob`.\n\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format),\n   or `pay_invoice=false`.\n   Impact: No payment attempt is made and no execution is started.\n - NOT_FOUND: The daemon has no known quote/payment data for the given `job_id`.\n   Impact: No payment attempt is made.\n - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the\n   daemon refuses to pay/execute due to local policy.\n   Impact: No execution is started.\n - UNAVAILABLE: Transient failure interacting with the Lightning node for payment,\n   or transient peer messaging failure for waiting on the result.\n   Impact: The job/payment outcome may be unknown; callers SHOULD treat retries\n   with caution because a payment could have succeeded while the result wait failed.\n - DEADLINE_EXCEEDED: The result did not arrive before the deadline.\n   Impact: The job may still complete and deliver a result later; callers SHOULD\n   avoid blindly retrying payment logic.\n - INTERNAL: Unexpected server error.\n   Impact: Outcome may be unknown if failure happened after payment settlement.",
+		Long:  "AcceptAndExecute pays the invoice associated with the quote and waits for\n the terminal `lcp_complete` and (when available) the validated response stream.\n\n This is a blocking call. Clients SHOULD set a deadline and MAY cancel via\n context cancellation (gRPC) or `CancelJob`.\n\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format),\n   or `pay_invoice=false`.\n   Impact: No payment attempt is made and no execution is started.\n - NOT_FOUND: The daemon has no known quote/payment data for the given `call_id`.\n   Impact: No payment attempt is made.\n - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the\n   daemon refuses to pay/execute due to local policy.\n   Impact: No execution is started.\n - UNAVAILABLE: Transient failure interacting with the Lightning node for payment,\n   or transient peer messaging failure for waiting on the result.\n   Impact: The job/payment outcome may be unknown; callers SHOULD treat retries\n   with caution because a payment could have succeeded while the result wait failed.\n - DEADLINE_EXCEEDED: The result did not arrive before the deadline.\n   Impact: The job may still complete and deliver a result later; callers SHOULD\n   avoid blindly retrying payment logic.\n - INTERNAL: Unexpected server error.\n   Impact: Outcome may be unknown if failure happened after payment settlement.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.UseEnvVars {
 				if err := flag.SetFlagsFromEnv(cmd.Parent().PersistentFlags(), true, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService"); err != nil {
@@ -228,7 +204,7 @@ func _LCPDServiceAcceptAndExecuteCommand(cfg *client.Config) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID.")
-	flag.BytesBase64Var(cmd.PersistentFlags(), &req.JobId, cfg.FlagNamer("JobId"), "The job_id to execute (must match a previously received Quote).")
+	flag.BytesBase64Var(cmd.PersistentFlags(), &req.CallId, cfg.FlagNamer("CallId"), "The call_id to execute (must match a previously received Quote).")
 	cmd.PersistentFlags().BoolVar(&req.PayInvoice, cfg.FlagNamer("PayInvoice"), false, "Authorization to pay the invoice.")
 
 	return cmd
@@ -240,7 +216,7 @@ func _LCPDServiceAcceptAndExecuteStreamCommand(cfg *client.Config) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   cfg.CommandNamer("AcceptAndExecuteStream"),
 		Short: "AcceptAndExecuteStream RPC client",
-		Long:  "AcceptAndExecuteStream pays the invoice associated with the quote and streams\n the decoded result stream bytes as they arrive.\n\n The stream ends with a terminal `Result` event that indicates the final job\n status and (when available) the validated stream metadata (hash/len).\n\n Errors follow the same model as `AcceptAndExecute`, but note that streaming\n responses may have already delivered partial bytes before an error is\n detected (for example, checksum validation failure at stream end).",
+		Long:  "AcceptAndExecuteStream pays the invoice associated with the quote and streams\n the decoded response stream bytes as they arrive.\n\n The stream ends with a terminal `Complete` event that indicates the final job\n status and (when available) the validated stream metadata (hash/len).\n\n Errors follow the same model as `AcceptAndExecute`, but note that streaming\n responses may have already delivered partial bytes before an error is\n detected (for example, checksum validation failure at stream end).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.UseEnvVars {
 				if err := flag.SetFlagsFromEnv(cmd.Parent().PersistentFlags(), true, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService"); err != nil {
@@ -284,7 +260,7 @@ func _LCPDServiceAcceptAndExecuteStreamCommand(cfg *client.Config) *cobra.Comman
 	}
 
 	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID.")
-	flag.BytesBase64Var(cmd.PersistentFlags(), &req.JobId, cfg.FlagNamer("JobId"), "The job_id to execute (must match a previously received Quote).")
+	flag.BytesBase64Var(cmd.PersistentFlags(), &req.CallId, cfg.FlagNamer("CallId"), "The call_id to execute (must match a previously received Quote).")
 	cmd.PersistentFlags().BoolVar(&req.PayInvoice, cfg.FlagNamer("PayInvoice"), false, "Authorization to pay the invoice.")
 
 	return cmd
@@ -296,7 +272,7 @@ func _LCPDServiceCancelJobCommand(cfg *client.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cfg.CommandNamer("CancelJob"),
 		Short: "CancelJob RPC client",
-		Long:  "CancelJob sends an `lcp_cancel` message to the provider.\n\n Cancellation is best-effort: the provider may have already completed the job.\n\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format).\n   Impact: No cancel message is sent.\n - NOT_FOUND: The target peer is unknown to the daemon.\n   Impact: No cancel message is sent.\n - FAILED_PRECONDITION: The daemon cannot currently send peer messages to the\n   target peer (e.g. not connected).\n   Impact: No cancel message is sent.\n - UNAVAILABLE: Transient transport failure sending the cancel message.\n   Impact: Unknown whether the provider received the cancel; retries are generally safe.\n - DEADLINE_EXCEEDED: The cancel attempt did not complete before the deadline.\n   Impact: Unknown whether the provider received the cancel; retries are generally safe.\n - INTERNAL: Unexpected server error.\n   Impact: Unknown whether the provider received the cancel.",
+		Long:  "CancelJob sends an `lcp_cancel` message to the provider.\n\n Cancellation is best-effort: the provider may have already completed the job.\n\n Errors:\n - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format).\n   Impact: No cancel message is sent.\n - NOT_FOUND: The target peer is unknown to the daemon.\n   Impact: No cancel message is sent.\n - FAILED_PRECONDITION: The daemon cannot currently send peer messages to the\n   target peer (e.g. not connected).\n   Impact: No cancel message is sent.\n - UNAVAILABLE: Transient transport failure sending the cancel message.\n   Impact: Unknown whether the provider received the cancel; retries are generally safe.\n - DEADLINE_EXCEEDED: The cancel attempt did not complete before the deadline.\n   Impact: Unknown whether the provider received the cancel; retries are generally safe.\n - INTERNAL: Unexpected server error.\n   Impact: Unknown whether the provider received the cancel.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.UseEnvVars {
 				if err := flag.SetFlagsFromEnv(cmd.Parent().PersistentFlags(), true, cfg.EnvVarNamer, cfg.EnvVarPrefix, "LCPDService"); err != nil {
@@ -328,7 +304,7 @@ func _LCPDServiceCancelJobCommand(cfg *client.Config) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&req.PeerId, cfg.FlagNamer("PeerId"), "", "The target peer's Node ID.")
-	flag.BytesBase64Var(cmd.PersistentFlags(), &req.JobId, cfg.FlagNamer("JobId"), "The job_id to cancel.")
+	flag.BytesBase64Var(cmd.PersistentFlags(), &req.CallId, cfg.FlagNamer("CallId"), "The call_id to cancel.")
 	cmd.PersistentFlags().StringVar(&req.Reason, cfg.FlagNamer("Reason"), "", "Optional human-readable cancellation reason.")
 
 	return cmd

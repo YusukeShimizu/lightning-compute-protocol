@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
@@ -14,15 +13,15 @@ const (
 
 type QuoteRequestValidator struct {
 	SupportedProtocolVersions map[uint16]struct{}
-	SupportedTaskKinds        map[string]struct{}
+	SupportedMethods          map[string]struct{}
 }
 
 func DefaultValidator() QuoteRequestValidator {
 	return QuoteRequestValidator{
 		SupportedProtocolVersions: map[uint16]struct{}{
-			lcpwire.ProtocolVersionV02: {},
+			lcpwire.ProtocolVersionV03: {},
 		},
-		SupportedTaskKinds: map[string]struct{}{
+		SupportedMethods: map[string]struct{}{
 			taskKindOpenAIChatCompletionsV1: {},
 			taskKindOpenAIResponsesV1:       {},
 		},
@@ -42,7 +41,7 @@ func (e *ValidationError) Error() string {
 }
 
 func (v QuoteRequestValidator) ValidateQuoteRequest(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	remoteManifest *lcpwire.Manifest,
 ) *ValidationError {
 	if !v.protocolSupported(req.Envelope.ProtocolVersion) {
@@ -52,10 +51,10 @@ func (v QuoteRequestValidator) ValidateQuoteRequest(
 		}
 	}
 
-	if !v.taskKindSupported(req.TaskKind) {
+	if !v.methodSupported(req.Method) {
 		return &ValidationError{
-			Code:    lcpwire.ErrorCodeUnsupportedTask,
-			Message: fmt.Sprintf("unsupported task_kind: %q", req.TaskKind),
+			Code:    lcpwire.ErrorCodeUnsupportedMethod,
+			Message: fmt.Sprintf("unsupported method: %q", req.Method),
 		}
 	}
 
@@ -63,11 +62,11 @@ func (v QuoteRequestValidator) ValidateQuoteRequest(
 		return err
 	}
 
-	if remoteManifest != nil && len(remoteManifest.SupportedTasks) > 0 {
-		if !matchesSupportedTemplate(req, remoteManifest.SupportedTasks) {
+	if remoteManifest != nil && len(remoteManifest.SupportedMethods) > 0 {
+		if !matchesSupportedMethod(req.Method, remoteManifest.SupportedMethods) {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedTask,
-				Message: "task does not match any supported_tasks template",
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
+				Message: "method does not match any supported_methods descriptor",
 			}
 		}
 	}
@@ -77,26 +76,26 @@ func (v QuoteRequestValidator) ValidateQuoteRequest(
 
 func (v QuoteRequestValidator) protocolSupported(protocolVersion uint16) bool {
 	if len(v.SupportedProtocolVersions) == 0 {
-		return protocolVersion == lcpwire.ProtocolVersionV02
+		return protocolVersion == lcpwire.ProtocolVersionV03
 	}
 	_, ok := v.SupportedProtocolVersions[protocolVersion]
 	return ok
 }
 
-func (v QuoteRequestValidator) taskKindSupported(taskKind string) bool {
-	if len(v.SupportedTaskKinds) == 0 {
-		return taskKind == taskKindOpenAIChatCompletionsV1
+func (v QuoteRequestValidator) methodSupported(method string) bool {
+	if len(v.SupportedMethods) == 0 {
+		return method == taskKindOpenAIChatCompletionsV1
 	}
-	_, ok := v.SupportedTaskKinds[taskKind]
+	_, ok := v.SupportedMethods[method]
 	return ok
 }
 
-func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
-	switch req.TaskKind {
+func validateTaskParams(req lcpwire.Call) *ValidationError {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1:
 		if req.ParamsBytes == nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 params are required",
 			}
 		}
@@ -104,14 +103,14 @@ func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
 		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 params must be a valid TLV stream",
 			}
 		}
 
 		if len(params.Unknown) > 0 {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 params contain unknown tlv types",
 			}
 		}
@@ -120,7 +119,7 @@ func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
 	case taskKindOpenAIResponsesV1:
 		if req.ParamsBytes == nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 params are required",
 			}
 		}
@@ -128,14 +127,14 @@ func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
 		params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 params must be a valid TLV stream",
 			}
 		}
 
 		if len(params.Unknown) > 0 {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 params contain unknown tlv types",
 			}
 		}
@@ -146,29 +145,11 @@ func validateTaskParams(req lcpwire.QuoteRequest) *ValidationError {
 	}
 }
 
-func matchesSupportedTemplate(
-	req lcpwire.QuoteRequest,
-	templates []lcpwire.TaskTemplate,
-) bool {
-	for _, tmpl := range templates {
-		if matchesTemplate(req, tmpl) {
+func matchesSupportedMethod(method string, supported []lcpwire.MethodDescriptor) bool {
+	for _, desc := range supported {
+		if desc.Method == method {
 			return true
 		}
 	}
 	return false
-}
-
-func matchesTemplate(req lcpwire.QuoteRequest, tmpl lcpwire.TaskTemplate) bool {
-	if req.TaskKind != tmpl.TaskKind {
-		return false
-	}
-
-	if tmpl.ParamsBytes != nil {
-		if req.ParamsBytes == nil {
-			return false
-		}
-		return bytes.Equal(*req.ParamsBytes, *tmpl.ParamsBytes)
-	}
-
-	return true
 }

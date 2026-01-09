@@ -1,38 +1,45 @@
 package protocolcompat
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"slices"
 	"unicode/utf8"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
-	"github.com/lightningnetwork/lnd/tlv"
 )
 
 const (
-	termsTLVTypeProtocolVersion      = 1
-	termsTLVTypeJobID                = 2
-	termsTLVTypePriceMsat            = 3
-	termsTLVTypeQuoteExpiry          = 4
-	termsTLVTypeTaskKind             = 20
-	termsTLVTypeInputHash            = 50
-	termsTLVTypeParamsHash           = 51
-	termsTLVTypeInputLen             = 52
-	termsTLVTypeInputContentType     = 53
-	termsTLVTypeInputContentEncoding = 54
+	termsTLVTypeProtocolVersion = 1
+	termsTLVTypeCallID          = 2
+	termsTLVTypeMethod          = 20
+
+	termsTLVTypePriceMsat   = 30
+	termsTLVTypeQuoteExpiry = 31
+
+	termsTLVTypeRequestHash            = 50
+	termsTLVTypeParamsHash             = 51
+	termsTLVTypeRequestLen             = 52
+	termsTLVTypeRequestContentType     = 53
+	termsTLVTypeRequestContentEncoding = 54
+
+	termsTLVTypeResponseContentType     = 55
+	termsTLVTypeResponseContentEncoding = 56
 )
 
 type TermsCommit struct {
-	TaskKind             string
-	Input                []byte
-	InputContentType     string
-	InputContentEncoding string
-	Params               []byte // nil means "absent" (hash is SHA256(empty))
+	Method string
+
+	Request                []byte
+	RequestContentType     string
+	RequestContentEncoding string
+
+	Params []byte // nil means "absent" (hash is SHA256(empty))
+
+	ResponseContentType     *string
+	ResponseContentEncoding *string
 }
 
 func NewJobID() (lcp.JobID, error) {
@@ -45,46 +52,64 @@ func NewJobID() (lcp.JobID, error) {
 }
 
 func ComputeTermsHash(terms lcp.Terms, commit TermsCommit) (lcp.Hash32, error) {
-	if commit.TaskKind == "" {
-		return lcp.Hash32{}, errors.New("task_kind is required for terms_hash")
+	if commit.Method == "" {
+		return lcp.Hash32{}, errors.New("method is required for terms_hash")
 	}
-	if !utf8.ValidString(commit.TaskKind) {
-		return lcp.Hash32{}, errors.New("task_kind must be valid UTF-8 for terms_hash")
+	if !utf8.ValidString(commit.Method) {
+		return lcp.Hash32{}, errors.New("method must be valid UTF-8 for terms_hash")
 	}
-	if commit.InputContentType == "" {
-		return lcp.Hash32{}, errors.New("input_content_type is required for terms_hash")
+	if commit.RequestContentType == "" {
+		return lcp.Hash32{}, errors.New("request_content_type is required for terms_hash")
 	}
-	if !utf8.ValidString(commit.InputContentType) {
-		return lcp.Hash32{}, errors.New("input_content_type must be valid UTF-8 for terms_hash")
+	if !utf8.ValidString(commit.RequestContentType) {
+		return lcp.Hash32{}, errors.New("request_content_type must be valid UTF-8 for terms_hash")
 	}
-	if commit.InputContentEncoding == "" {
-		return lcp.Hash32{}, errors.New("input_content_encoding is required for terms_hash")
+	if commit.RequestContentEncoding == "" {
+		return lcp.Hash32{}, errors.New("request_content_encoding is required for terms_hash")
 	}
-	if !utf8.ValidString(commit.InputContentEncoding) {
-		return lcp.Hash32{}, errors.New("input_content_encoding must be valid UTF-8 for terms_hash")
+	if !utf8.ValidString(commit.RequestContentEncoding) {
+		return lcp.Hash32{}, errors.New("request_content_encoding must be valid UTF-8 for terms_hash")
 	}
 
-	inputHash := sha256.Sum256(commit.Input)
-	inputLen := uint64(len(commit.Input))
-
-	paramsCanonical := commit.Params
-	if commit.Params != nil {
-		canonical, err := canonicalizeTLVStream(commit.Params)
-		if err != nil {
-			return lcp.Hash32{}, fmt.Errorf("canonicalize params tlv: %w", err)
+	if (commit.ResponseContentType != nil) != (commit.ResponseContentEncoding != nil) {
+		return lcp.Hash32{}, errors.New("response_content_type and response_content_encoding must be set together for terms_hash")
+	}
+	if commit.ResponseContentType != nil {
+		if *commit.ResponseContentType == "" {
+			return lcp.Hash32{}, errors.New("response_content_type must be non-empty when present for terms_hash")
 		}
-		paramsCanonical = canonical
+		if !utf8.ValidString(*commit.ResponseContentType) {
+			return lcp.Hash32{}, errors.New("response_content_type must be valid UTF-8 for terms_hash")
+		}
 	}
-	paramsHash := sha256.Sum256(paramsCanonical)
+	if commit.ResponseContentEncoding != nil {
+		if *commit.ResponseContentEncoding == "" {
+			return lcp.Hash32{}, errors.New("response_content_encoding must be non-empty when present for terms_hash")
+		}
+		if !utf8.ValidString(*commit.ResponseContentEncoding) {
+			return lcp.Hash32{}, errors.New("response_content_encoding must be valid UTF-8 for terms_hash")
+		}
+	}
+
+	requestHash := sha256.Sum256(commit.Request)
+	requestLen := uint64(len(commit.Request))
+
+	paramsHashBytes := commit.Params
+	if paramsHashBytes == nil {
+		paramsHashBytes = nil
+	}
+	paramsHash := sha256.Sum256(paramsHashBytes)
 
 	encoded := encodeTermsTLVStream(
 		terms,
-		commit.TaskKind,
-		inputHash,
+		commit.Method,
+		requestHash,
 		paramsHash,
-		inputLen,
-		commit.InputContentType,
-		commit.InputContentEncoding,
+		requestLen,
+		commit.RequestContentType,
+		commit.RequestContentEncoding,
+		commit.ResponseContentType,
+		commit.ResponseContentEncoding,
 	)
 	sum := sha256.Sum256(encoded)
 	return lcp.Hash32(sum), nil
@@ -92,12 +117,14 @@ func ComputeTermsHash(terms lcp.Terms, commit TermsCommit) (lcp.Hash32, error) {
 
 func encodeTermsTLVStream(
 	terms lcp.Terms,
-	taskKind string,
-	inputHash [32]byte,
+	method string,
+	requestHash [32]byte,
 	paramsHash [32]byte,
-	inputLen uint64,
-	inputContentType string,
-	inputContentEncoding string,
+	requestLen uint64,
+	requestContentType string,
+	requestContentEncoding string,
+	responseContentType *string,
+	responseContentEncoding *string,
 ) []byte {
 	const u16ByteLen = 2
 
@@ -105,27 +132,42 @@ func encodeTermsTLVStream(
 	binary.BigEndian.PutUint16(v1, terms.ProtocolVersion)
 
 	t1 := encodeTLV(termsTLVTypeProtocolVersion, v1)
-	t2 := encodeTLV(termsTLVTypeJobID, terms.JobID[:])
-	t3 := encodeTLV(termsTLVTypePriceMsat, encodeTU64(terms.PriceMsat))
-	t4 := encodeTLV(termsTLVTypeQuoteExpiry, encodeTU64(terms.QuoteExpiry))
-	t20 := encodeTLV(termsTLVTypeTaskKind, []byte(taskKind))
-	t50 := encodeTLV(termsTLVTypeInputHash, inputHash[:])
+	t2 := encodeTLV(termsTLVTypeCallID, terms.JobID[:])
+	t20 := encodeTLV(termsTLVTypeMethod, []byte(method))
+	t30 := encodeTLV(termsTLVTypePriceMsat, encodeTU64(terms.PriceMsat))
+	t31 := encodeTLV(termsTLVTypeQuoteExpiry, encodeTU64(terms.QuoteExpiry))
+	t50 := encodeTLV(termsTLVTypeRequestHash, requestHash[:])
 	t51 := encodeTLV(termsTLVTypeParamsHash, paramsHash[:])
-	t52 := encodeTLV(termsTLVTypeInputLen, encodeTU64(inputLen))
-	t53 := encodeTLV(termsTLVTypeInputContentType, []byte(inputContentType))
-	t54 := encodeTLV(termsTLVTypeInputContentEncoding, []byte(inputContentEncoding))
+	t52 := encodeTLV(termsTLVTypeRequestLen, encodeTU64(requestLen))
+	t53 := encodeTLV(termsTLVTypeRequestContentType, []byte(requestContentType))
+	t54 := encodeTLV(termsTLVTypeRequestContentEncoding, []byte(requestContentEncoding))
 
-	out := make([]byte, 0, len(t1)+len(t2)+len(t3)+len(t4)+len(t20)+len(t50)+len(t51)+len(t52)+len(t53)+len(t54))
+	var t55 []byte
+	if responseContentType != nil {
+		t55 = encodeTLV(termsTLVTypeResponseContentType, []byte(*responseContentType))
+	}
+	var t56 []byte
+	if responseContentEncoding != nil {
+		t56 = encodeTLV(termsTLVTypeResponseContentEncoding, []byte(*responseContentEncoding))
+	}
+
+	out := make([]byte, 0, len(t1)+len(t2)+len(t20)+len(t30)+len(t31)+len(t50)+len(t51)+len(t52)+len(t53)+len(t54)+len(t55)+len(t56))
 	out = append(out, t1...)
 	out = append(out, t2...)
-	out = append(out, t3...)
-	out = append(out, t4...)
 	out = append(out, t20...)
+	out = append(out, t30...)
+	out = append(out, t31...)
 	out = append(out, t50...)
 	out = append(out, t51...)
 	out = append(out, t52...)
 	out = append(out, t53...)
 	out = append(out, t54...)
+	if len(t55) > 0 {
+		out = append(out, t55...)
+	}
+	if len(t56) > 0 {
+		out = append(out, t56...)
+	}
 	return out
 }
 
@@ -196,29 +238,4 @@ func encodeBigSize(v uint64) []byte {
 		binary.BigEndian.PutUint64(b[:], v)
 		return append([]byte{prefix64}, b[:]...)
 	}
-}
-
-func canonicalizeTLVStream(payload []byte) ([]byte, error) {
-	stream, err := tlv.NewStream()
-	if err != nil {
-		return nil, fmt.Errorf("new empty tlv stream: %w", err)
-	}
-
-	parsed, err := stream.DecodeWithParsedTypesP2P(bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("decode tlv stream: %w", err)
-	}
-
-	types := make([]uint64, 0, len(parsed))
-	for typ := range parsed {
-		types = append(types, uint64(typ))
-	}
-	slices.Sort(types)
-
-	out := make([]byte, 0, len(payload))
-	for _, typ := range types {
-		v := parsed[tlv.Type(typ)]
-		out = append(out, encodeTLV(typ, v)...)
-	}
-	return out, nil
 }

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lcptasks"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lnd/lnrpc"
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/itest/harness/lcpd"
@@ -145,19 +145,21 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 
 	quoteReq := &lcpdv1.RequestQuoteRequest{
 		PeerId: bobPubKey,
-		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-					RequestJson: []byte(
-						`{"model":"gpt-5.2","messages":[{"role":"user","content":"hello from grpc requester"}]}`,
-					),
-					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
-						Model: "gpt-5.2",
-					},
-				},
-			},
+		Call: &lcpdv1.CallSpec{
+			Method: "openai.chat_completions.v1",
+			RequestBytes: []byte(
+				`{"model":"gpt-5.2","messages":[{"role":"user","content":"hello from grpc requester"}]}`,
+			),
+			RequestContentType:     "application/json; charset=utf-8",
+			RequestContentEncoding: "identity",
 		},
 	}
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(lcpwire.OpenAIChatCompletionsV1Params{Model: "gpt-5.2"})
+	if err != nil {
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
+	}
+	quoteReq.Call.Params = paramsBytes
+
 	quoteResp, err := aliceClient.RequestQuote(ctx, quoteReq)
 	if err != nil {
 		t.Fatalf("RequestQuote: %v", err)
@@ -165,54 +167,52 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 	if got, want := quoteResp.GetPeerId(), bobPubKey; got != want {
 		t.Fatalf("quote peer_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	terms := quoteResp.GetTerms()
-	if terms == nil {
-		t.Fatalf("quote terms is nil")
+	quote := quoteResp.GetQuote()
+	if quote == nil {
+		t.Fatalf("quote is nil")
 	}
-	if got, want := len(terms.GetJobId()), lcp.Hash32Len; got != want {
-		t.Fatalf("quote terms job_id length mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := len(quote.GetCallId()), lcp.Hash32Len; got != want {
+		t.Fatalf("quote call_id length mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := len(terms.GetTermsHash()), lcp.Hash32Len; got != want {
-		t.Fatalf("quote terms terms_hash length mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := len(quote.GetTermsHash()), lcp.Hash32Len; got != want {
+		t.Fatalf("quote terms_hash length mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if terms.GetPaymentRequest() == "" {
-		t.Fatalf("quote terms payment_request is empty")
+	if quote.GetPaymentRequest() == "" {
+		t.Fatalf("quote payment_request is empty")
 	}
-	if terms.GetQuoteExpiry() == nil {
-		t.Fatalf("quote terms quote_expiry is nil")
+	if quote.GetQuoteExpiry() == nil {
+		t.Fatalf("quote quote_expiry is nil")
 	}
-	if got, want := terms.GetQuoteExpiry().GetNanos(), int32(0); got != want {
-		t.Fatalf("quote terms quote_expiry nanos mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := quote.GetQuoteExpiry().GetNanos(), int32(0); got != want {
+		t.Fatalf("quote quote_expiry nanos mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
-	var jobID lcp.JobID
-	copy(jobID[:], terms.GetJobId())
+	var callID lcp.JobID
+	copy(callID[:], quote.GetCallId())
 
-	wireTask, err := lcptasks.ToWireQuoteRequestTask(quoteReq.GetTask())
-	if err != nil {
-		t.Fatalf("ToWireQuoteRequestTask: %v", err)
-	}
-	inputStream, err := lcptasks.ToWireInputStream(quoteReq.GetTask())
-	if err != nil {
-		t.Fatalf("ToWireInputStream: %v", err)
+	call := quoteReq.GetCall()
+	if call == nil {
+		t.Fatalf("quote request call is nil")
 	}
 
 	wantTermsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: uint16(terms.GetProtocolVersion()),
-		JobID:           jobID,
-		PriceMsat:       terms.GetPriceMsat(),
-		QuoteExpiry:     uint64(terms.GetQuoteExpiry().GetSeconds()),
+		ProtocolVersion: uint16(quote.GetProtocolVersion()),
+		JobID:           callID,
+		PriceMsat:       quote.GetPriceMsat(),
+		QuoteExpiry:     uint64(quote.GetQuoteExpiry().GetSeconds()),
 	}, protocolcompat.TermsCommit{
-		TaskKind:             wireTask.TaskKind,
-		Input:                inputStream.DecodedBytes,
-		InputContentType:     inputStream.ContentType,
-		InputContentEncoding: inputStream.ContentEncoding,
-		Params:               wireTask.ParamsBytes,
+		Method:                  call.GetMethod(),
+		Request:                 call.GetRequestBytes(),
+		RequestContentType:      call.GetRequestContentType(),
+		RequestContentEncoding:  call.GetRequestContentEncoding(),
+		Params:                  call.GetParams(),
+		ResponseContentType:     quote.ResponseContentType,
+		ResponseContentEncoding: quote.ResponseContentEncoding,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
-	if diff := cmp.Diff(wantTermsHash[:], terms.GetTermsHash()); diff != "" {
+	if diff := cmp.Diff(wantTermsHash[:], quote.GetTermsHash()); diff != "" {
 		t.Fatalf("terms_hash mismatch (-want +got):\n%s", diff)
 	}
 
@@ -221,14 +221,14 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 		ctx,
 		t,
 		aliceRPC,
-		terms.GetPaymentRequest(),
+		quote.GetPaymentRequest(),
 		bobPubKey,
-		terms.GetTermsHash(),
-		terms.GetPriceMsat(),
-		uint64(terms.GetQuoteExpiry().GetSeconds()),
+		quote.GetTermsHash(),
+		quote.GetPriceMsat(),
+		uint64(quote.GetQuoteExpiry().GetSeconds()),
 	)
 
-	amtSats := int64((terms.GetPriceMsat() + 999) / 1000)
+	amtSats := int64((quote.GetPriceMsat() + 999) / 1000)
 	if amtSats <= 0 {
 		amtSats = 1
 	}
@@ -237,20 +237,20 @@ func TestE2E_Regtest_RequesterGRPC(t *testing.T) {
 
 	execResp, err := aliceClient.AcceptAndExecute(ctx, &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     bobPubKey,
-		JobId:      terms.GetJobId(),
+		CallId:     quote.GetCallId(),
 		PayInvoice: true,
 	})
 	if err != nil {
 		t.Fatalf("AcceptAndExecute: %v", err)
 	}
-	if execResp.GetResult() == nil {
-		t.Fatalf("AcceptAndExecute: result is nil")
+	if execResp.GetComplete() == nil {
+		t.Fatalf("AcceptAndExecute: complete is nil")
 	}
-	if diff := cmp.Diff("application/json; charset=utf-8", execResp.GetResult().GetContentType()); diff != "" {
-		t.Fatalf("result content_type mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff("application/json; charset=utf-8", execResp.GetComplete().GetResponseContentType()); diff != "" {
+		t.Fatalf("complete response_content_type mismatch (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff([]byte("deterministic-output"), execResp.GetResult().GetResult()); diff != "" {
-		t.Fatalf("result bytes mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]byte("deterministic-output"), execResp.GetComplete().GetResponseBytes()); diff != "" {
+		t.Fatalf("complete response_bytes mismatch (-want +got):\n%s", diff)
 	}
 }
 

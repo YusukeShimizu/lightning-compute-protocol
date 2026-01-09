@@ -1,6 +1,8 @@
 package lcpwire
 
 const (
-	tlvTypeTaskKind = uint64(20)
-	tlvTypeParams   = uint64(22)
+	tlvTypeMethod = uint64(20)
+	tlvTypeParams = uint64(22)
+
+	tlvTypeParamsContentType = uint64(25)
 )

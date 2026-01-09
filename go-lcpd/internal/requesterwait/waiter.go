@@ -13,17 +13,17 @@ import (
 )
 
 type QuoteOutcome struct {
-	QuoteResponse *lcpwire.QuoteResponse
-	Error         *lcpwire.Error
+	Quote *lcpwire.Quote
+	Error *lcpwire.Error
 }
 
 type ResultOutcome struct {
-	// Result is the decoded terminal `lcp_result`.
-	Result *lcpwire.Result
+	// Complete is the decoded terminal `lcp_complete`.
+	Complete *lcpwire.Complete
 
-	// ResultBytes is the reconstructed decoded bytes from the validated result
-	// stream. It is set iff Result.Status == ok.
-	ResultBytes []byte
+	// ResponseBytes is the reconstructed decoded bytes from the validated response
+	// stream. It is set iff Complete.Status == ok.
+	ResponseBytes []byte
 
 	Error *lcpwire.Error
 }
@@ -82,9 +82,9 @@ type entry struct {
 
 	resultStreamSub *resultStreamSub
 
-	// Result stream reassembly state (v0.2).
+	// Response stream reassembly state.
 	resultStream      *streamState
-	terminalResult    *lcpwire.Result
+	terminalResult    *lcpwire.Complete
 	terminalDelivered bool
 }
 
@@ -94,12 +94,12 @@ type Waiter struct {
 	logger  *zap.SugaredLogger
 
 	maxStreamBytes uint64
-	maxJobBytes    uint64
+	maxCallBytes   uint64
 }
 
 const (
 	defaultMaxStreamBytes   = uint64(4_194_304)
-	defaultMaxJobBytes      = uint64(8_388_608)
+	defaultMaxCallBytes     = uint64(8_388_608)
 	resultStreamEventBuffer = 16
 )
 
@@ -123,13 +123,13 @@ func New(logger *zap.SugaredLogger, localManifest *lcpwire.Manifest) *Waiter {
 	}
 
 	maxStreamBytes := defaultMaxStreamBytes
-	maxJobBytes := defaultMaxJobBytes
+	maxCallBytes := defaultMaxCallBytes
 	if localManifest != nil {
 		if localManifest.MaxStreamBytes != 0 {
 			maxStreamBytes = localManifest.MaxStreamBytes
 		}
-		if localManifest.MaxJobBytes != 0 {
-			maxJobBytes = localManifest.MaxJobBytes
+		if localManifest.MaxCallBytes != 0 {
+			maxCallBytes = localManifest.MaxCallBytes
 		}
 	}
 
@@ -137,11 +137,11 @@ func New(logger *zap.SugaredLogger, localManifest *lcpwire.Manifest) *Waiter {
 		entries:        make(map[key]*entry),
 		logger:         logger.With("component", "requesterwait"),
 		maxStreamBytes: maxStreamBytes,
-		maxJobBytes:    maxJobBytes,
+		maxCallBytes:   maxCallBytes,
 	}
 }
 
-// WaitQuoteResponse blocks until it receives lcp_quote_response or lcp_error for the job.
+// WaitQuoteResponse blocks until it receives lcp_quote or lcp_error for the job.
 func (w *Waiter) WaitQuoteResponse(
 	ctx context.Context,
 	peerID string,
@@ -160,7 +160,7 @@ func (w *Waiter) WaitQuoteResponse(
 	)
 }
 
-// WaitResult blocks until it receives lcp_result or lcp_error for the job.
+// WaitResult blocks until it receives lcp_complete or lcp_error for the job.
 func (w *Waiter) WaitResult(
 	ctx context.Context,
 	peerID string,
@@ -226,20 +226,20 @@ func (w *Waiter) SubscribeResultStream(
 	return ch, unsubscribe, nil
 }
 
-// HandleInboundCustomMessage decodes inbound job-scope messages and delivers them
+// HandleInboundCustomMessage decodes inbound call-scope messages and delivers them
 // to the appropriate waiter. Unknown message types are ignored.
 func (w *Waiter) HandleInboundCustomMessage(
 	_ context.Context,
 	msg lndpeermsg.InboundCustomMessage,
 ) {
 	switch lcpwire.MessageType(msg.MsgType) {
-	case lcpwire.MessageTypeQuoteResponse:
-		resp, err := lcpwire.DecodeQuoteResponse(msg.Payload)
+	case lcpwire.MessageTypeQuote:
+		resp, err := lcpwire.DecodeQuote(msg.Payload)
 		if err != nil {
-			w.logger.Debugw("decode lcp_quote_response failed", "err", err)
+			w.logger.Debugw("decode lcp_quote failed", "err", err)
 			return
 		}
-		w.deliverQuoteResponse(msg.PeerPubKey, resp)
+		w.deliverQuote(msg.PeerPubKey, resp)
 	case lcpwire.MessageTypeStreamBegin:
 		begin, err := lcpwire.DecodeStreamBegin(msg.Payload)
 		if err != nil {
@@ -261,13 +261,13 @@ func (w *Waiter) HandleInboundCustomMessage(
 			return
 		}
 		w.handleStreamEnd(msg.PeerPubKey, end)
-	case lcpwire.MessageTypeResult:
-		res, err := lcpwire.DecodeResult(msg.Payload)
+	case lcpwire.MessageTypeComplete:
+		res, err := lcpwire.DecodeComplete(msg.Payload)
 		if err != nil {
-			w.logger.Debugw("decode lcp_result failed", "err", err)
+			w.logger.Debugw("decode lcp_complete failed", "err", err)
 			return
 		}
-		w.handleTerminalResult(msg.PeerPubKey, res)
+		w.handleTerminalComplete(msg.PeerPubKey, res)
 	case lcpwire.MessageTypeError:
 		errMsg, err := lcpwire.DecodeError(msg.Payload)
 		if err != nil {
@@ -276,7 +276,7 @@ func (w *Waiter) HandleInboundCustomMessage(
 		}
 		w.deliverError(msg.PeerPubKey, errMsg)
 	case lcpwire.MessageTypeManifest,
-		lcpwire.MessageTypeQuoteRequest,
+		lcpwire.MessageTypeCall,
 		lcpwire.MessageTypeCancel:
 		return
 	default:
@@ -286,7 +286,7 @@ func (w *Waiter) HandleInboundCustomMessage(
 }
 
 func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
-	if begin.Kind != lcpwire.StreamKindResult {
+	if begin.Kind != lcpwire.StreamKindResponse {
 		return
 	}
 	if begin.ContentEncoding != "identity" {
@@ -300,18 +300,18 @@ func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
 	}
 
 	if begin.TotalLen != nil {
-		if *begin.TotalLen > w.maxStreamBytes || *begin.TotalLen > w.maxJobBytes {
+		if *begin.TotalLen > w.maxStreamBytes || *begin.TotalLen > w.maxCallBytes {
 			w.deliverProtocolError(
 				peerID,
 				begin.Envelope,
 				lcpwire.ErrorCodePayloadTooLarge,
-				"result stream exceeds local limits",
+				"response stream exceeds local limits",
 			)
 			return
 		}
 	}
 
-	k := key{peerID: peerID, jobID: begin.Envelope.JobID}
+	k := key{peerID: peerID, jobID: begin.Envelope.CallID}
 
 	var sub *resultStreamSub
 
@@ -344,7 +344,7 @@ func (w *Waiter) handleStreamBegin(peerID string, begin lcpwire.StreamBegin) {
 }
 
 func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
-	k := key{peerID: peerID, jobID: chunk.Envelope.JobID}
+	k := key{peerID: peerID, jobID: chunk.Envelope.CallID}
 
 	var sub *resultStreamSub
 
@@ -374,10 +374,10 @@ func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
 	}
 
 	nextLen := uint64(len(st.buf)) + uint64(len(chunk.Data))
-	if nextLen > w.maxStreamBytes || nextLen > w.maxJobBytes {
+	if nextLen > w.maxStreamBytes || nextLen > w.maxCallBytes {
 		env := chunk.Envelope
 		w.mu.Unlock()
-		w.deliverProtocolError(peerID, env, lcpwire.ErrorCodePayloadTooLarge, "result stream exceeds local limits")
+		w.deliverProtocolError(peerID, env, lcpwire.ErrorCodePayloadTooLarge, "response stream exceeds local limits")
 		return
 	}
 
@@ -393,7 +393,7 @@ func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
 }
 
 func (w *Waiter) handleStreamEnd(peerID string, end lcpwire.StreamEnd) {
-	k := key{peerID: peerID, jobID: end.Envelope.JobID}
+	k := key{peerID: peerID, jobID: end.Envelope.CallID}
 
 	w.mu.Lock()
 	e := w.ensureEntryLocked(k)
@@ -432,12 +432,12 @@ func (w *Waiter) handleStreamEnd(peerID string, end lcpwire.StreamEnd) {
 	w.mu.Unlock()
 
 	if terminal != nil {
-		w.tryDeliverResult(peerID, *terminal, bufCopy, contentType, contentEncoding)
+		w.tryDeliverComplete(peerID, *terminal, bufCopy, contentType, contentEncoding)
 	}
 }
 
-func (w *Waiter) handleTerminalResult(peerID string, res lcpwire.Result) {
-	k := key{peerID: peerID, jobID: res.Envelope.JobID}
+func (w *Waiter) handleTerminalComplete(peerID string, res lcpwire.Complete) {
+	k := key{peerID: peerID, jobID: res.Envelope.CallID}
 
 	w.mu.Lock()
 	e := w.ensureEntryLocked(k)
@@ -445,7 +445,7 @@ func (w *Waiter) handleTerminalResult(peerID string, res lcpwire.Result) {
 		w.mu.Unlock()
 		return
 	}
-	rCopy := cloneTerminalResult(res)
+	rCopy := cloneTerminalComplete(res)
 	e.terminalResult = rCopy
 	e.terminalDelivered = true
 
@@ -464,8 +464,8 @@ func (w *Waiter) handleTerminalResult(peerID string, res lcpwire.Result) {
 	}
 	w.mu.Unlock()
 
-	if res.Status != lcpwire.ResultStatusOK {
-		w.deliverResult(peerID, res, nil)
+	if res.Status != lcpwire.CompleteStatusOK {
+		w.deliverComplete(peerID, res, nil)
 		return
 	}
 
@@ -474,55 +474,55 @@ func (w *Waiter) handleTerminalResult(peerID string, res lcpwire.Result) {
 		return
 	}
 
-	w.tryDeliverResult(peerID, res, streamBuf, ct, ce)
+	w.tryDeliverComplete(peerID, res, streamBuf, ct, ce)
 }
 
-func (w *Waiter) tryDeliverResult(
+func (w *Waiter) tryDeliverComplete(
 	peerID string,
-	terminal lcpwire.Result,
-	resultBytes []byte,
+	terminal lcpwire.Complete,
+	responseBytes []byte,
 	streamContentType string,
 	streamContentEncoding string,
 ) {
-	if terminal.Status != lcpwire.ResultStatusOK || terminal.OK == nil {
-		w.deliverResult(peerID, terminal, resultBytes)
+	if terminal.OK == nil {
+		w.deliverComplete(peerID, terminal, responseBytes)
 		return
 	}
 
-	sum := sha256Sum(resultBytes)
-	if sum != terminal.OK.ResultHash {
-		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_hash mismatch")
+	sum := sha256Sum(responseBytes)
+	if sum != terminal.OK.ResponseHash {
+		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "response_hash mismatch")
 		return
 	}
-	if uint64(len(resultBytes)) != terminal.OK.ResultLen {
-		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_len mismatch")
+	if uint64(len(responseBytes)) != terminal.OK.ResponseLen {
+		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "response_len mismatch")
 		return
 	}
-	if streamContentType != "" && streamContentType != terminal.OK.ResultContentType {
+	if streamContentType != "" && streamContentType != terminal.OK.ResponseContentType {
 		w.deliverProtocolError(
 			peerID,
 			terminal.Envelope,
 			lcpwire.ErrorCodeChecksumMismatch,
-			"result_content_type mismatch",
+			"response_content_type mismatch",
 		)
 		return
 	}
-	if streamContentEncoding != "" && streamContentEncoding != terminal.OK.ResultContentEncoding {
+	if streamContentEncoding != "" && streamContentEncoding != terminal.OK.ResponseContentEncoding {
 		w.deliverProtocolError(
 			peerID,
 			terminal.Envelope,
 			lcpwire.ErrorCodeChecksumMismatch,
-			"result_content_encoding mismatch",
+			"response_content_encoding mismatch",
 		)
 		return
 	}
 
-	w.deliverResult(peerID, terminal, resultBytes)
+	w.deliverComplete(peerID, terminal, responseBytes)
 }
 
 func (w *Waiter) deliverProtocolError(
 	peerID string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	code lcpwire.ErrorCode,
 	message string,
 ) {
@@ -602,9 +602,9 @@ func (w *Waiter) ensureEntryLocked(k key) *entry {
 	return e
 }
 
-func (w *Waiter) deliverQuoteResponse(peerID string, resp lcpwire.QuoteResponse) {
-	k := key{peerID: peerID, jobID: resp.Envelope.JobID}
-	out := QuoteOutcome{QuoteResponse: cloneQuoteResponse(resp)}
+func (w *Waiter) deliverQuote(peerID string, quote lcpwire.Quote) {
+	k := key{peerID: peerID, jobID: quote.Envelope.CallID}
+	out := QuoteOutcome{Quote: cloneQuote(quote)}
 
 	var ch chan QuoteOutcome
 
@@ -621,12 +621,12 @@ func (w *Waiter) deliverQuoteResponse(peerID string, resp lcpwire.QuoteResponse)
 	}
 }
 
-func (w *Waiter) deliverResult(peerID string, res lcpwire.Result, resultBytes []byte) {
-	k := key{peerID: peerID, jobID: res.Envelope.JobID}
+func (w *Waiter) deliverComplete(peerID string, res lcpwire.Complete, responseBytes []byte) {
+	k := key{peerID: peerID, jobID: res.Envelope.CallID}
 
 	out := ResultOutcome{
-		Result:      cloneTerminalResult(res),
-		ResultBytes: append([]byte(nil), resultBytes...),
+		Complete:      cloneTerminalComplete(res),
+		ResponseBytes: append([]byte(nil), responseBytes...),
 	}
 
 	var ch chan ResultOutcome
@@ -645,7 +645,7 @@ func (w *Waiter) deliverResult(peerID string, res lcpwire.Result, resultBytes []
 }
 
 func (w *Waiter) deliverError(peerID string, errMsg lcpwire.Error) {
-	k := key{peerID: peerID, jobID: errMsg.Envelope.JobID}
+	k := key{peerID: peerID, jobID: errMsg.Envelope.CallID}
 	out := QuoteOutcome{Error: cloneError(errMsg)}
 	outResult := ResultOutcome{Error: cloneError(errMsg)}
 
@@ -690,7 +690,7 @@ func (w *Waiter) maybeCleanupLocked(k key, e *entry) {
 	delete(w.entries, k)
 }
 
-func cloneQuoteResponse(in lcpwire.QuoteResponse) *lcpwire.QuoteResponse {
+func cloneQuote(in lcpwire.Quote) *lcpwire.Quote {
 	c := in
 	return &c
 }
@@ -706,7 +706,7 @@ func cloneError(in lcpwire.Error) *lcpwire.Error {
 
 var _ lndpeermsg.InboundMessageHandler = (*Waiter)(nil)
 
-func cloneTerminalResult(in lcpwire.Result) *lcpwire.Result {
+func cloneTerminalComplete(in lcpwire.Complete) *lcpwire.Complete {
 	c := in
 	if in.OK != nil {
 		okCopy := *in.OK
