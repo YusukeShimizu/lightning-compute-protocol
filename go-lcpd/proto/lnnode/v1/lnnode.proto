@@ -1,0 +1,247 @@
+// Copyright 2025 LCP Authors
+//
+// Licensed under the MIT License.
+// See the LICENSE file in the project root for license information.
+
+syntax = "proto3";
+
+// LightningNodeService provides a minimal, backend-agnostic Lightning node API.
+//
+// This API is intended for `apps/ldk-lcp-node/` (Rust, LDK-based) and for `go-lcpd/` to consume
+// via a gRPC client backend.
+package lnnode.v1;
+
+option go_package = "github.com/bruwbird/lcp/go-lcpd/gen/go/lnnode/v1;lnnodev1";
+
+// -----------------------------------------------------------------------------
+// Service Definition
+// -----------------------------------------------------------------------------
+
+service LightningNodeService {
+  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+
+  // Peer + custom messages (LCP transport)
+  rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  rpc SubscribePeerEvents(SubscribePeerEventsRequest) returns (stream PeerEvent);
+
+  rpc SendCustomMessage(SendCustomMessageRequest) returns (SendCustomMessageResponse);
+  rpc SubscribeCustomMessages(SubscribeCustomMessagesRequest)
+      returns (stream CustomMessage);
+
+  // Channels (operator needs this for independence)
+  rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
+  rpc CloseChannel(CloseChannelRequest) returns (CloseChannelResponse);
+  rpc ListChannels(ListChannelsRequest) returns (ListChannelsResponse);
+
+  // Wallet (minimum to fund channels)
+  rpc NewAddress(NewAddressRequest) returns (NewAddressResponse);
+  rpc WalletBalance(WalletBalanceRequest) returns (WalletBalanceResponse);
+  rpc SendToAddress(SendToAddressRequest) returns (SendToAddressResponse);
+
+  // Invoices + payments (for go-lcpd)
+  rpc CreateInvoice(CreateInvoiceRequest) returns (CreateInvoiceResponse);
+  rpc WaitInvoiceSettled(WaitInvoiceSettledRequest) returns (WaitInvoiceSettledResponse);
+  rpc DecodeInvoice(DecodeInvoiceRequest) returns (DecodeInvoiceResponse);
+  rpc PayInvoice(PayInvoiceRequest) returns (PayInvoiceResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Common
+// -----------------------------------------------------------------------------
+
+message GetNodeInfoRequest {}
+
+message ChainSyncState {
+  uint32 best_height = 1;
+  string best_block_hash_hex = 2;
+  uint64 last_sync_unix = 3;
+}
+
+message GossipSyncState {
+  uint64 last_sync_unix = 1;
+}
+
+message GetNodeInfoResponse {
+  // Compressed secp256k1 pubkey (33 bytes).
+  bytes node_pubkey = 1;
+  string network = 2; // "regtest" | "testnet" | "mainnet" | "signet"
+  repeated string p2p_listen_addrs = 3; // "host:port"
+  ChainSyncState chain_sync_state = 4;
+  GossipSyncState gossip_sync_state = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Peer + events
+// -----------------------------------------------------------------------------
+
+message ConnectPeerRequest {
+  bytes peer_pubkey = 1;
+  string addr = 2; // "host:port"
+}
+
+message ConnectPeerResponse { bool already_connected = 1; }
+
+message ListPeersRequest {}
+
+message Peer {
+  bytes peer_pubkey = 1;
+  string addr = 2;
+  bool connected = 3;
+}
+
+message ListPeersResponse { repeated Peer peers = 1; }
+
+message SubscribePeerEventsRequest {}
+
+message PeerEvent {
+  bytes peer_pubkey = 1;
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    TYPE_ONLINE = 1;
+    TYPE_OFFLINE = 2;
+  }
+  Type type = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Custom messages
+// -----------------------------------------------------------------------------
+
+message SendCustomMessageRequest {
+  bytes peer_pubkey = 1;
+  // BOLT #1 custom message type (uint16 in [32768..65535]).
+  uint32 msg_type = 2;
+  bytes data = 3;
+}
+
+message SendCustomMessageResponse {}
+
+message SubscribeCustomMessagesRequest {
+  // Empty means "all". Otherwise only deliver messages matching one of these types.
+  repeated uint32 msg_types = 1;
+}
+
+message CustomMessage {
+  bytes peer_pubkey = 1;
+  uint32 msg_type = 2;
+  bytes data = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Channels
+// -----------------------------------------------------------------------------
+
+message OpenChannelRequest {
+  bytes peer_pubkey = 1;
+  uint64 local_funding_amount_sat = 2;
+  bool announce_channel = 3;
+}
+
+message OpenChannelResponse {
+  bytes channel_id = 1; // 32 bytes
+  string funding_txid_hex = 2; // standard txid hex (as in explorers)
+}
+
+message CloseChannelRequest {
+  bytes channel_id = 1; // 32 bytes
+  bool force = 2;
+}
+
+message CloseChannelResponse {}
+
+message ListChannelsRequest {}
+
+message Channel {
+  bytes channel_id = 1;
+  bytes peer_pubkey = 2;
+  uint64 channel_value_sat = 3;
+  uint64 outbound_capacity_msat = 4;
+  uint64 inbound_capacity_msat = 5;
+  bool usable = 6;
+}
+
+message ListChannelsResponse { repeated Channel channels = 1; }
+
+// -----------------------------------------------------------------------------
+// Wallet
+// -----------------------------------------------------------------------------
+
+message NewAddressRequest {}
+
+message NewAddressResponse { string address = 1; }
+
+message WalletBalanceRequest {}
+
+message WalletBalanceResponse {
+  uint64 confirmed_sat = 1;
+  uint64 unconfirmed_sat = 2;
+}
+
+message SendToAddressRequest {
+  string address = 1;
+  uint64 amount_sat = 2;
+  uint64 fee_rate_sat_per_vbyte = 3;
+  bool rbf = 4;
+  bytes idempotency_key = 5; // optional but recommended for retries
+}
+
+message SendToAddressResponse { string txid_hex = 1; }
+
+// -----------------------------------------------------------------------------
+// Invoices + payments
+// -----------------------------------------------------------------------------
+
+message CreateInvoiceRequest {
+  bytes description_hash = 1; // 32 bytes
+  uint64 amount_msat = 2;
+  uint64 expiry_seconds = 3;
+}
+
+message CreateInvoiceResponse {
+  string payment_request = 1;
+  bytes payment_hash = 2; // 32 bytes
+}
+
+message WaitInvoiceSettledRequest {
+  bytes payment_hash = 1; // 32 bytes
+  uint32 timeout_seconds = 2;
+}
+
+message WaitInvoiceSettledResponse {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_SETTLED = 1;
+    STATE_CANCELED = 2;
+    STATE_EXPIRED = 3;
+  }
+  State state = 1;
+}
+
+message DecodeInvoiceRequest { string payment_request = 1; }
+
+message DecodeInvoiceResponse {
+  bytes payee_pubkey = 1;
+  bytes description_hash = 2;
+  uint64 amount_msat = 3;
+  uint64 timestamp_unix = 4;
+  uint64 expiry_seconds = 5;
+}
+
+message PayInvoiceRequest {
+  string payment_request = 1;
+  uint32 timeout_seconds = 2;
+  uint64 fee_limit_msat = 3;
+}
+
+message PayInvoiceResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_SUCCEEDED = 1;
+    STATUS_FAILED = 2;
+  }
+  Status status = 1;
+  bytes payment_preimage = 2; // success only
+  string failure_message = 3; // failed only (human-readable)
+}
+

@@ -8,7 +8,7 @@ import (
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"go.uber.org/zap"
 )
 
@@ -230,7 +230,7 @@ func (w *Waiter) SubscribeResultStream(
 // to the appropriate waiter. Unknown message types are ignored.
 func (w *Waiter) HandleInboundCustomMessage(
 	_ context.Context,
-	msg lndpeermsg.InboundCustomMessage,
+	msg peermsg.InboundCustomMessage,
 ) {
 	switch lcpwire.MessageType(msg.MsgType) {
 	case lcpwire.MessageTypeQuoteResponse:
@@ -377,7 +377,12 @@ func (w *Waiter) handleStreamChunk(peerID string, chunk lcpwire.StreamChunk) {
 	if nextLen > w.maxStreamBytes || nextLen > w.maxJobBytes {
 		env := chunk.Envelope
 		w.mu.Unlock()
-		w.deliverProtocolError(peerID, env, lcpwire.ErrorCodePayloadTooLarge, "result stream exceeds local limits")
+		w.deliverProtocolError(
+			peerID,
+			env,
+			lcpwire.ErrorCodePayloadTooLarge,
+			"result stream exceeds local limits",
+		)
 		return
 	}
 
@@ -415,13 +420,23 @@ func (w *Waiter) handleStreamEnd(peerID string, end lcpwire.StreamEnd) {
 	w.mu.Unlock()
 
 	if uint64(len(bufCopy)) != end.TotalLen {
-		w.deliverProtocolError(peerID, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream total_len mismatch")
+		w.deliverProtocolError(
+			peerID,
+			end.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"stream total_len mismatch",
+		)
 		return
 	}
 
 	sum := sha256Sum(bufCopy)
 	if sum != end.SHA256 {
-		w.deliverProtocolError(peerID, end.Envelope, lcpwire.ErrorCodeChecksumMismatch, "stream sha256 mismatch")
+		w.deliverProtocolError(
+			peerID,
+			end.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"stream sha256 mismatch",
+		)
 		return
 	}
 
@@ -491,11 +506,21 @@ func (w *Waiter) tryDeliverResult(
 
 	sum := sha256Sum(resultBytes)
 	if sum != terminal.OK.ResultHash {
-		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_hash mismatch")
+		w.deliverProtocolError(
+			peerID,
+			terminal.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"result_hash mismatch",
+		)
 		return
 	}
 	if uint64(len(resultBytes)) != terminal.OK.ResultLen {
-		w.deliverProtocolError(peerID, terminal.Envelope, lcpwire.ErrorCodeChecksumMismatch, "result_len mismatch")
+		w.deliverProtocolError(
+			peerID,
+			terminal.Envelope,
+			lcpwire.ErrorCodeChecksumMismatch,
+			"result_len mismatch",
+		)
 		return
 	}
 	if streamContentType != "" && streamContentType != terminal.OK.ResultContentType {
@@ -704,7 +729,7 @@ func cloneError(in lcpwire.Error) *lcpwire.Error {
 	return &c
 }
 
-var _ lndpeermsg.InboundMessageHandler = (*Waiter)(nil)
+var _ peermsg.InboundMessageHandler = (*Waiter)(nil)
 
 func cloneTerminalResult(in lcpwire.Result) *lcpwire.Result {
 	c := in

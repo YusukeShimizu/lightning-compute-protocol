@@ -49,7 +49,10 @@ func EncodeStreamBegin(b StreamBegin) ([]byte, error) {
 
 	records := append([]tlv.Record(nil), envelopeRecords...)
 	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeStreamID), &streamID))
-	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeStreamKind), &streamKind))
+	records = append(
+		records,
+		tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeStreamKind), &streamKind),
+	)
 
 	if b.TotalLen != nil {
 		totalLen := *b.TotalLen
@@ -60,8 +63,14 @@ func EncodeStreamBegin(b StreamBegin) ([]byte, error) {
 		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeSHA256), &sum))
 	}
 
-	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeContentType), &contentTypeBytes))
-	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeContentEncoding), &contentEncodingBytes))
+	records = append(
+		records,
+		tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeContentType), &contentTypeBytes),
+	)
+	records = append(
+		records,
+		tlv.MakePrimitiveRecord(tlv.Type(streamTLVTypeContentEncoding), &contentEncodingBytes),
+	)
 
 	return encodeTLVStream(records)
 }

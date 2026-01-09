@@ -37,10 +37,9 @@ type Job struct {
 
 	InputStream *InputStreamState
 
-	QuoteExpiry     uint64
-	TermsHash       *lcp.Hash32
-	PaymentHash     *lcp.Hash32
-	InvoiceAddIndex *uint64
+	QuoteExpiry uint64
+	TermsHash   *lcp.Hash32
+	PaymentHash *lcp.Hash32
 
 	QuoteResponse *lcpwire.QuoteResponse
 
@@ -206,10 +205,6 @@ func cloneJob(job Job) Job {
 	if job.PaymentHash != nil {
 		hashCopy := *job.PaymentHash
 		job.PaymentHash = &hashCopy
-	}
-	if job.InvoiceAddIndex != nil {
-		addIndexCopy := *job.InvoiceAddIndex
-		job.InvoiceAddIndex = &addIndexCopy
 	}
 	if job.QuoteResponse != nil {
 		respCopy := *job.QuoteResponse

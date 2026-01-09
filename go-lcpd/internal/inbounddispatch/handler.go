@@ -4,14 +4,14 @@ import (
 	"context"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
+	"github.com/bruwbird/lcp/go-lcpd/internal/peermsg"
 	"github.com/bruwbird/lcp/go-lcpd/internal/provider"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterwait"
 )
 
 type Handler struct {
-	provider  lndpeermsg.InboundMessageHandler
-	requester lndpeermsg.InboundMessageHandler
+	provider  peermsg.InboundMessageHandler
+	requester peermsg.InboundMessageHandler
 }
 
 func New(providerHandler *provider.Handler, requesterWaiter *requesterwait.Waiter) *Handler {
@@ -23,7 +23,7 @@ func New(providerHandler *provider.Handler, requesterWaiter *requesterwait.Waite
 
 func (h *Handler) HandleInboundCustomMessage(
 	ctx context.Context,
-	msg lndpeermsg.InboundCustomMessage,
+	msg peermsg.InboundCustomMessage,
 ) {
 	if h == nil {
 		return
@@ -63,4 +63,4 @@ func (h *Handler) HandleInboundCustomMessage(
 	}
 }
 
-var _ lndpeermsg.InboundMessageHandler = (*Handler)(nil)
+var _ peermsg.InboundMessageHandler = (*Handler)(nil)

@@ -474,8 +474,14 @@ func AssertPaymentRequestBinding(
 		t.Fatalf("invoice expiry is negative: %d", invoiceExpiryUnix)
 	}
 	const allowedClockSkewSeconds = int64(5)
-	if got, want := uint64(invoiceExpiryUnix), quoteExpiryUnix; got > want+uint64(allowedClockSkewSeconds) {
-		t.Fatalf("invoice expiry exceeds quote_expiry: invoice_expiry_unix=%d quote_expiry=%d", got, want)
+	if got, want := uint64(invoiceExpiryUnix), quoteExpiryUnix; got > want+uint64(
+		allowedClockSkewSeconds,
+	) {
+		t.Fatalf(
+			"invoice expiry exceeds quote_expiry: invoice_expiry_unix=%d quote_expiry=%d",
+			got,
+			want,
+		)
 	}
 
 	return payReq

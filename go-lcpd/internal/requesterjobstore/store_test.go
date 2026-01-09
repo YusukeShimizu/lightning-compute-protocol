@@ -305,8 +305,10 @@ func newTestTask() *lcpdv1.Task {
 	return &lcpdv1.Task{
 		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
 			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-				RequestJson: []byte(`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`),
-				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
+				RequestJson: []byte(
+					`{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}]}`,
+				),
+				Params: &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
 			},
 		},
 	}

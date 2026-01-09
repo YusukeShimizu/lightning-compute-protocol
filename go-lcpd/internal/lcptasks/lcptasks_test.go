@@ -155,7 +155,9 @@ func TestValidateTask_Errors(t *testing.T) {
 func TestValidateTask_OpenAIChatCompletionsV1_AllowsStreaming(t *testing.T) {
 	t.Parallel()
 
-	requestJSON := []byte(`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	requestJSON := []byte(
+		`{"model":"gpt-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+	)
 
 	task := &lcpdv1.Task{
 		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{

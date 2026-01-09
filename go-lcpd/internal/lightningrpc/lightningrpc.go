@@ -166,22 +166,34 @@ func (c *Client) DecodePaymentRequest(
 	if numMsat == 0 && numSats > 0 {
 		const msatPerSat = int64(1000)
 		if numSats > (maxInt64 / msatPerSat) {
-			return PaymentRequestInfo{}, fmt.Errorf("%w: invoice amount overflows msat", ErrInvalidRequest)
+			return PaymentRequestInfo{}, fmt.Errorf(
+				"%w: invoice amount overflows msat",
+				ErrInvalidRequest,
+			)
 		}
 		numMsat = numSats * msatPerSat
 	}
 	if numMsat < 0 {
-		return PaymentRequestInfo{}, fmt.Errorf("%w: invoice amount_msat is negative", ErrInvalidRequest)
+		return PaymentRequestInfo{}, fmt.Errorf(
+			"%w: invoice amount_msat is negative",
+			ErrInvalidRequest,
+		)
 	}
 
 	timestampUnix := resp.GetTimestamp()
 	if timestampUnix < 0 {
-		return PaymentRequestInfo{}, fmt.Errorf("%w: invoice timestamp is negative", ErrInvalidRequest)
+		return PaymentRequestInfo{}, fmt.Errorf(
+			"%w: invoice timestamp is negative",
+			ErrInvalidRequest,
+		)
 	}
 
 	expirySeconds := resp.GetExpiry()
 	if expirySeconds < 0 {
-		return PaymentRequestInfo{}, fmt.Errorf("%w: invoice expiry_seconds is negative", ErrInvalidRequest)
+		return PaymentRequestInfo{}, fmt.Errorf(
+			"%w: invoice expiry_seconds is negative",
+			ErrInvalidRequest,
+		)
 	}
 
 	var desc lcp.Hash32

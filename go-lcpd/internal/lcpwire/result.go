@@ -42,7 +42,10 @@ func EncodeResult(r Result) ([]byte, error) {
 			return nil, validateErr
 		}
 		msgBytes := []byte(*r.Message)
-		records = append(records, tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeMessage), &msgBytes))
+		records = append(
+			records,
+			tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeMessage), &msgBytes),
+		)
 	}
 
 	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeStatus), &status))
@@ -80,8 +83,14 @@ func EncodeResult(r Result) ([]byte, error) {
 	resultContentTypeBytes := []byte(r.OK.ResultContentType)
 	resultContentEncodingBytes := []byte(r.OK.ResultContentEncoding)
 
-	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeResultStreamID), &resultStreamID))
-	records = append(records, tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeResultHash), &resultHash))
+	records = append(
+		records,
+		tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeResultStreamID), &resultStreamID),
+	)
+	records = append(
+		records,
+		tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeResultHash), &resultHash),
+	)
 	records = append(records, makeTU64Record(resultTLVTypeResultLen, &resultLen))
 	records = append(
 		records,
@@ -89,7 +98,10 @@ func EncodeResult(r Result) ([]byte, error) {
 	)
 	records = append(
 		records,
-		tlv.MakePrimitiveRecord(tlv.Type(resultTLVTypeResultContentEncode), &resultContentEncodingBytes),
+		tlv.MakePrimitiveRecord(
+			tlv.Type(resultTLVTypeResultContentEncode),
+			&resultContentEncodingBytes,
+		),
 	)
 
 	return encodeTLVStream(records)

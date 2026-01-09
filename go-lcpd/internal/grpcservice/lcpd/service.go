@@ -14,7 +14,7 @@ import (
 	"github.com/bruwbird/lcp/go-lcpd/internal/envconfig"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcptasks"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lightningrpc"
+	"github.com/bruwbird/lcp/go-lcpd/internal/lightningnode"
 	"github.com/bruwbird/lcp/go-lcpd/internal/peerdirectory"
 	"github.com/bruwbird/lcp/go-lcpd/internal/protocolcompat"
 	"github.com/bruwbird/lcp/go-lcpd/internal/requesterjobstore"
@@ -44,8 +44,8 @@ type Params struct {
 	PeerDirectory *peerdirectory.Directory `optional:"true"`
 	LocalManifest *lcpwire.Manifest        `optional:"true"`
 
-	PeerMessenger PeerMessenger `optional:"true"`
-	LightningRPC  LightningRPC  `optional:"true"`
+	PeerMessenger lightningnode.PeerMessenger `optional:"true"`
+	Lightning     lightningnode.Requester     `optional:"true"`
 
 	JobStore *requesterjobstore.Store `optional:"true"`
 	Waiter   *requesterwait.Waiter    `optional:"true"`
@@ -60,8 +60,8 @@ type Service struct {
 	validator protovalidate.Validator
 
 	localManifest lcpwire.Manifest
-	messenger     PeerMessenger
-	lightning     LightningRPC
+	messenger     lightningnode.PeerMessenger
+	lightning     lightningnode.Requester
 	jobs          *requesterjobstore.Store
 	waiter        *requesterwait.Waiter
 }
@@ -111,7 +111,7 @@ func New(p Params) lcpdv1.LCPDServiceServer {
 		validator:     validator,
 		localManifest: localManifest,
 		messenger:     p.PeerMessenger,
-		lightning:     p.LightningRPC,
+		lightning:     p.Lightning,
 		jobs:          jobs,
 		waiter:        waiter,
 	}
@@ -167,7 +167,7 @@ func (s *Service) GetLocalInfo(
 		return nil, status.Error(codes.Unavailable, "lightning rpc not configured")
 	}
 
-	info, err := s.lightning.GetInfo(ctx)
+	info, err := s.lightning.GetNodeInfo(ctx)
 	if err != nil {
 		return nil, grpcStatusFromLightningError(ctx, err)
 	}
@@ -467,7 +467,10 @@ func (s *Service) sendInputStreamBegin(
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if uint64(len(beginPayload)) > uint64(remoteMaxPayload) {
-		return status.Error(codes.ResourceExhausted, "input stream_begin exceeds peer max_payload_bytes")
+		return status.Error(
+			codes.ResourceExhausted,
+			"input stream_begin exceeds peer max_payload_bytes",
+		)
 	}
 	if sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeStreamBegin, beginPayload); sendErr != nil {
 		return grpcStatusFromPeerSendError(ctx, sendErr)
@@ -539,7 +542,10 @@ func (s *Service) sendInputStreamEnd(
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if uint64(len(endPayload)) > uint64(remoteMaxPayload) {
-		return status.Error(codes.ResourceExhausted, "input stream_end exceeds peer max_payload_bytes")
+		return status.Error(
+			codes.ResourceExhausted,
+			"input stream_end exceeds peer max_payload_bytes",
+		)
 	}
 	if sendErr := s.messenger.SendCustomMessage(ctx, peerID, lcpwire.MessageTypeStreamEnd, endPayload); sendErr != nil {
 		return grpcStatusFromPeerSendError(ctx, sendErr)
@@ -838,7 +844,16 @@ func (s *Service) AcceptAndExecuteStream(
 			s.markJobState(peerID, jobID, requesterjobstore.StateDone)
 			failed = false
 
-			s.logResultReceived(peerID, jobID, summary, terms, payDuration, waitDuration, res, started)
+			s.logResultReceived(
+				peerID,
+				jobID,
+				summary,
+				terms,
+				payDuration,
+				waitDuration,
+				res,
+				started,
+			)
 
 			return nil
 		case <-ctx.Done():
@@ -1046,24 +1061,6 @@ func toProtoManifest(m lcpwire.Manifest) *lcpdv1.LCPManifest {
 	return out
 }
 
-type PeerMessenger interface {
-	SendCustomMessage(
-		ctx context.Context,
-		peerPubKey string,
-		msgType lcpwire.MessageType,
-		payload []byte,
-	) error
-}
-
-type LightningRPC interface {
-	GetInfo(ctx context.Context) (lightningrpc.Info, error)
-	DecodePaymentRequest(
-		ctx context.Context,
-		paymentRequest string,
-	) (lightningrpc.PaymentRequestInfo, error)
-	PayInvoice(ctx context.Context, paymentRequest string) (lcp.Hash32, error)
-}
-
 type ReadyPeer struct {
 	PeerID         string
 	RemoteManifest lcpwire.Manifest
@@ -1159,11 +1156,11 @@ func termsFromQuoteResponse(
 
 func verifyInvoiceBinding(
 	ctx context.Context,
-	ln LightningRPC,
+	ln lightningnode.Requester,
 	peerID string,
 	terms *lcpdv1.Terms,
 ) error {
-	info, err := ln.DecodePaymentRequest(ctx, terms.GetPaymentRequest())
+	info, err := ln.DecodeInvoice(ctx, terms.GetPaymentRequest())
 	if err != nil {
 		return grpcStatusFromLightningError(ctx, err)
 	}
@@ -1290,8 +1287,11 @@ func grpcStatusFromLightningError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, lightningrpc.ErrNotConfigured) {
-		return status.Error(codes.Unavailable, "lightning rpc not configured")
+	if errors.Is(err, lightningnode.ErrNotConfigured) {
+		return status.Error(codes.Unavailable, "lightning node not configured")
+	}
+	if errors.Is(err, lightningnode.ErrNotImplemented) {
+		return status.Error(codes.Unimplemented, err.Error())
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return status.Error(codes.DeadlineExceeded, "deadline exceeded contacting lightning node")
@@ -1299,10 +1299,10 @@ func grpcStatusFromLightningError(ctx context.Context, err error) error {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return status.Error(codes.Canceled, "request cancelled")
 	}
-	if errors.Is(err, lightningrpc.ErrPaymentFailed) {
+	if errors.Is(err, lightningnode.ErrPaymentFailed) {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
-	if errors.Is(err, lightningrpc.ErrInvalidRequest) {
+	if errors.Is(err, lightningnode.ErrInvalidRequest) {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return status.Error(codes.Unavailable, err.Error())

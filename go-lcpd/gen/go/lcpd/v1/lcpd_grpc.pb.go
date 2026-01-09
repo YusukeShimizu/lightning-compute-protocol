@@ -22,6 +22,7 @@ package lcpdv1
 
 import (
 	context "context"
+
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -60,7 +61,11 @@ type LCPDServiceClient interface {
 	//     Impact: No peer list is returned.
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: No peer list is returned.
-	ListLCPPeers(ctx context.Context, in *ListLCPPeersRequest, opts ...grpc.CallOption) (*ListLCPPeersResponse, error)
+	ListLCPPeers(
+		ctx context.Context,
+		in *ListLCPPeersRequest,
+		opts ...grpc.CallOption,
+	) (*ListLCPPeersResponse, error)
 	// GetLocalInfo gets the local node's LCP information and manifest.
 	//
 	// Errors:
@@ -69,7 +74,11 @@ type LCPDServiceClient interface {
 	//     Impact: No local info is returned.
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: No local info is returned.
-	GetLocalInfo(ctx context.Context, in *GetLocalInfoRequest, opts ...grpc.CallOption) (*GetLocalInfoResponse, error)
+	GetLocalInfo(
+		ctx context.Context,
+		in *GetLocalInfoRequest,
+		opts ...grpc.CallOption,
+	) (*GetLocalInfoResponse, error)
 	// RequestQuote sends an `lcp_quote_request` to a specific peer.
 	//
 	// On success, it returns the provider's `lcp_quote_response` as `Terms`,
@@ -92,7 +101,11 @@ type LCPDServiceClient interface {
 	//     `job_id` and a different invoice unless the implementation provides idempotency.
 	//   - UNAVAILABLE: Transient transport failure sending/receiving peer messages.
 	//     Impact: Quote outcome is unknown; safe retries depend on idempotency.
-	RequestQuote(ctx context.Context, in *RequestQuoteRequest, opts ...grpc.CallOption) (*RequestQuoteResponse, error)
+	RequestQuote(
+		ctx context.Context,
+		in *RequestQuoteRequest,
+		opts ...grpc.CallOption,
+	) (*RequestQuoteResponse, error)
 	// AcceptAndExecute pays the invoice associated with the quote and waits for
 	// the `lcp_result`.
 	//
@@ -117,7 +130,11 @@ type LCPDServiceClient interface {
 	//     avoid blindly retrying payment logic.
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: Outcome may be unknown if failure happened after payment settlement.
-	AcceptAndExecute(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (*AcceptAndExecuteResponse, error)
+	AcceptAndExecute(
+		ctx context.Context,
+		in *AcceptAndExecuteRequest,
+		opts ...grpc.CallOption,
+	) (*AcceptAndExecuteResponse, error)
 	// AcceptAndExecuteStream pays the invoice associated with the quote and streams
 	// the decoded result stream bytes as they arrive.
 	//
@@ -127,7 +144,11 @@ type LCPDServiceClient interface {
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
 	// responses may have already delivered partial bytes before an error is
 	// detected (for example, checksum validation failure at stream end).
-	AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error)
+	AcceptAndExecuteStream(
+		ctx context.Context,
+		in *AcceptAndExecuteStreamRequest,
+		opts ...grpc.CallOption,
+	) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error)
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -146,7 +167,11 @@ type LCPDServiceClient interface {
 	//     Impact: Unknown whether the provider received the cancel; retries are generally safe.
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: Unknown whether the provider received the cancel.
-	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
+	CancelJob(
+		ctx context.Context,
+		in *CancelJobRequest,
+		opts ...grpc.CallOption,
+	) (*CancelJobResponse, error)
 }
 
 type lCPDServiceClient struct {
@@ -157,7 +182,11 @@ func NewLCPDServiceClient(cc grpc.ClientConnInterface) LCPDServiceClient {
 	return &lCPDServiceClient{cc}
 }
 
-func (c *lCPDServiceClient) ListLCPPeers(ctx context.Context, in *ListLCPPeersRequest, opts ...grpc.CallOption) (*ListLCPPeersResponse, error) {
+func (c *lCPDServiceClient) ListLCPPeers(
+	ctx context.Context,
+	in *ListLCPPeersRequest,
+	opts ...grpc.CallOption,
+) (*ListLCPPeersResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListLCPPeersResponse)
 	err := c.cc.Invoke(ctx, LCPDService_ListLCPPeers_FullMethodName, in, out, cOpts...)
@@ -167,7 +196,11 @@ func (c *lCPDServiceClient) ListLCPPeers(ctx context.Context, in *ListLCPPeersRe
 	return out, nil
 }
 
-func (c *lCPDServiceClient) GetLocalInfo(ctx context.Context, in *GetLocalInfoRequest, opts ...grpc.CallOption) (*GetLocalInfoResponse, error) {
+func (c *lCPDServiceClient) GetLocalInfo(
+	ctx context.Context,
+	in *GetLocalInfoRequest,
+	opts ...grpc.CallOption,
+) (*GetLocalInfoResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetLocalInfoResponse)
 	err := c.cc.Invoke(ctx, LCPDService_GetLocalInfo_FullMethodName, in, out, cOpts...)
@@ -177,7 +210,11 @@ func (c *lCPDServiceClient) GetLocalInfo(ctx context.Context, in *GetLocalInfoRe
 	return out, nil
 }
 
-func (c *lCPDServiceClient) RequestQuote(ctx context.Context, in *RequestQuoteRequest, opts ...grpc.CallOption) (*RequestQuoteResponse, error) {
+func (c *lCPDServiceClient) RequestQuote(
+	ctx context.Context,
+	in *RequestQuoteRequest,
+	opts ...grpc.CallOption,
+) (*RequestQuoteResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RequestQuoteResponse)
 	err := c.cc.Invoke(ctx, LCPDService_RequestQuote_FullMethodName, in, out, cOpts...)
@@ -187,7 +224,11 @@ func (c *lCPDServiceClient) RequestQuote(ctx context.Context, in *RequestQuoteRe
 	return out, nil
 }
 
-func (c *lCPDServiceClient) AcceptAndExecute(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (*AcceptAndExecuteResponse, error) {
+func (c *lCPDServiceClient) AcceptAndExecute(
+	ctx context.Context,
+	in *AcceptAndExecuteRequest,
+	opts ...grpc.CallOption,
+) (*AcceptAndExecuteResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AcceptAndExecuteResponse)
 	err := c.cc.Invoke(ctx, LCPDService_AcceptAndExecute_FullMethodName, in, out, cOpts...)
@@ -197,13 +238,23 @@ func (c *lCPDServiceClient) AcceptAndExecute(ctx context.Context, in *AcceptAndE
 	return out, nil
 }
 
-func (c *lCPDServiceClient) AcceptAndExecuteStream(ctx context.Context, in *AcceptAndExecuteStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error) {
+func (c *lCPDServiceClient) AcceptAndExecuteStream(
+	ctx context.Context,
+	in *AcceptAndExecuteStreamRequest,
+	opts ...grpc.CallOption,
+) (grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &LCPDService_ServiceDesc.Streams[0], LCPDService_AcceptAndExecuteStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(
+		ctx,
+		&LCPDService_ServiceDesc.Streams[0],
+		LCPDService_AcceptAndExecuteStream_FullMethodName,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{ClientStream: stream}
+	x := &grpc.GenericClientStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{
+		ClientStream: stream,
+	}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -216,7 +267,11 @@ func (c *lCPDServiceClient) AcceptAndExecuteStream(ctx context.Context, in *Acce
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type LCPDService_AcceptAndExecuteStreamClient = grpc.ServerStreamingClient[AcceptAndExecuteStreamResponse]
 
-func (c *lCPDServiceClient) CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error) {
+func (c *lCPDServiceClient) CancelJob(
+	ctx context.Context,
+	in *CancelJobRequest,
+	opts ...grpc.CallOption,
+) (*CancelJobResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CancelJobResponse)
 	err := c.cc.Invoke(ctx, LCPDService_CancelJob_FullMethodName, in, out, cOpts...)
@@ -312,7 +367,10 @@ type LCPDServiceServer interface {
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
 	// responses may have already delivered partial bytes before an error is
 	// detected (for example, checksum validation failure at stream end).
-	AcceptAndExecuteStream(*AcceptAndExecuteStreamRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error
+	AcceptAndExecuteStream(
+		*AcceptAndExecuteStreamRequest,
+		grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse],
+	) error
 	// CancelJob sends an `lcp_cancel` message to the provider.
 	//
 	// Cancellation is best-effort: the provider may have already completed the job.
@@ -342,22 +400,45 @@ type LCPDServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedLCPDServiceServer struct{}
 
-func (UnimplementedLCPDServiceServer) ListLCPPeers(context.Context, *ListLCPPeersRequest) (*ListLCPPeersResponse, error) {
+func (UnimplementedLCPDServiceServer) ListLCPPeers(
+	context.Context,
+	*ListLCPPeersRequest,
+) (*ListLCPPeersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListLCPPeers not implemented")
 }
-func (UnimplementedLCPDServiceServer) GetLocalInfo(context.Context, *GetLocalInfoRequest) (*GetLocalInfoResponse, error) {
+
+func (UnimplementedLCPDServiceServer) GetLocalInfo(
+	context.Context,
+	*GetLocalInfoRequest,
+) (*GetLocalInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetLocalInfo not implemented")
 }
-func (UnimplementedLCPDServiceServer) RequestQuote(context.Context, *RequestQuoteRequest) (*RequestQuoteResponse, error) {
+
+func (UnimplementedLCPDServiceServer) RequestQuote(
+	context.Context,
+	*RequestQuoteRequest,
+) (*RequestQuoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RequestQuote not implemented")
 }
-func (UnimplementedLCPDServiceServer) AcceptAndExecute(context.Context, *AcceptAndExecuteRequest) (*AcceptAndExecuteResponse, error) {
+
+func (UnimplementedLCPDServiceServer) AcceptAndExecute(
+	context.Context,
+	*AcceptAndExecuteRequest,
+) (*AcceptAndExecuteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptAndExecute not implemented")
 }
-func (UnimplementedLCPDServiceServer) AcceptAndExecuteStream(*AcceptAndExecuteStreamRequest, grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]) error {
+
+func (UnimplementedLCPDServiceServer) AcceptAndExecuteStream(
+	*AcceptAndExecuteStreamRequest,
+	grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse],
+) error {
 	return status.Errorf(codes.Unimplemented, "method AcceptAndExecuteStream not implemented")
 }
-func (UnimplementedLCPDServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
+
+func (UnimplementedLCPDServiceServer) CancelJob(
+	context.Context,
+	*CancelJobRequest,
+) (*CancelJobResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelJob not implemented")
 }
 func (UnimplementedLCPDServiceServer) mustEmbedUnimplementedLCPDServiceServer() {}
@@ -381,7 +462,12 @@ func RegisterLCPDServiceServer(s grpc.ServiceRegistrar, srv LCPDServiceServer) {
 	s.RegisterService(&LCPDService_ServiceDesc, srv)
 }
 
-func _LCPDService_ListLCPPeers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _LCPDService_ListLCPPeers_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(ListLCPPeersRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -399,7 +485,12 @@ func _LCPDService_ListLCPPeers_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _LCPDService_GetLocalInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _LCPDService_GetLocalInfo_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(GetLocalInfoRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -417,7 +508,12 @@ func _LCPDService_GetLocalInfo_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _LCPDService_RequestQuote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _LCPDService_RequestQuote_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(RequestQuoteRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -435,7 +531,12 @@ func _LCPDService_RequestQuote_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _LCPDService_AcceptAndExecute_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _LCPDService_AcceptAndExecute_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(AcceptAndExecuteRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -458,13 +559,23 @@ func _LCPDService_AcceptAndExecuteStream_Handler(srv interface{}, stream grpc.Se
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(LCPDServiceServer).AcceptAndExecuteStream(m, &grpc.GenericServerStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{ServerStream: stream})
+	return srv.(LCPDServiceServer).AcceptAndExecuteStream(
+		m,
+		&grpc.GenericServerStream[AcceptAndExecuteStreamRequest, AcceptAndExecuteStreamResponse]{
+			ServerStream: stream,
+		},
+	)
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type LCPDService_AcceptAndExecuteStreamServer = grpc.ServerStreamingServer[AcceptAndExecuteStreamResponse]
 
-func _LCPDService_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _LCPDService_CancelJob_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(CancelJobRequest)
 	if err := dec(in); err != nil {
 		return nil, err

@@ -21,14 +21,15 @@
 package lcpdv1
 
 import (
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
+
 	_ "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate"
 	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
 )
 
 const (
@@ -150,7 +151,7 @@ type Task struct {
 	//
 	//	*Task_OpenaiChatCompletionsV1
 	//	*Task_OpenaiResponsesV1
-	Spec          isTask_Spec `protobuf_oneof:"spec"`
+	Spec          isTask_Spec `                   protobuf_oneof:"spec"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -235,9 +236,9 @@ func (*Task_OpenaiResponsesV1) isTask_Spec() {}
 type OpenAIChatCompletionsV1TaskSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Raw HTTP request body bytes for `POST /v1/chat/completions`.
-	RequestJson []byte `protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
+	RequestJson []byte `                   protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
 	// The configuration parameters for routing/validation.
-	Params        *OpenAIChatCompletionsV1Params `protobuf:"bytes,2,opt,name=params,proto3" json:"params,omitempty"`
+	Params        *OpenAIChatCompletionsV1Params `                   protobuf:"bytes,2,opt,name=params,proto3"                        json:"params,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -292,7 +293,7 @@ type OpenAIChatCompletionsV1Params struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "model" (TLV type 1).
 	// Identifier for the execution target (for example, an OpenAI model ID).
-	Model         string `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
+	Model         string `                   protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -341,9 +342,9 @@ func (x *OpenAIChatCompletionsV1Params) GetModel() string {
 type OpenAIResponsesV1TaskSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Raw HTTP request body bytes for `POST /v1/responses`.
-	RequestJson []byte `protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
+	RequestJson []byte `                   protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
 	// The configuration parameters for routing/validation.
-	Params        *OpenAIResponsesV1Params `protobuf:"bytes,2,opt,name=params,proto3" json:"params,omitempty"`
+	Params        *OpenAIResponsesV1Params `                   protobuf:"bytes,2,opt,name=params,proto3"                        json:"params,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -398,7 +399,7 @@ type OpenAIResponsesV1Params struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "model" (TLV type 1).
 	// Identifier for the execution target (for example, an OpenAI model ID).
-	Model         string `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
+	Model         string `                   protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -444,23 +445,23 @@ func (x *OpenAIResponsesV1Params) GetModel() string {
 type Terms struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
-	ProtocolVersion uint32 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	ProtocolVersion uint32 `                   protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// Job ID (32 bytes).
-	JobId []byte `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	JobId []byte `                   protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3"                      json:"job_id,omitempty"`
 	// Price in millisatoshis.
-	PriceMsat uint64 `protobuf:"varint,3,opt,name=price_msat,json=priceMsat,proto3" json:"price_msat,omitempty"`
+	PriceMsat uint64 `                   protobuf:"varint,3,opt,name=price_msat,json=priceMsat,proto3"             json:"price_msat,omitempty"`
 	// Quote expiry time.
 	//
 	// Wire mapping:
 	// LCP v0.1 encodes quote expiry as Unix epoch seconds. Implementations that
 	// compute or verify `terms_hash` MUST use `quote_expiry.seconds` only and
 	// MUST treat `quote_expiry.nanos` as 0.
-	QuoteExpiry *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=quote_expiry,json=quoteExpiry,proto3" json:"quote_expiry,omitempty"`
+	QuoteExpiry *timestamppb.Timestamp `                   protobuf:"bytes,4,opt,name=quote_expiry,json=quoteExpiry,proto3"          json:"quote_expiry,omitempty"`
 	// The SHA256 commitment over the canonical TLV stream of Terms.
 	// Must match the BOLT11 invoice's description_hash.
-	TermsHash []byte `protobuf:"bytes,5,opt,name=terms_hash,json=termsHash,proto3" json:"terms_hash,omitempty"`
+	TermsHash []byte `                   protobuf:"bytes,5,opt,name=terms_hash,json=termsHash,proto3"              json:"terms_hash,omitempty"`
 	// The BOLT11 invoice string provided by the peer.
-	PaymentRequest string `protobuf:"bytes,6,opt,name=payment_request,json=paymentRequest,proto3" json:"payment_request,omitempty"`
+	PaymentRequest string `                   protobuf:"bytes,6,opt,name=payment_request,json=paymentRequest,proto3"    json:"payment_request,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -541,17 +542,17 @@ func (x *Terms) GetPaymentRequest() string {
 type Result struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Completion status for the job.
-	Status Result_Status `protobuf:"varint,1,opt,name=status,proto3,enum=lcpd.v1.Result_Status" json:"status,omitempty"`
+	Status Result_Status `                   protobuf:"varint,1,opt,name=status,proto3,enum=lcpd.v1.Result_Status"    json:"status,omitempty"`
 	// If status=OK, the decoded result bytes reconstructed from the result stream.
 	// For "openai.chat_completions.v1", the client should interpret this as raw JSON bytes.
-	Result []byte `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
+	Result []byte `                   protobuf:"bytes,2,opt,name=result,proto3"                                json:"result,omitempty"`
 	// If status=OK, these fields reflect the validated result stream metadata.
-	ResultHash      []byte `protobuf:"bytes,3,opt,name=result_hash,json=resultHash,proto3" json:"result_hash,omitempty"`
-	ResultLen       uint64 `protobuf:"varint,4,opt,name=result_len,json=resultLen,proto3" json:"result_len,omitempty"`
-	ContentType     string `protobuf:"bytes,5,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
-	ContentEncoding string `protobuf:"bytes,6,opt,name=content_encoding,json=contentEncoding,proto3" json:"content_encoding,omitempty"`
+	ResultHash      []byte `                   protobuf:"bytes,3,opt,name=result_hash,json=resultHash,proto3"           json:"result_hash,omitempty"`
+	ResultLen       uint64 `                   protobuf:"varint,4,opt,name=result_len,json=resultLen,proto3"            json:"result_len,omitempty"`
+	ContentType     string `                   protobuf:"bytes,5,opt,name=content_type,json=contentType,proto3"         json:"content_type,omitempty"`
+	ContentEncoding string `                   protobuf:"bytes,6,opt,name=content_encoding,json=contentEncoding,proto3" json:"content_encoding,omitempty"`
 	// If status!=OK, optional human-readable message.
-	Message       string `protobuf:"bytes,7,opt,name=message,proto3" json:"message,omitempty"`
+	Message       string `                   protobuf:"bytes,7,opt,name=message,proto3"                               json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -639,11 +640,11 @@ func (x *Result) GetMessage() string {
 type LCPPeer struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Peer node identifier (Lightning pubkey, hex-encoded 33-byte compressed key).
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3"                 json:"peer_id,omitempty"`
 	// Peer network address, formatted as "host:port".
-	Address string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	Address string `                   protobuf:"bytes,2,opt,name=address,proto3"                             json:"address,omitempty"`
 	// Remote peer's last observed LCP manifest.
-	RemoteManifest *LCPManifest `protobuf:"bytes,3,opt,name=remote_manifest,json=remoteManifest,proto3" json:"remote_manifest,omitempty"`
+	RemoteManifest *LCPManifest `                   protobuf:"bytes,3,opt,name=remote_manifest,json=remoteManifest,proto3" json:"remote_manifest,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -703,18 +704,18 @@ func (x *LCPPeer) GetRemoteManifest() *LCPManifest {
 type LCPManifest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// LCP protocol version (v0.2 = 2; encoding: major*100 + minor).
-	ProtocolVersion uint32 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	ProtocolVersion uint32 `                   protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3"   json:"protocol_version,omitempty"`
 	// Maximum supported BOLT #1 custom message payload size in bytes.
-	MaxPayloadBytes uint32 `protobuf:"varint,11,opt,name=max_payload_bytes,json=maxPayloadBytes,proto3" json:"max_payload_bytes,omitempty"`
+	MaxPayloadBytes uint32 `                   protobuf:"varint,11,opt,name=max_payload_bytes,json=maxPayloadBytes,proto3" json:"max_payload_bytes,omitempty"`
 	// Maximum total decoded bytes supported for a single stream.
-	MaxStreamBytes uint64 `protobuf:"varint,14,opt,name=max_stream_bytes,json=maxStreamBytes,proto3" json:"max_stream_bytes,omitempty"`
+	MaxStreamBytes uint64 `                   protobuf:"varint,14,opt,name=max_stream_bytes,json=maxStreamBytes,proto3"   json:"max_stream_bytes,omitempty"`
 	// Maximum total decoded bytes supported across all streams in a job.
-	MaxJobBytes uint64 `protobuf:"varint,15,opt,name=max_job_bytes,json=maxJobBytes,proto3" json:"max_job_bytes,omitempty"`
+	MaxJobBytes uint64 `                   protobuf:"varint,15,opt,name=max_job_bytes,json=maxJobBytes,proto3"         json:"max_job_bytes,omitempty"`
 	// Optional maximum concurrent in-flight jobs supported per connection.
 	// 0 means "unspecified".
-	MaxInflightJobs uint32 `protobuf:"varint,16,opt,name=max_inflight_jobs,json=maxInflightJobs,proto3" json:"max_inflight_jobs,omitempty"`
+	MaxInflightJobs uint32 `                   protobuf:"varint,16,opt,name=max_inflight_jobs,json=maxInflightJobs,proto3" json:"max_inflight_jobs,omitempty"`
 	// Task templates supported by this peer.
-	SupportedTasks []*LCPTaskTemplate `protobuf:"bytes,12,rep,name=supported_tasks,json=supportedTasks,proto3" json:"supported_tasks,omitempty"`
+	SupportedTasks []*LCPTaskTemplate `                   protobuf:"bytes,12,rep,name=supported_tasks,json=supportedTasks,proto3"     json:"supported_tasks,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -795,14 +796,14 @@ func (x *LCPManifest) GetSupportedTasks() []*LCPTaskTemplate {
 type LCPTaskTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The kind of task supported.
-	Kind LCPTaskKind `protobuf:"varint,1,opt,name=kind,proto3,enum=lcpd.v1.LCPTaskKind" json:"kind,omitempty"`
+	Kind LCPTaskKind `                   protobuf:"varint,1,opt,name=kind,proto3,enum=lcpd.v1.LCPTaskKind" json:"kind,omitempty"`
 	// The parameter template/defaults supported for this kind.
 	//
 	// Types that are valid to be assigned to ParamsTemplate:
 	//
 	//	*LCPTaskTemplate_OpenaiChatCompletionsV1
 	//	*LCPTaskTemplate_OpenaiResponsesV1
-	ParamsTemplate isLCPTaskTemplate_ParamsTemplate `protobuf_oneof:"params_template"`
+	ParamsTemplate isLCPTaskTemplate_ParamsTemplate `                                                                                                           protobuf_oneof:"params_template"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -925,7 +926,7 @@ func (*ListLCPPeersRequest) Descriptor() ([]byte, []int) {
 // ListLCPPeersResponse is the response message for `LCPDService.ListLCPPeers`.
 type ListLCPPeersResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Peers         []*LCPPeer             `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
+	Peers         []*LCPPeer             `                   protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1008,9 +1009,9 @@ func (*GetLocalInfoRequest) Descriptor() ([]byte, []int) {
 type GetLocalInfoResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Local node identifier (Lightning pubkey, hex-encoded 33-byte compressed key).
-	NodeId string `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	NodeId string `                   protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	// Local node's LCP manifest.
-	Manifest      *LCPManifest `protobuf:"bytes,2,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	Manifest      *LCPManifest `                   protobuf:"bytes,2,opt,name=manifest,proto3"            json:"manifest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1063,9 +1064,9 @@ func (x *GetLocalInfoResponse) GetManifest() *LCPManifest {
 type RequestQuoteRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The target peer's Node ID (Pubkey).
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
 	// The strict task definition.
-	Task          *Task `protobuf:"bytes,2,opt,name=task,proto3" json:"task,omitempty"`
+	Task          *Task `                   protobuf:"bytes,2,opt,name=task,proto3"                json:"task,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1118,9 +1119,9 @@ func (x *RequestQuoteRequest) GetTask() *Task {
 type RequestQuoteResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The peer sending the quote.
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
 	// The agreed terms and invoice.
-	Terms         *Terms `protobuf:"bytes,2,opt,name=terms,proto3" json:"terms,omitempty"`
+	Terms         *Terms `                   protobuf:"bytes,2,opt,name=terms,proto3"               json:"terms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1173,11 +1174,11 @@ func (x *RequestQuoteResponse) GetTerms() *Terms {
 type AcceptAndExecuteRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The target peer's Node ID.
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3"          json:"peer_id,omitempty"`
 	// The job_id to execute (must match a previously received Quote).
-	JobId []byte `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	JobId []byte `                   protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3"            json:"job_id,omitempty"`
 	// Authorization to pay the invoice.
-	PayInvoice    bool `protobuf:"varint,3,opt,name=pay_invoice,json=payInvoice,proto3" json:"pay_invoice,omitempty"`
+	PayInvoice    bool `                   protobuf:"varint,3,opt,name=pay_invoice,json=payInvoice,proto3" json:"pay_invoice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1237,11 +1238,11 @@ func (x *AcceptAndExecuteRequest) GetPayInvoice() bool {
 type AcceptAndExecuteStreamRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The target peer's Node ID.
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3"          json:"peer_id,omitempty"`
 	// The job_id to execute (must match a previously received Quote).
-	JobId []byte `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	JobId []byte `                   protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3"            json:"job_id,omitempty"`
 	// Authorization to pay the invoice.
-	PayInvoice    bool `protobuf:"varint,3,opt,name=pay_invoice,json=payInvoice,proto3" json:"pay_invoice,omitempty"`
+	PayInvoice    bool `                   protobuf:"varint,3,opt,name=pay_invoice,json=payInvoice,proto3" json:"pay_invoice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1301,7 +1302,7 @@ func (x *AcceptAndExecuteStreamRequest) GetPayInvoice() bool {
 type AcceptAndExecuteResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The execution result.
-	Result        *Result `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	Result        *Result `                   protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1353,7 +1354,7 @@ type AcceptAndExecuteStreamResponse struct {
 	//	*AcceptAndExecuteStreamResponse_ResultChunk
 	//	*AcceptAndExecuteStreamResponse_ResultEnd
 	//	*AcceptAndExecuteStreamResponse_Result
-	Event         isAcceptAndExecuteStreamResponse_Event `protobuf_oneof:"event"`
+	Event         isAcceptAndExecuteStreamResponse_Event `                   protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1463,9 +1464,9 @@ func (*AcceptAndExecuteStreamResponse_Result) isAcceptAndExecuteStreamResponse_E
 type ResultStreamBegin struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Content type of the decoded result stream bytes.
-	ContentType string `protobuf:"bytes,1,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	ContentType string `                   protobuf:"bytes,1,opt,name=content_type,json=contentType,proto3"         json:"content_type,omitempty"`
 	// Content encoding of the decoded result stream bytes.
-	ContentEncoding string `protobuf:"bytes,2,opt,name=content_encoding,json=contentEncoding,proto3" json:"content_encoding,omitempty"`
+	ContentEncoding string `                   protobuf:"bytes,2,opt,name=content_encoding,json=contentEncoding,proto3" json:"content_encoding,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1517,7 +1518,7 @@ func (x *ResultStreamBegin) GetContentEncoding() string {
 // ResultStreamChunk carries a contiguous slice of decoded result stream bytes.
 type ResultStreamChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	Data          []byte                 `                   protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1563,8 +1564,8 @@ func (x *ResultStreamChunk) GetData() []byte {
 // validated stream metadata.
 type ResultStreamEnd struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ResultHash    []byte                 `protobuf:"bytes,1,opt,name=result_hash,json=resultHash,proto3" json:"result_hash,omitempty"`
-	ResultLen     uint64                 `protobuf:"varint,2,opt,name=result_len,json=resultLen,proto3" json:"result_len,omitempty"`
+	ResultHash    []byte                 `                   protobuf:"bytes,1,opt,name=result_hash,json=resultHash,proto3" json:"result_hash,omitempty"`
+	ResultLen     uint64                 `                   protobuf:"varint,2,opt,name=result_len,json=resultLen,proto3"  json:"result_len,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1617,11 +1618,11 @@ func (x *ResultStreamEnd) GetResultLen() uint64 {
 type CancelJobRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The target peer's Node ID.
-	PeerId string `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId string `                   protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
 	// The job_id to cancel.
-	JobId []byte `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	JobId []byte `                   protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3"   json:"job_id,omitempty"`
 	// Optional human-readable cancellation reason.
-	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason        string `                   protobuf:"bytes,3,opt,name=reason,proto3"              json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1680,7 +1681,7 @@ func (x *CancelJobRequest) GetReason() string {
 // CancelJobResponse is the response message for `LCPDService.CancelJob`.
 type CancelJobResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Success       bool                   `                   protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2026,7 +2027,12 @@ var (
 
 func file_lcpd_v1_lcpd_proto_rawDescGZIP() []byte {
 	file_lcpd_v1_lcpd_proto_rawDescOnce.Do(func() {
-		file_lcpd_v1_lcpd_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_lcpd_v1_lcpd_proto_rawDesc), len(file_lcpd_v1_lcpd_proto_rawDesc)))
+		file_lcpd_v1_lcpd_proto_rawDescData = protoimpl.X.CompressGZIP(
+			unsafe.Slice(
+				unsafe.StringData(file_lcpd_v1_lcpd_proto_rawDesc),
+				len(file_lcpd_v1_lcpd_proto_rawDesc),
+			),
+		)
 	})
 	return file_lcpd_v1_lcpd_proto_rawDescData
 }
@@ -2126,7 +2132,10 @@ func file_lcpd_v1_lcpd_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lcpd_v1_lcpd_proto_rawDesc), len(file_lcpd_v1_lcpd_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(
+				unsafe.StringData(file_lcpd_v1_lcpd_proto_rawDesc),
+				len(file_lcpd_v1_lcpd_proto_rawDesc),
+			),
 			NumEnums:      2,
 			NumMessages:   25,
 			NumExtensions: 0,

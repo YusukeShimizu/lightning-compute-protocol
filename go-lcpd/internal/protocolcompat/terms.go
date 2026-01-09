@@ -115,7 +115,11 @@ func encodeTermsTLVStream(
 	t53 := encodeTLV(termsTLVTypeInputContentType, []byte(inputContentType))
 	t54 := encodeTLV(termsTLVTypeInputContentEncoding, []byte(inputContentEncoding))
 
-	out := make([]byte, 0, len(t1)+len(t2)+len(t3)+len(t4)+len(t20)+len(t50)+len(t51)+len(t52)+len(t53)+len(t54))
+	out := make(
+		[]byte,
+		0,
+		len(t1)+len(t2)+len(t3)+len(t4)+len(t20)+len(t50)+len(t51)+len(t52)+len(t53)+len(t54),
+	)
 	out = append(out, t1...)
 	out = append(out, t2...)
 	out = append(out, t3...)
