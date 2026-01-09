@@ -22,10 +22,10 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 
 	jobID := newJobID(0x11)
 	msgID := newMsgID(0x22)
-	quote := lcpwire.QuoteResponse{
-		Envelope: lcpwire.JobEnvelope{
+	quote := lcpwire.Quote{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          123,
 		},
@@ -34,7 +34,7 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 		TermsHash:      newHash(0xaa),
 		PaymentRequest: "bolt11",
 	}
-	payload, err := lcpwire.EncodeQuoteResponse(quote)
+	payload, err := lcpwire.EncodeQuote(quote)
 	if err != nil {
 		t.Fatalf("encode quote response: %v", err)
 	}
@@ -51,16 +51,16 @@ func TestWaitQuoteResponse_DeliversQuote(t *testing.T) {
 
 	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
 		PeerPubKey: "peer-a",
-		MsgType:    uint16(lcpwire.MessageTypeQuoteResponse),
+		MsgType:    uint16(lcpwire.MessageTypeQuote),
 		Payload:    payload,
 	})
 
 	select {
 	case out := <-done:
-		if out.QuoteResponse == nil {
+		if out.Quote == nil {
 			t.Fatalf("expected QuoteResponse, got nil")
 		}
-		if diff := cmp.Diff(quote, *out.QuoteResponse); diff != "" {
+		if diff := cmp.Diff(quote, *out.Quote); diff != "" {
 			t.Fatalf("QuoteResponse mismatch (-want +got):\n%s", diff)
 		}
 	case <-ctx.Done():
@@ -79,13 +79,13 @@ func TestWaitQuoteResponse_DeliversError(t *testing.T) {
 	msgID := newMsgID(0x44)
 	message := "oops"
 	errMsg := lcpwire.Error{
-		Envelope: lcpwire.JobEnvelope{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          456,
 		},
-		Code:    lcpwire.ErrorCodeUnsupportedTask,
+		Code:    lcpwire.ErrorCodeUnsupportedMethod,
 		Message: &message,
 	}
 	payload, err := lcpwire.EncodeError(errMsg)
@@ -130,25 +130,25 @@ func TestWaitResult_ReceivesPendingFailedResult(t *testing.T) {
 	jobID := newJobID(0x55)
 	msgID := newMsgID(0x66)
 	msg := "failed"
-	result := lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
+	complete := lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          777,
 		},
-		Status:  lcpwire.ResultStatusFailed,
+		Status:  lcpwire.CompleteStatusFailed,
 		Message: &msg,
 	}
-	payload, err := lcpwire.EncodeResult(result)
+	payload, err := lcpwire.EncodeComplete(complete)
 	if err != nil {
-		t.Fatalf("encode result: %v", err)
+		t.Fatalf("encode complete: %v", err)
 	}
 
-	// Deliver result before waiting.
+	// Deliver complete before waiting.
 	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
 		PeerPubKey: "peer-c",
-		MsgType:    uint16(lcpwire.MessageTypeResult),
+		MsgType:    uint16(lcpwire.MessageTypeComplete),
 		Payload:    payload,
 	})
 
@@ -159,14 +159,14 @@ func TestWaitResult_ReceivesPendingFailedResult(t *testing.T) {
 	if waitErr != nil {
 		t.Fatalf("WaitResult: %v", waitErr)
 	}
-	if out.Result == nil {
-		t.Fatalf("expected result, got nil")
+	if out.Complete == nil {
+		t.Fatalf("expected complete, got nil")
 	}
-	if diff := cmp.Diff(result, *out.Result); diff != "" {
+	if diff := cmp.Diff(complete, *out.Complete); diff != "" {
 		t.Fatalf("Result mismatch (-want +got):\n%s", diff)
 	}
-	if len(out.ResultBytes) != 0 {
-		t.Fatalf("expected empty result_bytes for failed status, got %d bytes", len(out.ResultBytes))
+	if len(out.ResponseBytes) != 0 {
+		t.Fatalf("expected empty result_bytes for failed status, got %d bytes", len(out.ResponseBytes))
 	}
 }
 
@@ -188,24 +188,24 @@ func TestWaitResult_CancelThenRetry(t *testing.T) {
 
 	msgID := newMsgID(0x88)
 	msg := "cancelled"
-	result := lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
+	complete := lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          1234,
 		},
-		Status:  lcpwire.ResultStatusCancelled,
+		Status:  lcpwire.CompleteStatusCancelled,
 		Message: &msg,
 	}
-	payload, err := lcpwire.EncodeResult(result)
+	payload, err := lcpwire.EncodeComplete(complete)
 	if err != nil {
-		t.Fatalf("encode result: %v", err)
+		t.Fatalf("encode complete: %v", err)
 	}
 
 	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
 		PeerPubKey: "peer-d",
-		MsgType:    uint16(lcpwire.MessageTypeResult),
+		MsgType:    uint16(lcpwire.MessageTypeComplete),
 		Payload:    payload,
 	})
 
@@ -216,7 +216,7 @@ func TestWaitResult_CancelThenRetry(t *testing.T) {
 	if waitErr != nil {
 		t.Fatalf("WaitResult retry: %v", waitErr)
 	}
-	if diff := cmp.Diff(result, *out.Result); diff != "" {
+	if diff := cmp.Diff(complete, *out.Complete); diff != "" {
 		t.Fatalf("Result mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -227,10 +227,10 @@ func TestWaitQuoteResponse_IgnoresDifferentPeer(t *testing.T) {
 	waiter := requesterwait.New(nil, nil)
 	jobID := newJobID(0x99)
 	msgID := newMsgID(0xaa)
-	quote := lcpwire.QuoteResponse{
-		Envelope: lcpwire.JobEnvelope{
+	quote := lcpwire.Quote{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+			CallID:          jobID,
 			MsgID:           msgID,
 			Expiry:          42,
 		},
@@ -239,14 +239,14 @@ func TestWaitQuoteResponse_IgnoresDifferentPeer(t *testing.T) {
 		TermsHash:      newHash(0xbb),
 		PaymentRequest: "bolt",
 	}
-	payload, err := lcpwire.EncodeQuoteResponse(quote)
+	payload, err := lcpwire.EncodeQuote(quote)
 	if err != nil {
 		t.Fatalf("encode quote response: %v", err)
 	}
 
 	waiter.HandleInboundCustomMessage(context.Background(), lndpeermsg.InboundCustomMessage{
 		PeerPubKey: "peer-other",
-		MsgType:    uint16(lcpwire.MessageTypeQuoteResponse),
+		MsgType:    uint16(lcpwire.MessageTypeQuote),
 		Payload:    payload,
 	})
 

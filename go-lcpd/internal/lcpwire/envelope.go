@@ -8,67 +8,67 @@ import (
 	"github.com/lightningnetwork/lnd/tlv"
 )
 
-func decodeJobEnvelope(m map[uint64][]byte) (JobEnvelope, error) {
+func decodeCallEnvelope(m map[uint64][]byte) (CallEnvelope, error) {
 	pvBytes, err := requireTLV(m, tlvTypeProtocolVersion)
 	if err != nil {
-		return JobEnvelope{}, err
+		return CallEnvelope{}, err
 	}
 	pv, err := readU16(pvBytes)
 	if err != nil {
-		return JobEnvelope{}, fmt.Errorf("protocol_version: %w", err)
+		return CallEnvelope{}, fmt.Errorf("protocol_version: %w", err)
 	}
 
-	jobIDBytes, err := requireTLV(m, tlvTypeJobID)
+	callIDBytes, err := requireTLV(m, tlvTypeCallID)
 	if err != nil {
-		return JobEnvelope{}, err
+		return CallEnvelope{}, err
 	}
-	jobID32, err := readBytes32(jobIDBytes)
+	callID32, err := readBytes32(callIDBytes)
 	if err != nil {
-		return JobEnvelope{}, fmt.Errorf("job_id: %w", err)
+		return CallEnvelope{}, fmt.Errorf("call_id: %w", err)
 	}
-	jobID := lcp.JobID(jobID32)
+	callID := lcp.JobID(callID32)
 
 	msgIDBytes, err := requireTLV(m, tlvTypeMsgID)
 	if err != nil {
-		return JobEnvelope{}, err
+		return CallEnvelope{}, err
 	}
 	msgID32, err := readBytes32(msgIDBytes)
 	if err != nil {
-		return JobEnvelope{}, fmt.Errorf("msg_id: %w", err)
+		return CallEnvelope{}, fmt.Errorf("msg_id: %w", err)
 	}
 	var msgID MsgID
 	copy(msgID[:], msgID32[:])
 
 	expiryBytes, err := requireTLV(m, tlvTypeExpiry)
 	if err != nil {
-		return JobEnvelope{}, err
+		return CallEnvelope{}, err
 	}
 	expiry, err := readTU64(expiryBytes)
 	if err != nil {
-		return JobEnvelope{}, fmt.Errorf("expiry: %w", err)
+		return CallEnvelope{}, fmt.Errorf("expiry: %w", err)
 	}
 
-	return JobEnvelope{
+	return CallEnvelope{
 		ProtocolVersion: pv,
-		JobID:           jobID,
+		CallID:          callID,
 		MsgID:           msgID,
 		Expiry:          expiry,
 	}, nil
 }
 
-func encodeJobEnvelope(env JobEnvelope) ([]tlv.Record, error) {
+func encodeCallEnvelope(env CallEnvelope) ([]tlv.Record, error) {
 	if env.ProtocolVersion == 0 {
 		return nil, errors.New("protocol_version is required")
 	}
 
 	pv := env.ProtocolVersion
-	jobID := [32]byte(env.JobID)
+	callID := [32]byte(env.CallID)
 	msgID := [32]byte(env.MsgID)
 	expiry := env.Expiry
 
 	return []tlv.Record{
 		tlv.MakePrimitiveRecord(tlv.Type(tlvTypeProtocolVersion), &pv),
-		tlv.MakePrimitiveRecord(tlv.Type(tlvTypeJobID), &jobID),
+		tlv.MakePrimitiveRecord(tlv.Type(tlvTypeCallID), &callID),
 		tlv.MakePrimitiveRecord(tlv.Type(tlvTypeMsgID), &msgID),
 		makeTU64Record(tlvTypeExpiry, &expiry),
 	}, nil

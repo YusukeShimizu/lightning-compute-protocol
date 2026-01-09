@@ -17,30 +17,21 @@ func TestEncodeDecode_Manifest_RoundTrip(t *testing.T) {
 	var (
 		maxPayload uint32 = 16384
 		maxStream  uint64 = 4_194_304
-		maxJob     uint64 = 8_388_608
+		maxCall    uint64 = 8_388_608
 	)
 
-	openaiParams := lcpwire.OpenAIChatCompletionsV1Params{Model: "test-model"}
-	openaiParamsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(openaiParams)
-	if err != nil {
-		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
-	}
-
-	customParams := []byte{0x01, 0x02, 0x03}
-
 	want := lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		MaxPayloadBytes: maxPayload,
 		MaxStreamBytes:  maxStream,
-		MaxJobBytes:     maxJob,
-		SupportedTasks: []lcpwire.TaskTemplate{
+		MaxCallBytes:    maxCall,
+		SupportedMethods: []lcpwire.MethodDescriptor{
 			{
-				TaskKind:    "openai.chat_completions.v1",
-				ParamsBytes: &openaiParamsBytes,
+				Method:              "openai.chat_completions.v1",
+				RequestContentTypes: []string{"application/json; charset=utf-8"},
 			},
 			{
-				TaskKind:    "custom.task",
-				ParamsBytes: &customParams,
+				Method: "custom.method",
 			},
 		},
 	}
@@ -64,11 +55,11 @@ func TestEncodeDecode_QuoteRequest_OpenAIChatCompletionsV1_RoundTrip(t *testing.
 	t.Parallel()
 
 	var (
-		jobID lcp.JobID
-		msgID lcpwire.MsgID
+		callID lcp.JobID
+		msgID  lcpwire.MsgID
 	)
-	for i := range jobID {
-		jobID[i] = 0x11
+	for i := range callID {
+		callID[i] = 0x11
 	}
 	for i := range msgID {
 		msgID[i] = 0x22
@@ -84,44 +75,44 @@ func TestEncodeDecode_QuoteRequest_OpenAIChatCompletionsV1_RoundTrip(t *testing.
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 
-	want := lcpwire.QuoteRequest{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+	want := lcpwire.Call{
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          callID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
-		TaskKind:    "openai.chat_completions.v1",
+		Method:      "openai.chat_completions.v1",
 		ParamsBytes: &openaiParamsBytes,
 	}
 
-	encoded, err := lcpwire.EncodeQuoteRequest(want)
+	encoded, err := lcpwire.EncodeCall(want)
 	if err != nil {
-		t.Fatalf("EncodeQuoteRequest: %v", err)
+		t.Fatalf("EncodeCall: %v", err)
 	}
 
-	got, err := lcpwire.DecodeQuoteRequest(encoded)
+	got, err := lcpwire.DecodeCall(encoded)
 	if err != nil {
-		t.Fatalf("DecodeQuoteRequest: %v", err)
+		t.Fatalf("DecodeCall: %v", err)
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("quote_request mismatch (-want +got):\n%s", diff)
+		t.Fatalf("call mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestDecodeManifest_RejectsJobEnvelopeTLVs(t *testing.T) {
 	t.Parallel()
 
-	pv := lcpwire.ProtocolVersionV02
-	var jobID [32]byte
-	for i := range jobID {
-		jobID[i] = 0x11
+	pv := lcpwire.ProtocolVersionV03
+	var callID [32]byte
+	for i := range callID {
+		callID[i] = 0x11
 	}
 
 	stream := tlv.MustNewStream(
 		tlv.MakePrimitiveRecord(1, &pv),
-		tlv.MakePrimitiveRecord(2, &jobID),
+		tlv.MakePrimitiveRecord(2, &callID),
 	)
 
 	var b bytes.Buffer
@@ -157,7 +148,7 @@ func TestDecodeManifest_ErrStreamNotCanonical(t *testing.T) {
 	if err := tlv.WriteVarInt(&buf, 2, &scratch); err != nil {
 		t.Fatalf("write len 2: %v", err)
 	}
-	if _, err := buf.Write([]byte{0x00, byte(lcpwire.ProtocolVersionV02)}); err != nil {
+	if _, err := buf.Write([]byte{0x00, byte(lcpwire.ProtocolVersionV03)}); err != nil {
 		t.Fatalf("write protocol_version: %v", err)
 	}
 

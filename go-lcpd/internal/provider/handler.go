@@ -35,7 +35,7 @@ const (
 	defaultMaxEnvelopeExpiryWindowSeconds = uint64(600)
 
 	defaultMaxStreamBytes = uint64(4_194_304)
-	defaultMaxJobBytes    = uint64(8_388_608)
+	defaultMaxCallBytes   = uint64(8_388_608)
 
 	contentTypeTextPlain       = "text/plain; charset=utf-8"
 	contentTypeApplicationJSON = "application/json; charset=utf-8"
@@ -147,7 +147,7 @@ func (h *Handler) HandleInboundCustomMessage(
 	msg lndpeermsg.InboundCustomMessage,
 ) {
 	switch lcpwire.MessageType(msg.MsgType) {
-	case lcpwire.MessageTypeQuoteRequest:
+	case lcpwire.MessageTypeCall:
 		h.handleQuoteRequest(ctx, msg)
 	case lcpwire.MessageTypeStreamBegin:
 		h.handleStreamBegin(ctx, msg)
@@ -158,8 +158,8 @@ func (h *Handler) HandleInboundCustomMessage(
 	case lcpwire.MessageTypeCancel:
 		h.handleCancel(ctx, msg)
 	case lcpwire.MessageTypeManifest,
-		lcpwire.MessageTypeQuoteResponse,
-		lcpwire.MessageTypeResult,
+		lcpwire.MessageTypeQuote,
+		lcpwire.MessageTypeComplete,
 		lcpwire.MessageTypeError:
 		return
 	default:
@@ -168,7 +168,7 @@ func (h *Handler) HandleInboundCustomMessage(
 }
 
 func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.InboundCustomMessage) {
-	req, err := lcpwire.DecodeQuoteRequest(msg.Payload)
+	req, err := lcpwire.DecodeCall(msg.Payload)
 	if err != nil {
 		h.logger.Warnw(
 			"decode lcp_quote_request failed",
@@ -206,7 +206,7 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 		return
 	}
 
-	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: req.Envelope.JobID}
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: req.Envelope.CallID}
 
 	if h.jobs == nil {
 		h.logger.Warnw("drop lcp_quote_request: job store is not configured")
@@ -233,15 +233,15 @@ func (h *Handler) handleQuoteRequest(ctx context.Context, msg lndpeermsg.Inbound
 
 	reqCopy := req
 	h.jobs.Upsert(jobstore.Job{
-		PeerPubKey:    msg.PeerPubKey,
-		JobID:         req.Envelope.JobID,
-		State:         jobstore.StateAwaitingInput,
-		QuoteRequest:  &reqCopy,
-		InputStream:   nil,
-		QuoteExpiry:   0,
-		TermsHash:     nil,
-		PaymentHash:   nil,
-		QuoteResponse: nil,
+		PeerPubKey:  msg.PeerPubKey,
+		JobID:       req.Envelope.CallID,
+		State:       jobstore.StateAwaitingInput,
+		Call:        &reqCopy,
+		InputStream: nil,
+		QuoteExpiry: 0,
+		TermsHash:   nil,
+		PaymentHash: nil,
+		Quote:       nil,
 	})
 }
 
@@ -249,7 +249,7 @@ func (h *Handler) handleExistingQuoteRequest(
 	ctx context.Context,
 	peerPubKey string,
 	key jobstore.Key,
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	now uint64,
 	remoteMaxPayload uint32,
 	existing jobstore.Job,
@@ -261,7 +261,7 @@ func (h *Handler) handleExistingQuoteRequest(
 		return
 	}
 
-	if existing.QuoteRequest != nil && !quoteRequestEqual(*existing.QuoteRequest, req) {
+	if existing.Call != nil && !quoteRequestEqual(*existing.Call, req) {
 		h.sendError(
 			ctx,
 			peerPubKey,
@@ -275,29 +275,29 @@ func (h *Handler) handleExistingQuoteRequest(
 	// Update stored quote_request (first writer wins semantics are fine here;
 	// streams are validated independently).
 	existingReq := req
-	existing.QuoteRequest = &existingReq
+	existing.Call = &existingReq
 	if existing.State == "" {
 		existing.State = jobstore.StateAwaitingInput
 	}
 	h.jobs.Upsert(existing)
 
-	if existing.QuoteResponse == nil {
+	if existing.Quote == nil {
 		return
 	}
 
 	h.logger.Debugw(
-		"resend stored lcp_quote_response",
+		"resend stored lcp_quote",
 		"peer_pub_key", peerPubKey,
-		"job_id", req.Envelope.JobID.String(),
+		"job_id", req.Envelope.CallID.String(),
 	)
 
-	if !h.sendQuoteResponse(ctx, peerPubKey, *existing.QuoteResponse, remoteMaxPayload) {
+	if !h.sendQuoteResponse(ctx, peerPubKey, *existing.Quote, remoteMaxPayload) {
 		return
 	}
 	if existing.InputStream == nil || !existing.InputStream.Validated {
 		return
 	}
-	if existing.QuoteRequest == nil {
+	if existing.Call == nil {
 		return
 	}
 
@@ -305,9 +305,9 @@ func (h *Handler) handleExistingQuoteRequest(
 	h.startJobRunner(
 		ctx,
 		key,
-		*existing.QuoteRequest,
+		*existing.Call,
 		*existing.InputStream,
-		*existing.QuoteResponse,
+		*existing.Quote,
 		invoice,
 		remoteMaxPayload,
 	)
@@ -325,7 +325,7 @@ func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundC
 	}
 
 	// Provider only accepts the input stream.
-	if begin.Kind != lcpwire.StreamKindInput {
+	if begin.Kind != lcpwire.StreamKindRequest {
 		return
 	}
 
@@ -366,15 +366,15 @@ func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundC
 		return
 	}
 
-	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: begin.Envelope.JobID}
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: begin.Envelope.CallID}
 	job, ok := h.jobs.Get(key)
-	if !ok || job.QuoteRequest == nil {
+	if !ok || job.Call == nil {
 		h.sendError(
 			ctx,
 			msg.PeerPubKey,
 			begin.Envelope,
 			lcpwire.ErrorCodeInvalidState,
-			"no quote_request for job",
+			"no call for job",
 		)
 		return
 	}
@@ -390,7 +390,7 @@ func (h *Handler) handleStreamBegin(ctx context.Context, msg lndpeermsg.InboundC
 		return
 	}
 
-	expectedContentType := inputContentTypeForTaskKind(job.QuoteRequest.TaskKind)
+	expectedContentType := inputContentTypeForTaskKind(job.Call.Method)
 	if expectedContentType != "" && begin.ContentType != expectedContentType {
 		h.sendError(
 			ctx,
@@ -439,9 +439,9 @@ func (h *Handler) handleStreamChunk(ctx context.Context, msg lndpeermsg.InboundC
 		return
 	}
 
-	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: chunk.Envelope.JobID}
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: chunk.Envelope.CallID}
 	job, ok := h.jobs.Get(key)
-	if !ok || job.InputStream == nil || job.QuoteRequest == nil {
+	if !ok || job.InputStream == nil || job.Call == nil {
 		return
 	}
 	if job.State != jobstore.StateAwaitingInput || job.InputStream.Validated {
@@ -468,7 +468,7 @@ func (h *Handler) handleStreamChunk(ctx context.Context, msg lndpeermsg.InboundC
 
 	nextLen := uint64(len(job.InputStream.Buf)) + uint64(len(chunk.Data))
 	if nextLen > job.InputStream.TotalLen || nextLen > defaultMaxStreamBytes ||
-		nextLen > defaultMaxJobBytes {
+		nextLen > defaultMaxCallBytes {
 		h.sendError(
 			ctx,
 			msg.PeerPubKey,
@@ -512,9 +512,9 @@ func (h *Handler) handleStreamEnd(ctx context.Context, msg lndpeermsg.InboundCus
 		return
 	}
 
-	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: end.Envelope.JobID}
+	key := jobstore.Key{PeerPubKey: msg.PeerPubKey, JobID: end.Envelope.CallID}
 	job, ok := h.jobs.Get(key)
-	if !ok || job.InputStream == nil || job.QuoteRequest == nil {
+	if !ok || job.InputStream == nil || job.Call == nil {
 		h.sendError(
 			ctx,
 			msg.PeerPubKey,
@@ -588,14 +588,14 @@ func (h *Handler) handleValidatedInputStreamEnd(
 	job jobstore.Job,
 	stream jobstore.InputStreamState,
 	now uint64,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 ) {
-	if job.QuoteResponse != nil {
+	if job.Quote != nil {
 		h.jobs.Upsert(job)
 		return
 	}
 
-	if vErr := validateInputStream(*job.QuoteRequest, stream); vErr != nil {
+	if vErr := validateInputStream(*job.Call, stream); vErr != nil {
 		h.sendError(ctx, peerPubKey, env, vErr.Code, vErr.Message)
 		return
 	}
@@ -603,19 +603,19 @@ func (h *Handler) handleValidatedInputStreamEnd(
 	quoteTTL := h.quoteTTLSeconds()
 	quoteExpiry := now + quoteTTL
 
-	price, err := h.quotePrice(*job.QuoteRequest, stream.Buf)
+	price, err := h.quotePrice(*job.Call, stream.Buf)
 	if err != nil {
 		h.sendError(ctx, peerPubKey, env, quoteErrorCode(err), err.Error())
 		return
 	}
 
-	termsHash, err := h.computeTermsHash(*job.QuoteRequest, stream, quoteExpiry, price.PriceMsat)
+	termsHash, err := h.computeTermsHash(*job.Call, stream, quoteExpiry, price.PriceMsat)
 	if err != nil {
 		h.sendError(
 			ctx,
 			peerPubKey,
 			env,
-			lcpwire.ErrorCodeUnsupportedTask,
+			lcpwire.ErrorCodeUnsupportedMethod,
 			"failed to compute terms_hash",
 		)
 		return
@@ -632,7 +632,7 @@ func (h *Handler) handleValidatedInputStreamEnd(
 		ctx,
 		peerPubKey,
 		key,
-		*job.QuoteRequest,
+		*job.Call,
 		stream,
 		quoteExpiry,
 		quoteTTL,
@@ -643,14 +643,14 @@ func (h *Handler) handleValidatedInputStreamEnd(
 }
 
 func (h *Handler) computeTermsHash(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	input jobstore.InputStreamState,
 	quoteExpiry uint64,
 	priceMsat uint64,
 ) (lcp.Hash32, error) {
 	terms := lcp.Terms{
 		ProtocolVersion: req.Envelope.ProtocolVersion,
-		JobID:           req.Envelope.JobID,
+		JobID:           req.Envelope.CallID,
 		PriceMsat:       priceMsat,
 		QuoteExpiry:     quoteExpiry,
 	}
@@ -661,11 +661,11 @@ func (h *Handler) computeTermsHash(
 	}
 
 	return protocolcompat.ComputeTermsHash(terms, protocolcompat.TermsCommit{
-		TaskKind:             req.TaskKind,
-		Input:                input.Buf,
-		InputContentType:     input.ContentType,
-		InputContentEncoding: input.ContentEncoding,
-		Params:               paramsBytes,
+		Method:                 req.Method,
+		Request:                input.Buf,
+		RequestContentType:     input.ContentType,
+		RequestContentEncoding: input.ContentEncoding,
+		Params:                 paramsBytes,
 	})
 }
 
@@ -673,7 +673,7 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 	ctx context.Context,
 	peerPubKey string,
 	key jobstore.Key,
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	input jobstore.InputStreamState,
 	quoteExpiry uint64,
 	quoteTTL uint64,
@@ -706,7 +706,7 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 		h.logger.Warnw(
 			"create invoice failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", req.Envelope.JobID.String(),
+			"job_id", req.Envelope.CallID.String(),
 			"err", err,
 		)
 		h.sendError(
@@ -746,13 +746,13 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 		PeerPubKey:      key.PeerPubKey,
 		JobID:           key.JobID,
 		State:           jobstore.StateWaitingPayment,
-		QuoteRequest:    &reqCopy,
+		Call:            &reqCopy,
 		InputStream:     &inputCopy,
 		QuoteExpiry:     quoteExpiry,
 		TermsHash:       &termsCopy,
 		PaymentHash:     &paymentHash,
 		InvoiceAddIndex: &addIndex,
-		QuoteResponse:   &quoteRespCopy,
+		Quote:           &quoteRespCopy,
 	})
 
 	h.startJobRunner(ctx, key, reqCopy, inputCopy, quoteResp, invoice, remoteMaxPayload)
@@ -761,10 +761,10 @@ func (h *Handler) createInvoiceAndStartQuoteJob(
 func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 ) bool {
 	if !h.cfg.Enabled {
-		h.sendError(ctx, peerPubKey, env, lcpwire.ErrorCodeUnsupportedTask, "provider disabled")
+		h.sendError(ctx, peerPubKey, env, lcpwire.ErrorCodeUnsupportedMethod, "provider disabled")
 		return true
 	}
 
@@ -773,7 +773,7 @@ func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
 			ctx,
 			peerPubKey,
 			env,
-			lcpwire.ErrorCodeUnsupportedTask,
+			lcpwire.ErrorCodeUnsupportedMethod,
 			"compute backend disabled",
 		)
 		return true
@@ -785,9 +785,9 @@ func (h *Handler) rejectQuoteRequestIfProviderUnavailable(
 func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 	ctx context.Context,
 	peerPubKey string,
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 ) bool {
-	switch req.TaskKind {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1, taskKindOpenAIResponsesV1:
 	default:
 		return false
@@ -796,12 +796,12 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 		return false
 	}
 	if req.ParamsBytes == nil {
-		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedParams, "params are required")
+		h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedMethod, "params are required")
 		return true
 	}
 
 	var model string
-	switch req.TaskKind {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1:
 		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
 		if err != nil {
@@ -809,7 +809,7 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 				ctx,
 				peerPubKey,
 				req.Envelope,
-				lcpwire.ErrorCodeUnsupportedParams,
+				lcpwire.ErrorCodeUnsupportedMethod,
 				"openai.chat_completions.v1 params must be a valid TLV stream",
 			)
 			return true
@@ -822,7 +822,7 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 				ctx,
 				peerPubKey,
 				req.Envelope,
-				lcpwire.ErrorCodeUnsupportedParams,
+				lcpwire.ErrorCodeUnsupportedMethod,
 				"openai.responses.v1 params must be a valid TLV stream",
 			)
 			return true
@@ -841,7 +841,7 @@ func (h *Handler) rejectQuoteRequestIfUnsupportedModel(
 	}
 	slices.Sort(supported)
 	msg = fmt.Sprintf("%s (supported: %s)", msg, strings.Join(supported, ", "))
-	h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedTask, msg)
+	h.sendError(ctx, peerPubKey, req.Envelope, lcpwire.ErrorCodeUnsupportedMethod, msg)
 	return true
 }
 
@@ -866,7 +866,7 @@ func (h *Handler) handleCancel(_ context.Context, msg lndpeermsg.InboundCustomMe
 
 	key := jobstore.Key{
 		PeerPubKey: msg.PeerPubKey,
-		JobID:      cancelMsg.Envelope.JobID,
+		JobID:      cancelMsg.Envelope.CallID,
 	}
 
 	if !h.checkReplay(msg.PeerPubKey, cancelMsg.Envelope, now, "lcp_cancel") {
@@ -877,7 +877,7 @@ func (h *Handler) handleCancel(_ context.Context, msg lndpeermsg.InboundCustomMe
 		h.logger.Infow(
 			"job canceled by requester",
 			"peer_pub_key", msg.PeerPubKey,
-			"job_id", cancelMsg.Envelope.JobID.String(),
+			"job_id", cancelMsg.Envelope.CallID.String(),
 		)
 	}
 	h.updateState(key, jobstore.StateCanceled)
@@ -885,7 +885,7 @@ func (h *Handler) handleCancel(_ context.Context, msg lndpeermsg.InboundCustomMe
 
 func (h *Handler) dropIfExpired(
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	now uint64,
 	logMessage string,
 ) bool {
@@ -914,20 +914,20 @@ func (h *Handler) remoteManifestFor(peerPubKey string) *lcpwire.Manifest {
 }
 
 func (h *Handler) newQuoteResponse(
-	reqEnvelope lcpwire.JobEnvelope,
+	reqEnvelope lcpwire.CallEnvelope,
 	quoteExpiry uint64,
 	priceMsat uint64,
 	termsHash lcp.Hash32,
 	paymentRequest string,
-) lcpwire.QuoteResponse {
-	respEnvelope := lcpwire.JobEnvelope{
+) lcpwire.Quote {
+	respEnvelope := lcpwire.CallEnvelope{
 		ProtocolVersion: reqEnvelope.ProtocolVersion,
-		JobID:           reqEnvelope.JobID,
+		CallID:          reqEnvelope.CallID,
 		MsgID:           h.mustNewMsgID(),
 		Expiry:          quoteExpiry,
 	}
 
-	return lcpwire.QuoteResponse{
+	return lcpwire.Quote{
 		Envelope:       respEnvelope,
 		PriceMsat:      priceMsat,
 		QuoteExpiry:    quoteExpiry,
@@ -938,7 +938,7 @@ func (h *Handler) newQuoteResponse(
 
 func invoiceFromJob(job jobstore.Job) InvoiceResult {
 	invoice := InvoiceResult{
-		PaymentRequest: job.QuoteResponse.PaymentRequest,
+		PaymentRequest: job.Quote.PaymentRequest,
 	}
 	if job.PaymentHash != nil {
 		invoice.PaymentHash = *job.PaymentHash
@@ -960,7 +960,7 @@ func (h *Handler) nowUnix() (uint64, bool) {
 
 func (h *Handler) checkReplay(
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	now uint64,
 	msgName string,
 ) bool {
@@ -984,7 +984,7 @@ func (h *Handler) checkReplay(
 	result := h.replay.CheckAndRemember(
 		replaystore.Key{
 			PeerPubKey: peerPubKey,
-			JobID:      env.JobID,
+			JobID:      env.CallID,
 			MsgID:      env.MsgID,
 		},
 		effectiveExpiry,
@@ -1015,15 +1015,15 @@ func (h *Handler) checkReplay(
 func (h *Handler) sendQuoteResponse(
 	ctx context.Context,
 	peerPubKey string,
-	resp lcpwire.QuoteResponse,
+	resp lcpwire.Quote,
 	remoteMaxPayload uint32,
 ) bool {
-	payload, err := lcpwire.EncodeQuoteResponse(resp)
+	payload, err := lcpwire.EncodeQuote(resp)
 	if err != nil {
 		h.logger.Warnw(
-			"encode lcp_quote_response failed",
+			"encode lcp_quote failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", resp.Envelope.JobID.String(),
+			"job_id", resp.Envelope.CallID.String(),
 			"err", err,
 		)
 		return false
@@ -1035,16 +1035,16 @@ func (h *Handler) sendQuoteResponse(
 			peerPubKey,
 			resp.Envelope,
 			lcpwire.ErrorCodePayloadTooLarge,
-			"quote_response exceeds remote max_payload_bytes",
+			"quote exceeds remote max_payload_bytes",
 		)
 		return false
 	}
 
-	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeQuoteResponse, payload); sendErr != nil {
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeQuote, payload); sendErr != nil {
 		h.logger.Warnw(
-			"send lcp_quote_response failed",
+			"send lcp_quote failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", resp.Envelope.JobID.String(),
+			"job_id", resp.Envelope.CallID.String(),
 			"err", sendErr,
 		)
 		return false
@@ -1055,9 +1055,9 @@ func (h *Handler) sendQuoteResponse(
 func (h *Handler) startJobRunner(
 	_ context.Context,
 	key jobstore.Key,
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	input jobstore.InputStreamState,
-	quoteResp lcpwire.QuoteResponse,
+	quoteResp lcpwire.Quote,
 	invoice InvoiceResult,
 	remoteMaxPayload uint32,
 ) {
@@ -1112,21 +1112,21 @@ func (h *Handler) startJobRunner(
 func (h *Handler) runJob(
 	ctx context.Context,
 	key jobstore.Key,
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	input jobstore.InputStreamState,
-	quoteResp lcpwire.QuoteResponse,
+	quoteResp lcpwire.Quote,
 	invoice InvoiceResult,
 	remoteMaxPayload uint32,
 ) {
 	defer h.forgetJob(key)
 
-	jobID := quoteResp.Envelope.JobID.String()
+	jobID := quoteResp.Envelope.CallID.String()
 	model := modelFromRequest(req)
 	inputBytes := len(input.Buf)
 	meta := jobLogMeta{
 		peerPubKey: key.PeerPubKey,
 		jobID:      jobID,
-		taskKind:   req.TaskKind,
+		taskKind:   req.Method,
 		model:      model,
 		inputBytes: inputBytes,
 		priceMsat:  quoteResp.PriceMsat,
@@ -1212,7 +1212,7 @@ func (h *Handler) runJob(
 				ctx,
 				key.PeerPubKey,
 				quoteResp.Envelope,
-				req.TaskKind,
+				req.Method,
 				inputLen,
 				result.Output,
 				remoteMaxPayload,
@@ -1281,7 +1281,7 @@ func (h *Handler) runJob(
 		ctx,
 		key.PeerPubKey,
 		quoteResp.Envelope,
-		req.TaskKind,
+		req.Method,
 		wantStreaming,
 		inputLen,
 		result.OutputBytes,
@@ -1298,7 +1298,7 @@ func (h *Handler) runJob(
 func (h *Handler) sendResult(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	taskKind string,
 	streaming bool,
 	inputLen uint64,
@@ -1311,7 +1311,7 @@ func (h *Handler) sendResult(
 
 	remoteManifest, remoteMaxPayload, ok := h.resolveRemoteManifestAndMaxPayload(
 		peerPubKey,
-		env.JobID,
+		env.CallID,
 		remoteMaxPayload,
 	)
 	if !ok {
@@ -1319,13 +1319,13 @@ func (h *Handler) sendResult(
 	}
 
 	totalLen := uint64(len(output))
-	if totalLen > remoteManifest.MaxStreamBytes || inputLen+totalLen > remoteManifest.MaxJobBytes {
+	if totalLen > remoteManifest.MaxStreamBytes || inputLen+totalLen > remoteManifest.MaxCallBytes {
 		msg := "result exceeds remote stream limits"
 		return h.sendTerminalResultStatus(
 			ctx,
 			peerPubKey,
 			env,
-			lcpwire.ResultStatusFailed,
+			lcpwire.CompleteStatusFailed,
 			&msg,
 			remoteMaxPayload,
 		)
@@ -1377,7 +1377,7 @@ func (h *Handler) sendResult(
 func (h *Handler) sendResultStreaming(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	taskKind string,
 	inputLen uint64,
 	output io.Reader,
@@ -1389,7 +1389,7 @@ func (h *Handler) sendResultStreaming(
 
 	remoteManifest, remoteMaxPayload, ok := h.resolveRemoteManifestAndMaxPayload(
 		peerPubKey,
-		env.JobID,
+		env.CallID,
 		remoteMaxPayload,
 	)
 	if !ok {
@@ -1400,9 +1400,9 @@ func (h *Handler) sendResultStreaming(
 	if maxStreamBytes == 0 {
 		maxStreamBytes = defaultMaxStreamBytes
 	}
-	maxJobBytes := remoteManifest.MaxJobBytes
+	maxJobBytes := remoteManifest.MaxCallBytes
 	if maxJobBytes == 0 {
-		maxJobBytes = defaultMaxJobBytes
+		maxJobBytes = defaultMaxCallBytes
 	}
 
 	streamID, ok := h.newStreamID()
@@ -1493,7 +1493,7 @@ func (h *Handler) sendResultStreaming(
 				ctx,
 				peerPubKey,
 				env,
-				lcpwire.ResultStatusFailed,
+				lcpwire.CompleteStatusFailed,
 				&msg,
 				remoteMaxPayload,
 			)
@@ -1597,7 +1597,7 @@ func (h *Handler) newStreamID() (lcp.Hash32, bool) {
 func (h *Handler) sendResultStream(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	output []byte,
@@ -1639,7 +1639,7 @@ func (h *Handler) sendResultStream(
 func (h *Handler) sendResultStreamBegin(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	totalLen uint64,
@@ -1649,14 +1649,14 @@ func (h *Handler) sendResultStreamBegin(
 	remoteMaxPayload uint32,
 ) bool {
 	begin := lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           h.mustNewMsgID(),
 			Expiry:          expiry,
 		},
 		StreamID:        streamID,
-		Kind:            lcpwire.StreamKindResult,
+		Kind:            lcpwire.StreamKindResponse,
 		TotalLen:        &totalLen,
 		SHA256:          &resultHash,
 		ContentType:     contentType,
@@ -1694,7 +1694,7 @@ func (h *Handler) sendResultStreamBegin(
 func (h *Handler) sendResultStreamBeginUnknown(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	contentType string,
@@ -1702,14 +1702,14 @@ func (h *Handler) sendResultStreamBeginUnknown(
 	remoteMaxPayload uint32,
 ) bool {
 	begin := lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           h.mustNewMsgID(),
 			Expiry:          expiry,
 		},
 		StreamID:        streamID,
-		Kind:            lcpwire.StreamKindResult,
+		Kind:            lcpwire.StreamKindResponse,
 		ContentType:     contentType,
 		ContentEncoding: contentEncoding,
 	}
@@ -1745,7 +1745,7 @@ func (h *Handler) sendResultStreamBeginUnknown(
 func (h *Handler) sendResultStreamChunks(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	output []byte,
@@ -1789,7 +1789,7 @@ func (h *Handler) sendResultStreamChunks(
 }
 
 func encodeFittingResultStreamChunk(
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	seq uint32,
@@ -1803,9 +1803,9 @@ func encodeFittingResultStreamChunk(
 
 	for {
 		chunk := lcpwire.StreamChunk{
-			Envelope: lcpwire.JobEnvelope{
+			Envelope: lcpwire.CallEnvelope{
 				ProtocolVersion: env.ProtocolVersion,
-				JobID:           env.JobID,
+				CallID:          env.CallID,
 				Expiry:          expiry,
 			},
 			StreamID: streamID,
@@ -1831,7 +1831,7 @@ func encodeFittingResultStreamChunk(
 func (h *Handler) sendResultStreamEnd(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	totalLen uint64,
@@ -1839,9 +1839,9 @@ func (h *Handler) sendResultStreamEnd(
 	remoteMaxPayload uint32,
 ) bool {
 	end := lcpwire.StreamEnd{
-		Envelope: lcpwire.JobEnvelope{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           h.mustNewMsgID(),
 			Expiry:          expiry,
 		},
@@ -1881,7 +1881,7 @@ func (h *Handler) sendResultStreamEnd(
 func (h *Handler) sendTerminalOKResult(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	expiry uint64,
 	streamID lcp.Hash32,
 	totalLen uint64,
@@ -1890,44 +1890,44 @@ func (h *Handler) sendTerminalOKResult(
 	resultContentEncoding string,
 	remoteMaxPayload uint32,
 ) bool {
-	terminal := lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
+	terminal := lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           h.mustNewMsgID(),
 			Expiry:          expiry,
 		},
-		Status: lcpwire.ResultStatusOK,
-		OK: &lcpwire.ResultOK{
-			ResultStreamID:        streamID,
-			ResultHash:            resultHash,
-			ResultLen:             totalLen,
-			ResultContentType:     resultContentType,
-			ResultContentEncoding: resultContentEncoding,
+		Status: lcpwire.CompleteStatusOK,
+		OK: &lcpwire.CompleteOK{
+			ResponseStreamID:        streamID,
+			ResponseHash:            resultHash,
+			ResponseLen:             totalLen,
+			ResponseContentType:     resultContentType,
+			ResponseContentEncoding: resultContentEncoding,
 		},
 	}
-	terminalPayload, err := lcpwire.EncodeResult(terminal)
+	terminalPayload, err := lcpwire.EncodeComplete(terminal)
 	if err != nil {
 		h.logger.Warnw(
-			"encode lcp_result failed",
+			"encode lcp_complete failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", env.JobID.String(),
+			"job_id", env.CallID.String(),
 			"err", err,
 		)
 		return false
 	}
 	if uint64(len(terminalPayload)) > uint64(remoteMaxPayload) {
 		h.logger.Warnw(
-			"lcp_result exceeds remote max_payload_bytes",
+			"lcp_complete exceeds remote max_payload_bytes",
 			"peer_pub_key", peerPubKey,
 			"payload_len", len(terminalPayload),
 			"max_payload_bytes", remoteMaxPayload,
 		)
 		return false
 	}
-	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeResult, terminalPayload); sendErr != nil {
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeComplete, terminalPayload); sendErr != nil {
 		h.logger.Warnw(
-			"send lcp_result failed",
+			"send lcp_complete failed",
 			"peer_pub_key", peerPubKey,
 			"err", sendErr,
 		)
@@ -1939,8 +1939,8 @@ func (h *Handler) sendTerminalOKResult(
 func (h *Handler) sendTerminalResultStatus(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
-	status lcpwire.ResultStatus,
+	env lcpwire.CallEnvelope,
+	status lcpwire.CompleteStatus,
 	message *string,
 	remoteMaxPayload uint32,
 ) bool {
@@ -1948,10 +1948,10 @@ func (h *Handler) sendTerminalResultStatus(
 		return false
 	}
 
-	res := lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
+	res := lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           h.mustNewMsgID(),
 			Expiry:          h.resultExpiry(),
 		},
@@ -1959,10 +1959,10 @@ func (h *Handler) sendTerminalResultStatus(
 		Message: message,
 	}
 
-	payload, err := lcpwire.EncodeResult(res)
+	payload, err := lcpwire.EncodeComplete(res)
 	if err != nil {
 		h.logger.Warnw(
-			"encode lcp_result failed",
+			"encode lcp_complete failed",
 			"peer_pub_key", peerPubKey,
 			"err", err,
 		)
@@ -1970,7 +1970,7 @@ func (h *Handler) sendTerminalResultStatus(
 	}
 	if remoteMaxPayload != 0 && uint64(len(payload)) > uint64(remoteMaxPayload) {
 		h.logger.Warnw(
-			"lcp_result exceeds remote max_payload_bytes",
+			"lcp_complete exceeds remote max_payload_bytes",
 			"peer_pub_key", peerPubKey,
 			"payload_len", len(payload),
 			"max_payload_bytes", remoteMaxPayload,
@@ -1978,11 +1978,11 @@ func (h *Handler) sendTerminalResultStatus(
 		return false
 	}
 
-	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeResult, payload); sendErr != nil {
+	if sendErr := h.messenger.SendCustomMessage(ctx, peerPubKey, lcpwire.MessageTypeComplete, payload); sendErr != nil {
 		h.logger.Warnw(
-			"send lcp_result failed",
+			"send lcp_complete failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", env.JobID.String(),
+			"job_id", env.CallID.String(),
 			"err", sendErr,
 		)
 		return false
@@ -1994,7 +1994,7 @@ func (h *Handler) sendTerminalResultStatus(
 func (h *Handler) sendError(
 	ctx context.Context,
 	peerPubKey string,
-	env lcpwire.JobEnvelope,
+	env lcpwire.CallEnvelope,
 	code lcpwire.ErrorCode,
 	message string,
 ) {
@@ -2007,9 +2007,9 @@ func (h *Handler) sendError(
 	}
 
 	errPayload, err := lcpwire.EncodeError(lcpwire.Error{
-		Envelope: lcpwire.JobEnvelope{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: env.ProtocolVersion,
-			JobID:           env.JobID,
+			CallID:          env.CallID,
 			MsgID:           msgID,
 			Expiry:          expiry,
 		},
@@ -2020,7 +2020,7 @@ func (h *Handler) sendError(
 		h.logger.Warnw(
 			"encode lcp_error failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", env.JobID.String(),
+			"job_id", env.CallID.String(),
 			"code", code,
 			"err", err,
 		)
@@ -2030,7 +2030,7 @@ func (h *Handler) sendError(
 		h.logger.Warnw(
 			"send lcp_error failed",
 			"peer_pub_key", peerPubKey,
-			"job_id", env.JobID.String(),
+			"job_id", env.CallID.String(),
 			"code", code,
 			"err", sendErr,
 		)
@@ -2110,8 +2110,8 @@ func remoteMaxPayloadBytes(manifest *lcpwire.Manifest) uint32 {
 	return manifest.MaxPayloadBytes
 }
 
-func quoteRequestEqual(a lcpwire.QuoteRequest, b lcpwire.QuoteRequest) bool {
-	if a.TaskKind != b.TaskKind {
+func quoteRequestEqual(a lcpwire.Call, b lcpwire.Call) bool {
+	if a.Method != b.Method {
 		return false
 	}
 
@@ -2187,7 +2187,7 @@ func validateInputStreamBegin(begin lcpwire.StreamBegin) (uint64, lcp.Hash32, *V
 	}
 
 	totalLen := *begin.TotalLen
-	if totalLen > defaultMaxStreamBytes || totalLen > defaultMaxJobBytes {
+	if totalLen > defaultMaxStreamBytes || totalLen > defaultMaxCallBytes {
 		return 0, lcp.Hash32{}, &ValidationError{
 			Code:    lcpwire.ErrorCodePayloadTooLarge,
 			Message: "input stream exceeds local limits",
@@ -2199,14 +2199,14 @@ func validateInputStreamBegin(begin lcpwire.StreamBegin) (uint64, lcp.Hash32, *V
 
 //nolint:gocognit // Validation intentionally mirrors wire rules and error codes.
 func validateInputStream(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	input jobstore.InputStreamState,
 ) *ValidationError {
-	switch req.TaskKind {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1:
 		if req.ParamsBytes == nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 params are required",
 			}
 		}
@@ -2214,7 +2214,7 @@ func validateInputStream(
 		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 params must be a valid TLV stream",
 			}
 		}
@@ -2222,25 +2222,25 @@ func validateInputStream(
 		parsed, err := parseOpenAIChatCompletionsRequest(input.Buf)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.chat_completions.v1 input must be valid json",
 			}
 		}
 		if parsed.Model == "" {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "request_json.model is required",
 			}
 		}
 		if len(parsed.Messages) == 0 {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "request_json.messages is required",
 			}
 		}
 		if parsed.Model != params.Model {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "params.model must match request_json.model",
 			}
 		}
@@ -2249,7 +2249,7 @@ func validateInputStream(
 	case taskKindOpenAIResponsesV1:
 		if req.ParamsBytes == nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 params are required",
 			}
 		}
@@ -2257,7 +2257,7 @@ func validateInputStream(
 		params, err := lcpwire.DecodeOpenAIResponsesV1Params(*req.ParamsBytes)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 params must be a valid TLV stream",
 			}
 		}
@@ -2265,25 +2265,25 @@ func validateInputStream(
 		parsed, err := parseOpenAIResponsesRequest(input.Buf)
 		if err != nil {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "openai.responses.v1 input must be valid json",
 			}
 		}
 		if parsed.Model == "" {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "request_json.model is required",
 			}
 		}
 		if len(bytes.TrimSpace(parsed.Input)) == 0 || bytes.Equal(bytes.TrimSpace(parsed.Input), []byte("null")) {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "request_json.input is required",
 			}
 		}
 		if parsed.Model != params.Model {
 			return &ValidationError{
-				Code:    lcpwire.ErrorCodeUnsupportedParams,
+				Code:    lcpwire.ErrorCodeUnsupportedMethod,
 				Message: "params.model must match request_json.model",
 			}
 		}
@@ -2322,12 +2322,12 @@ func resultContentTypeForTaskKind(taskKind string, streaming bool) string {
 	}
 }
 
-func modelFromRequest(req lcpwire.QuoteRequest) string {
+func modelFromRequest(req lcpwire.Call) string {
 	if req.ParamsBytes == nil {
 		return ""
 	}
 
-	switch req.TaskKind {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1:
 		params, err := lcpwire.DecodeOpenAIChatCompletionsV1Params(*req.ParamsBytes)
 		if err != nil {
@@ -2348,9 +2348,9 @@ func modelFromRequest(req lcpwire.QuoteRequest) string {
 func computeErrorCode(err error) lcpwire.ErrorCode {
 	switch {
 	case errors.Is(err, computebackend.ErrUnsupportedTaskKind):
-		return lcpwire.ErrorCodeUnsupportedTask
+		return lcpwire.ErrorCodeUnsupportedMethod
 	case errors.Is(err, computebackend.ErrInvalidTask):
-		return lcpwire.ErrorCodeUnsupportedParams
+		return lcpwire.ErrorCodeUnsupportedMethod
 	case errors.Is(err, computebackend.ErrUnauthenticated):
 		return lcpwire.ErrorCodePaymentInvalid
 	case errors.Is(err, computebackend.ErrBackendUnavailable):
@@ -2363,7 +2363,7 @@ func computeErrorCode(err error) lcpwire.ErrorCode {
 func quoteErrorCode(err error) lcpwire.ErrorCode {
 	switch {
 	case errors.Is(err, llm.ErrUnknownModel):
-		return lcpwire.ErrorCodeUnsupportedTask
+		return lcpwire.ErrorCodeUnsupportedMethod
 	case errors.Is(err, llm.ErrPriceOverflow):
 		return lcpwire.ErrorCodeRateLimited
 	default:
@@ -2490,10 +2490,10 @@ func (h *Handler) maxOutputTokensForModel(model string) (uint32, error) {
 }
 
 func (h *Handler) planTask(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	inputBytes []byte,
 ) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
-	switch req.TaskKind {
+	switch req.Method {
 	case taskKindOpenAIChatCompletionsV1:
 		return h.planOpenAIChatCompletionsV1Task(req, inputBytes)
 	case taskKindOpenAIResponsesV1:
@@ -2502,13 +2502,13 @@ func (h *Handler) planTask(
 		return computebackend.Task{}, llm.ExecutionPolicy{}, "", false, fmt.Errorf(
 			"%w: %q",
 			computebackend.ErrUnsupportedTaskKind,
-			req.TaskKind,
+			req.Method,
 		)
 	}
 }
 
 func (h *Handler) planOpenAIChatCompletionsV1Task(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	inputBytes []byte,
 ) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
 	if req.ParamsBytes == nil {
@@ -2583,7 +2583,7 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 	streaming := parsed.Stream != nil && *parsed.Stream
 
 	task := computebackend.Task{
-		TaskKind:   req.TaskKind,
+		TaskKind:   req.Method,
 		Model:      params.Model,
 		InputBytes: append([]byte(nil), inputBytes...),
 	}
@@ -2592,7 +2592,7 @@ func (h *Handler) planOpenAIChatCompletionsV1Task(
 }
 
 func (h *Handler) planOpenAIResponsesV1Task(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	inputBytes []byte,
 ) (computebackend.Task, llm.ExecutionPolicy, string, bool, error) {
 	if req.ParamsBytes == nil {
@@ -2650,7 +2650,7 @@ func (h *Handler) planOpenAIResponsesV1Task(
 	streaming := parsed.Stream != nil && *parsed.Stream
 
 	task := computebackend.Task{
-		TaskKind:   req.TaskKind,
+		TaskKind:   req.Method,
 		Model:      params.Model,
 		InputBytes: append([]byte(nil), inputBytes...),
 	}
@@ -2673,7 +2673,7 @@ func (h *Handler) priceTable() llm.PriceTable {
 }
 
 func (h *Handler) quotePrice(
-	req lcpwire.QuoteRequest,
+	req lcpwire.Call,
 	inputBytes []byte,
 ) (llm.PriceBreakdown, error) {
 	planned, policy, model, _, err := h.planTask(req, inputBytes)

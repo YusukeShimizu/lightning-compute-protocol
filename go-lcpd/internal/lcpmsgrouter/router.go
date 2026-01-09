@@ -5,17 +5,17 @@ import "github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 type RouteAction string
 
 const (
-	RouteActionDispatchManifest      RouteAction = "dispatch_manifest"
-	RouteActionDispatchQuoteRequest  RouteAction = "dispatch_quote_request"
-	RouteActionDispatchQuoteResponse RouteAction = "dispatch_quote_response"
-	RouteActionDispatchStreamBegin   RouteAction = "dispatch_stream_begin"
-	RouteActionDispatchStreamChunk   RouteAction = "dispatch_stream_chunk"
-	RouteActionDispatchStreamEnd     RouteAction = "dispatch_stream_end"
-	RouteActionDispatchResult        RouteAction = "dispatch_result"
-	RouteActionDispatchCancel        RouteAction = "dispatch_cancel"
-	RouteActionDispatchError         RouteAction = "dispatch_error"
-	RouteActionIgnore                RouteAction = "ignore"
-	RouteActionDisconnect            RouteAction = "disconnect"
+	RouteActionDispatchManifest    RouteAction = "dispatch_manifest"
+	RouteActionDispatchCall        RouteAction = "dispatch_call"
+	RouteActionDispatchQuote       RouteAction = "dispatch_quote"
+	RouteActionDispatchStreamBegin RouteAction = "dispatch_stream_begin"
+	RouteActionDispatchStreamChunk RouteAction = "dispatch_stream_chunk"
+	RouteActionDispatchStreamEnd   RouteAction = "dispatch_stream_end"
+	RouteActionDispatchComplete    RouteAction = "dispatch_complete"
+	RouteActionDispatchCancel      RouteAction = "dispatch_cancel"
+	RouteActionDispatchError       RouteAction = "dispatch_error"
+	RouteActionIgnore              RouteAction = "ignore"
+	RouteActionDisconnect          RouteAction = "disconnect"
 )
 
 type RouteDecision struct {
@@ -46,15 +46,15 @@ func (router) Route(msg CustomMessage) RouteDecision {
 			Action: RouteActionDispatchManifest,
 			Reason: "lcp_manifest",
 		}
-	case lcpwire.MessageTypeQuoteRequest:
+	case lcpwire.MessageTypeCall:
 		return RouteDecision{
-			Action: RouteActionDispatchQuoteRequest,
-			Reason: "lcp_quote_request",
+			Action: RouteActionDispatchCall,
+			Reason: "lcp_call",
 		}
-	case lcpwire.MessageTypeQuoteResponse:
+	case lcpwire.MessageTypeQuote:
 		return RouteDecision{
-			Action: RouteActionDispatchQuoteResponse,
-			Reason: "lcp_quote_response",
+			Action: RouteActionDispatchQuote,
+			Reason: "lcp_quote",
 		}
 	case lcpwire.MessageTypeStreamBegin:
 		return RouteDecision{
@@ -71,10 +71,10 @@ func (router) Route(msg CustomMessage) RouteDecision {
 			Action: RouteActionDispatchStreamEnd,
 			Reason: "lcp_stream_end",
 		}
-	case lcpwire.MessageTypeResult:
+	case lcpwire.MessageTypeComplete:
 		return RouteDecision{
-			Action: RouteActionDispatchResult,
-			Reason: "lcp_result",
+			Action: RouteActionDispatchComplete,
+			Reason: "lcp_complete",
 		}
 	case lcpwire.MessageTypeCancel:
 		return RouteDecision{

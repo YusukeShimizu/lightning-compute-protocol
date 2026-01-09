@@ -26,9 +26,9 @@ const (
 
 var (
 	ErrPeerIDRequired      = errors.New("peer_id is required")
-	ErrTaskRequired        = errors.New("task is required")
-	ErrTermsRequired       = errors.New("terms are required")
-	ErrInvalidJobID        = errors.New("job_id must be 32 bytes")
+	ErrCallRequired        = errors.New("call is required")
+	ErrQuoteRequired       = errors.New("quote is required")
+	ErrInvalidCallID       = errors.New("call_id must be 32 bytes")
 	ErrQuoteExpiryRequired = errors.New("quote_expiry is required")
 	ErrInvalidState        = errors.New("invalid state")
 	ErrNotFound            = errors.New("job not found")
@@ -43,8 +43,8 @@ type key struct {
 type jobEntry struct {
 	peerID      string
 	jobID       lcp.JobID
-	task        *lcpdv1.Task
-	terms       *lcpdv1.Terms
+	call        *lcpdv1.CallSpec
+	quote       *lcpdv1.Quote
 	state       State
 	quoteExpiry time.Time
 	createdAt   time.Time
@@ -54,8 +54,8 @@ type jobEntry struct {
 type Job struct {
 	PeerID    string
 	JobID     lcp.JobID
-	Task      *lcpdv1.Task
-	Terms     *lcpdv1.Terms
+	Call      *lcpdv1.CallSpec
+	Quote     *lcpdv1.Quote
 	State     State
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -103,40 +103,40 @@ func (s *Store) SetClock(now func() time.Time) {
 	s.clock = now
 }
 
-// PutQuote stores a quoted job. Existing entries for the same peer+job_id are replaced.
-func (s *Store) PutQuote(peerID string, task *lcpdv1.Task, terms *lcpdv1.Terms) error {
+// PutQuote stores a quoted call. Existing entries for the same peer+call_id are replaced.
+func (s *Store) PutQuote(peerID string, call *lcpdv1.CallSpec, quote *lcpdv1.Quote) error {
 	if peerID == "" {
 		return ErrPeerIDRequired
 	}
-	if task == nil {
-		return ErrTaskRequired
+	if call == nil {
+		return ErrCallRequired
 	}
-	if terms == nil {
-		return ErrTermsRequired
+	if quote == nil {
+		return ErrQuoteRequired
 	}
 
-	jobID, err := toJobID(terms.GetJobId())
+	jobID, err := toJobID(quote.GetCallId())
 	if err != nil {
 		return err
 	}
 
-	quoteExpiry := terms.GetQuoteExpiry()
+	quoteExpiry := quote.GetQuoteExpiry()
 	if quoteExpiry == nil {
 		return ErrQuoteExpiryRequired
 	}
 
 	now := s.now()
 
-	taskClone := proto.Clone(task)
-	taskCopy, ok := taskClone.(*lcpdv1.Task)
+	callClone := proto.Clone(call)
+	callCopy, ok := callClone.(*lcpdv1.CallSpec)
 	if !ok {
-		return fmt.Errorf("clone task: unexpected type %T", taskClone)
+		return fmt.Errorf("clone call: unexpected type %T", callClone)
 	}
 
-	termsClone := proto.Clone(terms)
-	termsCopy, ok := termsClone.(*lcpdv1.Terms)
+	quoteClone := proto.Clone(quote)
+	quoteCopy, ok := quoteClone.(*lcpdv1.Quote)
 	if !ok {
-		return fmt.Errorf("clone terms: unexpected type %T", termsClone)
+		return fmt.Errorf("clone quote: unexpected type %T", quoteClone)
 	}
 
 	k := key{peerID: peerID, jobID: jobID}
@@ -157,8 +157,8 @@ func (s *Store) PutQuote(peerID string, task *lcpdv1.Task, terms *lcpdv1.Terms) 
 	entry := jobEntry{
 		peerID:      peerID,
 		jobID:       jobID,
-		task:        taskCopy,
-		terms:       termsCopy,
+		call:        callCopy,
+		quote:       quoteCopy,
 		state:       StateQuoted,
 		quoteExpiry: quoteExpiry.AsTime(),
 		createdAt:   createdAt,
@@ -170,9 +170,9 @@ func (s *Store) PutQuote(peerID string, task *lcpdv1.Task, terms *lcpdv1.Terms) 
 	return nil
 }
 
-// GetTerms returns a copy of the stored terms for the job. If the quote_expiry
+// GetQuote returns a copy of the stored quote for the call. If the quote_expiry
 // has passed, the job is marked expired and ErrExpired is returned.
-func (s *Store) GetTerms(peerID string, jobID lcp.JobID) (*lcpdv1.Terms, error) {
+func (s *Store) GetQuote(peerID string, jobID lcp.JobID) (*lcpdv1.Quote, error) {
 	k := key{peerID: peerID, jobID: jobID}
 
 	s.mu.Lock()
@@ -194,12 +194,12 @@ func (s *Store) GetTerms(peerID string, jobID lcp.JobID) (*lcpdv1.Terms, error) 
 		return nil, ErrExpired
 	}
 
-	termsClone := proto.Clone(entry.terms)
-	termsCopy, ok := termsClone.(*lcpdv1.Terms)
+	quoteClone := proto.Clone(entry.quote)
+	quoteCopy, ok := quoteClone.(*lcpdv1.Quote)
 	if !ok {
-		return nil, fmt.Errorf("clone terms: unexpected type %T", termsClone)
+		return nil, fmt.Errorf("clone quote: unexpected type %T", quoteClone)
 	}
-	return termsCopy, nil
+	return quoteCopy, nil
 }
 
 // MarkState sets the job state. Returns ErrNotFound if the job does not exist.
@@ -329,7 +329,7 @@ func (s *Store) evictOldestLocked(preferExpired bool) bool {
 
 func toJobID(b []byte) (lcp.JobID, error) {
 	if len(b) != lcp.Hash32Len {
-		return lcp.JobID{}, ErrInvalidJobID
+		return lcp.JobID{}, ErrInvalidCallID
 	}
 	var id lcp.JobID
 	copy(id[:], b)
@@ -352,23 +352,23 @@ func isValidState(state State) bool {
 }
 
 func cloneJob(entry jobEntry) Job {
-	var taskCopy *lcpdv1.Task
-	if entry.task != nil {
-		if cloned, ok := proto.Clone(entry.task).(*lcpdv1.Task); ok {
-			taskCopy = cloned
+	var callCopy *lcpdv1.CallSpec
+	if entry.call != nil {
+		if cloned, ok := proto.Clone(entry.call).(*lcpdv1.CallSpec); ok {
+			callCopy = cloned
 		}
 	}
-	var termsCopy *lcpdv1.Terms
-	if entry.terms != nil {
-		if cloned, ok := proto.Clone(entry.terms).(*lcpdv1.Terms); ok {
-			termsCopy = cloned
+	var quoteCopy *lcpdv1.Quote
+	if entry.quote != nil {
+		if cloned, ok := proto.Clone(entry.quote).(*lcpdv1.Quote); ok {
+			quoteCopy = cloned
 		}
 	}
 	return Job{
 		PeerID:    entry.peerID,
 		JobID:     entry.jobID,
-		Task:      taskCopy,
-		Terms:     termsCopy,
+		Call:      callCopy,
+		Quote:     quoteCopy,
 		State:     entry.state,
 		CreatedAt: entry.createdAt,
 		UpdatedAt: entry.updatedAt,

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
-	"github.com/bruwbird/lcp/go-lcpd/internal/lcptasks"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lightningrpc"
 	"github.com/bruwbird/lcp/go-lcpd/internal/lndpeermsg"
@@ -33,6 +32,11 @@ type fakeClock struct {
 }
 
 func (f fakeClock) Now() time.Time { return f.now }
+
+const (
+	requestContentTypeJSON  = "application/json; charset=utf-8"
+	contentEncodingIdentity = "identity"
+)
 
 type fakeLightning struct {
 	mu           sync.Mutex
@@ -162,10 +166,10 @@ func TestGetLocalInfo_ReturnsManifestAndNodeID(t *testing.T) {
 
 	maxPayload := uint32(1234)
 	localManifest := &lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		MaxPayloadBytes: maxPayload,
 		MaxStreamBytes:  1024,
-		MaxJobBytes:     2048,
+		MaxCallBytes:    2048,
 	}
 
 	svc := mustNewService(t, Params{
@@ -195,10 +199,10 @@ func TestRequestQuote_SuccessStoresQuote(t *testing.T) {
 	peers.MarkCustomMsgEnabled(peerID, true)
 	peers.MarkManifestSent(peerID)
 	remoteManifest := lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		MaxPayloadBytes: 65535,
 		MaxStreamBytes:  4_194_304,
-		MaxJobBytes:     8_388_608,
+		MaxCallBytes:    8_388_608,
 	}
 	peers.MarkLCPReady(peerID, remoteManifest)
 
@@ -234,14 +238,14 @@ func TestRequestQuote_SuccessStoresQuote(t *testing.T) {
 
 	resp, err := svc.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   openaiChatTask("hello", "model-2"),
+		Call:   openaiChatCall(t, "hello", "model-2"),
 	})
 	if err != nil {
 		t.Fatalf("RequestQuote: %v", err)
 	}
 
 	assertRequestQuoteResponse(t, resp, peerID, wantPriceMsat, wantPaymentRequest)
-	assertTermsStored(t, jobs, peerID, resp.GetTerms(), wantPaymentRequest)
+	assertQuoteStored(t, jobs, peerID, resp.GetQuote(), wantPaymentRequest)
 	assertSentQuoteRequestAndInputStream(t, messenger.messages(), inputBytes)
 }
 
@@ -254,10 +258,10 @@ func TestRequestQuote_RespectsRemoteMaxPayloadBytes(t *testing.T) {
 	peers.MarkCustomMsgEnabled(peerID, true)
 	peers.MarkManifestSent(peerID)
 	peers.MarkLCPReady(peerID, lcpwire.Manifest{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		MaxPayloadBytes: 1,
 		MaxStreamBytes:  1024,
-		MaxJobBytes:     2048,
+		MaxCallBytes:    2048,
 	})
 
 	messenger := &fakeMessenger{}
@@ -271,7 +275,7 @@ func TestRequestQuote_RespectsRemoteMaxPayloadBytes(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   openaiChatTask("hi", "model-1"),
+		Call:   openaiChatCall(t, "hi", "model-1"),
 	})
 	assertStatusCode(t, err, codes.ResourceExhausted)
 	if got := len(messenger.messages()); got != 0 {
@@ -291,7 +295,7 @@ func TestRequestQuote_PeerNotFound(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: "02" + strings.Repeat("c", 64),
-		Task:   openaiChatTask("hello", "model-1"),
+		Call:   openaiChatCall(t, "hello", "model-1"),
 	})
 	assertStatusCode(t, err, codes.NotFound)
 }
@@ -313,7 +317,7 @@ func TestRequestQuote_PeerNotReady(t *testing.T) {
 
 	_, err := svc.RequestQuote(context.Background(), &lcpdv1.RequestQuoteRequest{
 		PeerId: peerID,
-		Task:   openaiChatTask("hello", "model-1"),
+		Call:   openaiChatCall(t, "hello", "model-1"),
 	})
 	assertStatusCode(t, err, codes.FailedPrecondition)
 }
@@ -340,31 +344,31 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		JobID:           jobID,
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "openai.chat_completions.v1",
-		Input:                requestJSON,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 "openai.chat_completions.v1",
+		Request:                requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           append([]byte(nil), jobID[:]...),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          append([]byte(nil), jobID[:]...),
 		PriceMsat:       123,
 		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
 
-	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatCall(t, "hello", "model-1"), quote); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -393,20 +397,20 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	resultLen := uint64(len(resultBytes))
 
 	resultContentType := "text/plain"
-	resultContentEncoding := lcptasks.ContentEncodingIdentity
+	resultContentEncoding := contentEncodingIdentity
 
 	var resultStreamID lcp.Hash32
 	resultStreamID[0] = 0x22
 
 	beginPayload, err := lcpwire.EncodeStreamBegin(lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
 		StreamID:        resultStreamID,
-		Kind:            lcpwire.StreamKindResult,
+		Kind:            lcpwire.StreamKindResponse,
 		TotalLen:        &resultLen,
 		SHA256:          &resultHash,
 		ContentType:     resultContentType,
@@ -417,9 +421,9 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	}
 
 	chunkPayload, _, err := lcpwire.EncodeStreamChunk(lcpwire.StreamChunk{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			Expiry:          expiry,
 		},
 		StreamID: resultStreamID,
@@ -431,9 +435,9 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 	}
 
 	endPayload, err := lcpwire.EncodeStreamEnd(lcpwire.StreamEnd{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
@@ -445,24 +449,24 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		t.Fatalf("EncodeStreamEnd: %v", err)
 	}
 
-	terminalPayload, err := lcpwire.EncodeResult(lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+	terminalPayload, err := lcpwire.EncodeComplete(lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
-		Status: lcpwire.ResultStatusOK,
-		OK: &lcpwire.ResultOK{
-			ResultStreamID:        resultStreamID,
-			ResultHash:            resultHash,
-			ResultLen:             resultLen,
-			ResultContentType:     resultContentType,
-			ResultContentEncoding: resultContentEncoding,
+		Status: lcpwire.CompleteStatusOK,
+		OK: &lcpwire.CompleteOK{
+			ResponseStreamID:        resultStreamID,
+			ResponseHash:            resultHash,
+			ResponseLen:             resultLen,
+			ResponseContentType:     resultContentType,
+			ResponseContentEncoding: resultContentEncoding,
 		},
 	})
 	if err != nil {
-		t.Fatalf("EncodeResult: %v", err)
+		t.Fatalf("EncodeComplete: %v", err)
 	}
 
 	waiter.HandleInboundCustomMessage(
@@ -474,7 +478,7 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 		inbound(peerID, lcpwire.MessageTypeStreamChunk, chunkPayload),
 	)
 	waiter.HandleInboundCustomMessage(context.Background(), inbound(peerID, lcpwire.MessageTypeStreamEnd, endPayload))
-	waiter.HandleInboundCustomMessage(context.Background(), inbound(peerID, lcpwire.MessageTypeResult, terminalPayload))
+	waiter.HandleInboundCustomMessage(context.Background(), inbound(peerID, lcpwire.MessageTypeComplete, terminalPayload))
 
 	svc := mustNewService(t, Params{
 		Clock:         clock,
@@ -486,24 +490,24 @@ func TestAcceptAndExecute_SuccessWaitsForResult(t *testing.T) {
 
 	resp, err := svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     peerID,
-		JobId:      append([]byte(nil), jobID[:]...),
+		CallId:     append([]byte(nil), jobID[:]...),
 		PayInvoice: true,
 	})
 	if err != nil {
 		t.Fatalf("AcceptAndExecute: %v", err)
 	}
 
-	if got, want := resp.GetResult().GetStatus(), lcpdv1.Result_STATUS_OK; got != want {
+	if got, want := resp.GetComplete().GetStatus(), lcpdv1.Complete_STATUS_OK; got != want {
 		t.Fatalf("status mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := string(resp.GetResult().GetResult()), "ok"; got != want {
-		t.Fatalf("result mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if diff := cmp.Diff(resultBytes, resp.GetComplete().GetResponseBytes()); diff != "" {
+		t.Fatalf("response_bytes mismatch (-want +got):\n%s", diff)
 	}
-	if got, want := resp.GetResult().GetContentType(), resultContentType; got != want {
-		t.Fatalf("content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := resp.GetComplete().GetResponseContentType(), resultContentType; got != want {
+		t.Fatalf("response_content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := resp.GetResult().GetContentEncoding(), resultContentEncoding; got != want {
-		t.Fatalf("content_encoding mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := resp.GetComplete().GetResponseContentEncoding(), resultContentEncoding; got != want {
+		t.Fatalf("response_content_encoding mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 }
 
@@ -530,31 +534,31 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		JobID:           jobID,
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "openai.chat_completions.v1",
-		Input:                requestJSON,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 "openai.chat_completions.v1",
+		Request:                requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           append([]byte(nil), jobID[:]...),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          append([]byte(nil), jobID[:]...),
 		PriceMsat:       123,
 		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1stream",
 	}
 
-	if putErr := jobs.PutQuote(peerID, openaiChatTask("stream me", "model-stream"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatCall(t, "stream me", "model-stream"), quote); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -589,20 +593,20 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 	resultLen := uint64(len(resultBytes))
 
 	resultContentType := "text/event-stream; charset=utf-8"
-	resultContentEncoding := lcptasks.ContentEncodingIdentity
+	resultContentEncoding := contentEncodingIdentity
 
 	var resultStreamID lcp.Hash32
 	resultStreamID[0] = 0x44
 
 	beginPayload, err := lcpwire.EncodeStreamBegin(lcpwire.StreamBegin{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
 		StreamID:        resultStreamID,
-		Kind:            lcpwire.StreamKindResult,
+		Kind:            lcpwire.StreamKindResponse,
 		ContentType:     resultContentType,
 		ContentEncoding: resultContentEncoding,
 	})
@@ -611,9 +615,9 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 	}
 
 	chunkPayload, _, err := lcpwire.EncodeStreamChunk(lcpwire.StreamChunk{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			Expiry:          expiry,
 		},
 		StreamID: resultStreamID,
@@ -625,9 +629,9 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 	}
 
 	endPayload, err := lcpwire.EncodeStreamEnd(lcpwire.StreamEnd{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
@@ -639,24 +643,24 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		t.Fatalf("EncodeStreamEnd: %v", err)
 	}
 
-	terminalPayload, err := lcpwire.EncodeResult(lcpwire.Result{
-		Envelope: lcpwire.JobEnvelope{
-			ProtocolVersion: lcpwire.ProtocolVersionV02,
-			JobID:           jobID,
+	terminalPayload, err := lcpwire.EncodeComplete(lcpwire.Complete{
+		Envelope: lcpwire.CallEnvelope{
+			ProtocolVersion: lcpwire.ProtocolVersionV03,
+			CallID:          jobID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          expiry,
 		},
-		Status: lcpwire.ResultStatusOK,
-		OK: &lcpwire.ResultOK{
-			ResultStreamID:        resultStreamID,
-			ResultHash:            resultHash,
-			ResultLen:             resultLen,
-			ResultContentType:     resultContentType,
-			ResultContentEncoding: resultContentEncoding,
+		Status: lcpwire.CompleteStatusOK,
+		OK: &lcpwire.CompleteOK{
+			ResponseStreamID:        resultStreamID,
+			ResponseHash:            resultHash,
+			ResponseLen:             resultLen,
+			ResponseContentType:     resultContentType,
+			ResponseContentEncoding: resultContentEncoding,
 		},
 	})
 	if err != nil {
-		t.Fatalf("EncodeResult: %v", err)
+		t.Fatalf("EncodeComplete: %v", err)
 	}
 
 	svc := mustNewService(t, Params{
@@ -673,7 +677,7 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		errCh <- svc.AcceptAndExecuteStream(
 			&lcpdv1.AcceptAndExecuteStreamRequest{
 				PeerId:     peerID,
-				JobId:      append([]byte(nil), jobID[:]...),
+				CallId:     append([]byte(nil), jobID[:]...),
 				PayInvoice: true,
 			},
 			stream,
@@ -700,7 +704,7 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 	)
 	waiter.HandleInboundCustomMessage(
 		context.Background(),
-		inbound(peerID, lcpwire.MessageTypeResult, terminalPayload),
+		inbound(peerID, lcpwire.MessageTypeComplete, terminalPayload),
 	)
 
 	select {
@@ -716,13 +720,13 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		t.Fatalf("sent stream response count mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
-	begin := stream.sent[0].GetResultBegin()
+	begin := stream.sent[0].GetResponseBegin()
 	if begin == nil {
-		t.Fatalf("expected first event to be result_begin")
+		t.Fatalf("expected first event to be response_begin")
 	}
 	if begin.GetContentType() != resultContentType || begin.GetContentEncoding() != resultContentEncoding {
 		t.Fatalf(
-			"result_begin content type/encoding mismatch (-want +got):\n%s",
+			"response_begin content type/encoding mismatch (-want +got):\n%s",
 			cmp.Diff(
 				resultContentType+"/"+resultContentEncoding,
 				begin.GetContentType()+"/"+begin.GetContentEncoding(),
@@ -730,43 +734,43 @@ func TestAcceptAndExecuteStream_ForwardsResultStream(t *testing.T) {
 		)
 	}
 
-	chunk := stream.sent[1].GetResultChunk()
+	chunk := stream.sent[1].GetResponseChunk()
 	if chunk == nil {
-		t.Fatalf("expected second event to be result_chunk")
+		t.Fatalf("expected second event to be response_chunk")
 	}
 	if diff := cmp.Diff(resultBytes, chunk.GetData()); diff != "" {
 		t.Fatalf("chunk data mismatch (-want +got):\n%s", diff)
 	}
 
-	end := stream.sent[2].GetResultEnd()
+	end := stream.sent[2].GetResponseEnd()
 	if end == nil {
-		t.Fatalf("expected third event to be result_end")
+		t.Fatalf("expected third event to be response_end")
 	}
-	if end.GetResultLen() != resultLen {
-		t.Fatalf("result_end len mismatch (-want +got):\n%s", cmp.Diff(resultLen, end.GetResultLen()))
+	if end.GetResponseLen() != resultLen {
+		t.Fatalf("response_end len mismatch (-want +got):\n%s", cmp.Diff(resultLen, end.GetResponseLen()))
 	}
-	if diff := cmp.Diff(resultHash[:], end.GetResultHash()); diff != "" {
-		t.Fatalf("result_end hash mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(resultHash[:], end.GetResponseHash()); diff != "" {
+		t.Fatalf("response_end hash mismatch (-want +got):\n%s", diff)
 	}
 
-	result := stream.sent[3].GetResult()
+	result := stream.sent[3].GetComplete()
 	if result == nil {
-		t.Fatalf("expected terminal result event")
+		t.Fatalf("expected terminal complete event")
 	}
-	if got, want := result.GetStatus(), lcpdv1.Result_STATUS_OK; got != want {
-		t.Fatalf("result status mismatch (-want +got):\n%s", cmp.Diff(want, got))
+	if got, want := result.GetStatus(), lcpdv1.Complete_STATUS_OK; got != want {
+		t.Fatalf("complete status mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if diff := cmp.Diff(resultHash[:], result.GetResultHash()); diff != "" {
-		t.Fatalf("result hash mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(resultHash[:], result.GetResponseHash()); diff != "" {
+		t.Fatalf("complete response_hash mismatch (-want +got):\n%s", diff)
 	}
-	if got := result.GetResultLen(); got != resultLen {
-		t.Fatalf("result len mismatch (-want +got):\n%s", cmp.Diff(resultLen, got))
+	if got := result.GetResponseLen(); got != resultLen {
+		t.Fatalf("complete response_len mismatch (-want +got):\n%s", cmp.Diff(resultLen, got))
 	}
-	if got := result.GetContentType(); got != resultContentType {
-		t.Fatalf("result content_type mismatch (-want +got):\n%s", cmp.Diff(resultContentType, got))
+	if got := result.GetResponseContentType(); got != resultContentType {
+		t.Fatalf("complete response_content_type mismatch (-want +got):\n%s", cmp.Diff(resultContentType, got))
 	}
-	if got := result.GetContentEncoding(); got != resultContentEncoding {
-		t.Fatalf("result content_encoding mismatch (-want +got):\n%s", cmp.Diff(resultContentEncoding, got))
+	if got := result.GetResponseContentEncoding(); got != resultContentEncoding {
+		t.Fatalf("complete response_content_encoding mismatch (-want +got):\n%s", cmp.Diff(resultContentEncoding, got))
 	}
 }
 
@@ -791,30 +795,30 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		JobID:           jobID,
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "openai.chat_completions.v1",
-		Input:                requestJSON,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 "openai.chat_completions.v1",
+		Request:                requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           append([]byte(nil), jobID[:]...),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          append([]byte(nil), jobID[:]...),
 		PriceMsat:       123,
 		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatCall(t, "hello", "model-1"), quote); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -840,7 +844,7 @@ func TestAcceptAndExecute_FailsOnInvoiceAmountMismatch(t *testing.T) {
 
 	_, err = svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     peerID,
-		JobId:      append([]byte(nil), jobID[:]...),
+		CallId:     append([]byte(nil), jobID[:]...),
 		PayInvoice: true,
 	})
 	assertStatusCode(t, err, codes.FailedPrecondition)
@@ -867,30 +871,30 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		JobID:           jobID,
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "openai.chat_completions.v1",
-		Input:                requestJSON,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 "openai.chat_completions.v1",
+		Request:                requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           append([]byte(nil), jobID[:]...),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          append([]byte(nil), jobID[:]...),
 		PriceMsat:       123,
 		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatCall(t, "hello", "model-1"), quote); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -916,7 +920,7 @@ func TestAcceptAndExecute_FailsOnInvoiceExpiryMismatch(t *testing.T) {
 
 	_, err = svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     peerID,
-		JobId:      append([]byte(nil), jobID[:]...),
+		CallId:     append([]byte(nil), jobID[:]...),
 		PayInvoice: true,
 	})
 	assertStatusCode(t, err, codes.FailedPrecondition)
@@ -943,30 +947,30 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
 	}
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
-		ProtocolVersion: lcpwire.ProtocolVersionV02,
+		ProtocolVersion: lcpwire.ProtocolVersionV03,
 		JobID:           jobID,
 		PriceMsat:       123,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             "openai.chat_completions.v1",
-		Input:                requestJSON,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 "openai.chat_completions.v1",
+		Request:                requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		t.Fatalf("ComputeTermsHash: %v", err)
 	}
 
-	terms := &lcpdv1.Terms{
-		ProtocolVersion: uint32(lcpwire.ProtocolVersionV02),
-		JobId:           append([]byte(nil), jobID[:]...),
+	quote := &lcpdv1.Quote{
+		ProtocolVersion: uint32(lcpwire.ProtocolVersionV03),
+		CallId:          append([]byte(nil), jobID[:]...),
 		PriceMsat:       123,
 		QuoteExpiry:     timestamppb.New(time.Unix(int64(quoteExpiry), 0)),
 		TermsHash:       append([]byte(nil), termsHash[:]...),
 		PaymentRequest:  "lnbc1dummy",
 	}
-	if putErr := jobs.PutQuote(peerID, openaiChatTask("hello", "model-1"), terms); putErr != nil {
+	if putErr := jobs.PutQuote(peerID, openaiChatCall(t, "hello", "model-1"), quote); putErr != nil {
 		t.Fatalf("PutQuote: %v", putErr)
 	}
 
@@ -992,7 +996,7 @@ func TestAcceptAndExecute_AllowedClockSkewIsConfigurableViaEnv(t *testing.T) {
 
 	_, err = svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     peerID,
-		JobId:      append([]byte(nil), jobID[:]...),
+		CallId:     append([]byte(nil), jobID[:]...),
 		PayInvoice: true,
 	})
 	assertStatusCode(t, err, codes.FailedPrecondition)
@@ -1010,7 +1014,7 @@ func TestAcceptAndExecute_RejectsPayInvoiceFalse(t *testing.T) {
 
 	_, err := svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     "02" + strings.Repeat("f", 64),
-		JobId:      make([]byte, 32),
+		CallId:     make([]byte, 32),
 		PayInvoice: false,
 	})
 	assertStatusCode(t, err, codes.InvalidArgument)
@@ -1028,7 +1032,7 @@ func TestAcceptAndExecute_JobNotFound(t *testing.T) {
 
 	_, err := svc.AcceptAndExecute(context.Background(), &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     "02" + strings.Repeat("f", 64),
-		JobId:      make([]byte, 32),
+		CallId:     make([]byte, 32),
 		PayInvoice: true,
 	})
 	assertStatusCode(t, err, codes.NotFound)
@@ -1056,7 +1060,7 @@ func TestCancelJob_SendsMessage(t *testing.T) {
 
 	resp, err := svc.CancelJob(context.Background(), &lcpdv1.CancelJobRequest{
 		PeerId: peerID,
-		JobId:  append([]byte(nil), jobID[:]...),
+		CallId: append([]byte(nil), jobID[:]...),
 		Reason: "stop",
 	})
 	if err != nil {
@@ -1110,15 +1114,24 @@ func openaiChatCompletionsRequestJSON(prompt, model string) []byte {
 	)
 }
 
-func openaiChatTask(prompt, model string) *lcpdv1.Task {
+func openaiChatCall(t *testing.T, prompt, model string) *lcpdv1.CallSpec {
+	t.Helper()
+
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: model},
+	)
+	if err != nil {
+		t.Fatalf("EncodeOpenAIChatCompletionsV1Params: %v", err)
+	}
+
 	requestJSON := openaiChatCompletionsRequestJSON(prompt, model)
-	return &lcpdv1.Task{
-		Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-			OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-				RequestJson: requestJSON,
-				Params:      &lcpdv1.OpenAIChatCompletionsV1Params{Model: model},
-			},
-		},
+
+	return &lcpdv1.CallSpec{
+		Method:                 "openai.chat_completions.v1",
+		Params:                 paramsBytes,
+		RequestBytes:           requestJSON,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
 	}
 }
 
@@ -1133,8 +1146,8 @@ func newQuoteRespondingFakeMessenger(
 	return &fakeMessenger{
 		sendFn: func(_ context.Context, msg sentMsg) error {
 			switch msg.msgType {
-			case lcpwire.MessageTypeQuoteRequest:
-				return respondToQuoteRequest(
+			case lcpwire.MessageTypeCall:
+				return respondToCall(
 					peerID,
 					clock,
 					waiter,
@@ -1147,11 +1160,11 @@ func newQuoteRespondingFakeMessenger(
 				lcpwire.MessageTypeStreamChunk,
 				lcpwire.MessageTypeStreamEnd:
 				// Ignore the input stream; this fake provider is only validating
-				// quote_request/quote_response hashing for the test.
+				// call/quote hashing for the test.
 				return nil
 			case lcpwire.MessageTypeManifest,
-				lcpwire.MessageTypeQuoteResponse,
-				lcpwire.MessageTypeResult,
+				lcpwire.MessageTypeQuote,
+				lcpwire.MessageTypeComplete,
 				lcpwire.MessageTypeCancel,
 				lcpwire.MessageTypeError:
 				return errors.New("unexpected outbound message type")
@@ -1162,7 +1175,7 @@ func newQuoteRespondingFakeMessenger(
 	}
 }
 
-func respondToQuoteRequest(
+func respondToCall(
 	peerID string,
 	clock fakeClock,
 	waiter *requesterwait.Waiter,
@@ -1171,7 +1184,7 @@ func respondToQuoteRequest(
 	priceMsat uint64,
 	paymentRequest string,
 ) error {
-	req, err := lcpwire.DecodeQuoteRequest(payload)
+	req, err := lcpwire.DecodeCall(payload)
 	if err != nil {
 		return err
 	}
@@ -1184,24 +1197,24 @@ func respondToQuoteRequest(
 
 	termsHash, err := protocolcompat.ComputeTermsHash(lcp.Terms{
 		ProtocolVersion: req.Envelope.ProtocolVersion,
-		JobID:           req.Envelope.JobID,
+		JobID:           req.Envelope.CallID,
 		PriceMsat:       priceMsat,
 		QuoteExpiry:     quoteExpiry,
 	}, protocolcompat.TermsCommit{
-		TaskKind:             req.TaskKind,
-		Input:                inputBytes,
-		InputContentType:     lcptasks.ContentTypeApplicationJSONUTF8,
-		InputContentEncoding: lcptasks.ContentEncodingIdentity,
-		Params:               paramsBytes,
+		Method:                 req.Method,
+		Request:                inputBytes,
+		RequestContentType:     requestContentTypeJSON,
+		RequestContentEncoding: contentEncodingIdentity,
+		Params:                 paramsBytes,
 	})
 	if err != nil {
 		return err
 	}
 
-	respPayload, err := lcpwire.EncodeQuoteResponse(lcpwire.QuoteResponse{
-		Envelope: lcpwire.JobEnvelope{
+	respPayload, err := lcpwire.EncodeQuote(lcpwire.Quote{
+		Envelope: lcpwire.CallEnvelope{
 			ProtocolVersion: req.Envelope.ProtocolVersion,
-			JobID:           req.Envelope.JobID,
+			CallID:          req.Envelope.CallID,
 			MsgID:           lcpwire.MsgID{},
 			Expiry:          req.Envelope.Expiry,
 		},
@@ -1216,7 +1229,7 @@ func respondToQuoteRequest(
 
 	waiter.HandleInboundCustomMessage(
 		context.Background(),
-		inbound(peerID, lcpwire.MessageTypeQuoteResponse, respPayload),
+		inbound(peerID, lcpwire.MessageTypeQuote, respPayload),
 	)
 	return nil
 }
@@ -1234,39 +1247,39 @@ func assertRequestQuoteResponse(
 		t.Fatalf("peer_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
-	terms := resp.GetTerms()
-	if terms == nil {
-		t.Fatalf("RequestQuote: terms is nil")
+	quote := resp.GetQuote()
+	if quote == nil {
+		t.Fatalf("RequestQuote: quote is nil")
 	}
-	if got, want := terms.GetPriceMsat(), wantPriceMsat; got != want {
+	if got, want := quote.GetPriceMsat(), wantPriceMsat; got != want {
 		t.Fatalf("price_msat mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := terms.GetPaymentRequest(), wantPaymentRequest; got != want {
+	if got, want := quote.GetPaymentRequest(), wantPaymentRequest; got != want {
 		t.Fatalf("payment_request mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 }
 
-func assertTermsStored(
+func assertQuoteStored(
 	t *testing.T,
 	jobs *requesterjobstore.Store,
 	peerID string,
-	terms *lcpdv1.Terms,
+	quote *lcpdv1.Quote,
 	wantPaymentRequest string,
 ) {
 	t.Helper()
 
-	if terms == nil {
-		t.Fatalf("terms is nil")
+	if quote == nil {
+		t.Fatalf("quote is nil")
 	}
-	storedJobID, err := toJobID(terms.GetJobId())
+	storedJobID, err := toJobID(quote.GetCallId())
 	if err != nil {
 		t.Fatalf("toJobID: %v", err)
 	}
-	storedTerms, err := jobs.GetTerms(peerID, storedJobID)
+	storedQuote, err := jobs.GetQuote(peerID, storedJobID)
 	if err != nil {
-		t.Fatalf("jobs.GetTerms: %v", err)
+		t.Fatalf("jobs.GetQuote: %v", err)
 	}
-	if got, want := storedTerms.GetPaymentRequest(), wantPaymentRequest; got != want {
+	if got, want := storedQuote.GetPaymentRequest(), wantPaymentRequest; got != want {
 		t.Fatalf("stored payment_request mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 }
@@ -1275,7 +1288,7 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	t.Helper()
 
 	wantTypes := []lcpwire.MessageType{
-		lcpwire.MessageTypeQuoteRequest,
+		lcpwire.MessageTypeCall,
 		lcpwire.MessageTypeStreamBegin,
 		lcpwire.MessageTypeStreamChunk,
 		lcpwire.MessageTypeStreamEnd,
@@ -1289,9 +1302,9 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 		}
 	}
 
-	wireReq := mustDecodeQuoteRequest(t, msgs[0].payload)
+	wireReq := mustDecodeCall(t, msgs[0].payload)
 	begin := mustDecodeStreamBegin(t, msgs[1].payload)
-	if got, want := begin.Kind, lcpwire.StreamKindInput; got != want {
+	if got, want := begin.Kind, lcpwire.StreamKindRequest; got != want {
 		t.Fatalf("stream_begin.kind mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
@@ -1299,7 +1312,7 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	wantInputHash := lcp.Hash32(inputSum)
 	wantInputLen := uint64(len(inputBytes))
 
-	if got, want := begin.Envelope.JobID, wireReq.Envelope.JobID; got != want {
+	if got, want := begin.Envelope.CallID, wireReq.Envelope.CallID; got != want {
 		t.Fatalf("stream_begin.job_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if begin.TotalLen == nil || *begin.TotalLen != wantInputLen {
@@ -1308,15 +1321,15 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	if begin.SHA256 == nil || *begin.SHA256 != wantInputHash {
 		t.Fatalf("stream_begin.sha256 mismatch (-want +got):\n%s", cmp.Diff(wantInputHash, begin.SHA256))
 	}
-	if got, want := begin.ContentType, lcptasks.ContentTypeApplicationJSONUTF8; got != want {
+	if got, want := begin.ContentType, requestContentTypeJSON; got != want {
 		t.Fatalf("stream_begin.content_type mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
-	if got, want := begin.ContentEncoding, lcptasks.ContentEncodingIdentity; got != want {
+	if got, want := begin.ContentEncoding, contentEncodingIdentity; got != want {
 		t.Fatalf("stream_begin.content_encoding mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 
 	chunk := mustDecodeStreamChunk(t, msgs[2].payload)
-	if got, want := chunk.Envelope.JobID, wireReq.Envelope.JobID; got != want {
+	if got, want := chunk.Envelope.CallID, wireReq.Envelope.CallID; got != want {
 		t.Fatalf("stream_chunk.job_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if got, want := chunk.StreamID, begin.StreamID; got != want {
@@ -1330,7 +1343,7 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	}
 
 	end := mustDecodeStreamEnd(t, msgs[3].payload)
-	if got, want := end.Envelope.JobID, wireReq.Envelope.JobID; got != want {
+	if got, want := end.Envelope.CallID, wireReq.Envelope.CallID; got != want {
 		t.Fatalf("stream_end.job_id mismatch (-want +got):\n%s", cmp.Diff(want, got))
 	}
 	if got, want := end.StreamID, begin.StreamID; got != want {
@@ -1344,12 +1357,12 @@ func assertSentQuoteRequestAndInputStream(t *testing.T, msgs []sentMsg, inputByt
 	}
 }
 
-func mustDecodeQuoteRequest(t *testing.T, payload []byte) lcpwire.QuoteRequest {
+func mustDecodeCall(t *testing.T, payload []byte) lcpwire.Call {
 	t.Helper()
 
-	req, err := lcpwire.DecodeQuoteRequest(payload)
+	req, err := lcpwire.DecodeCall(payload)
 	if err != nil {
-		t.Fatalf("DecodeQuoteRequest: %v", err)
+		t.Fatalf("DecodeCall: %v", err)
 	}
 	return req
 }

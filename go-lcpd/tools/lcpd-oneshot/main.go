@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bruwbird/lcp/go-lcpd/internal/lcpwire"
 	lcpdv1 "github.com/bruwbird/lcp/proto-go/lcpd/v1"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
@@ -55,9 +56,9 @@ type runOptions struct {
 }
 
 type pipelineResult struct {
-	PeerID string
-	Terms  *lcpdv1.Terms
-	Result *lcpdv1.Result
+	PeerID   string
+	Quote    *lcpdv1.Quote
+	Complete *lcpdv1.Complete
 }
 
 type lcpdClient interface {
@@ -356,32 +357,36 @@ func runPipeline(
 		return pipelineResult{}, err
 	}
 
+	paramsBytes, err := lcpwire.EncodeOpenAIChatCompletionsV1Params(
+		lcpwire.OpenAIChatCompletionsV1Params{Model: opts.Model},
+	)
+	if err != nil {
+		return pipelineResult{}, fmt.Errorf("encode openai.chat_completions.v1 params: %w", err)
+	}
+
 	quoteResp, err := client.RequestQuote(ctx, &lcpdv1.RequestQuoteRequest{
 		PeerId: opts.PeerID,
-		Task: &lcpdv1.Task{
-			Spec: &lcpdv1.Task_OpenaiChatCompletionsV1{
-				OpenaiChatCompletionsV1: &lcpdv1.OpenAIChatCompletionsV1TaskSpec{
-					RequestJson: requestJSON,
-					Params: &lcpdv1.OpenAIChatCompletionsV1Params{
-						Model: opts.Model,
-					},
-				},
-			},
+		Call: &lcpdv1.CallSpec{
+			Method:                 "openai.chat_completions.v1",
+			Params:                 paramsBytes,
+			RequestBytes:           requestJSON,
+			RequestContentType:     "application/json; charset=utf-8",
+			RequestContentEncoding: "identity",
 		},
 	})
 	if err != nil {
 		return pipelineResult{}, fmt.Errorf("request quote: %w", err)
 	}
 
-	terms := quoteResp.GetTerms()
-	if terms == nil {
-		return pipelineResult{}, errors.New("request quote: response terms is nil")
+	quote := quoteResp.GetQuote()
+	if quote == nil {
+		return pipelineResult{}, errors.New("request quote: response quote is nil")
 	}
 
 	res := pipelineResult{
-		PeerID: opts.PeerID,
-		Terms:  terms,
-		Result: nil,
+		PeerID:   opts.PeerID,
+		Quote:    quote,
+		Complete: nil,
 	}
 
 	if !opts.PayInvoice {
@@ -390,7 +395,7 @@ func runPipeline(
 
 	execResp, err := client.AcceptAndExecute(ctx, &lcpdv1.AcceptAndExecuteRequest{
 		PeerId:     opts.PeerID,
-		JobId:      terms.GetJobId(),
+		CallId:     quote.GetCallId(),
 		PayInvoice: true,
 	})
 	if err != nil {
@@ -399,11 +404,11 @@ func runPipeline(
 	if execResp == nil {
 		return pipelineResult{}, errors.New("accept and execute: response is nil")
 	}
-	if execResp.GetResult() == nil {
-		return pipelineResult{}, errors.New("accept and execute: result is nil")
+	if execResp.GetComplete() == nil {
+		return pipelineResult{}, errors.New("accept and execute: complete is nil")
 	}
 
-	res.Result = execResp.GetResult()
+	res.Complete = execResp.GetComplete()
 	return res, nil
 }
 
@@ -457,30 +462,40 @@ func buildOpenAIChatCompletionsV1RequestJSON(
 func formatHumanSummary(res pipelineResult) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "peer_id=%s protocol_version=%d\n", res.PeerID, res.Terms.GetProtocolVersion())
-	fmt.Fprintf(
-		&b,
-		"price_sat=%s price_msat=%d\n",
-		formatMsatAsSat(res.Terms.GetPriceMsat()),
-		res.Terms.GetPriceMsat(),
-	)
-	fmt.Fprintf(
-		&b,
-		"terms_hash=%s job_id=%s\n",
-		hex.EncodeToString(res.Terms.GetTermsHash()),
-		hex.EncodeToString(res.Terms.GetJobId()),
-	)
-	fmt.Fprintf(&b, "payment_request:\n%s\n", res.Terms.GetPaymentRequest())
-
-	if res.Result == nil {
-		fmt.Fprintf(&b, "result:\n(none)\n")
+	if res.Quote == nil {
+		fmt.Fprintf(&b, "peer_id=%s\n", res.PeerID)
+		fmt.Fprintf(&b, "quote:\n(none)\n")
 		return b.String()
 	}
 
-	if ct := strings.TrimSpace(res.Result.GetContentType()); ct != "" {
+	fmt.Fprintf(&b, "peer_id=%s protocol_version=%d\n", res.PeerID, res.Quote.GetProtocolVersion())
+	fmt.Fprintf(
+		&b,
+		"price_sat=%s price_msat=%d\n",
+		formatMsatAsSat(res.Quote.GetPriceMsat()),
+		res.Quote.GetPriceMsat(),
+	)
+	fmt.Fprintf(
+		&b,
+		"terms_hash=%s call_id=%s\n",
+		hex.EncodeToString(res.Quote.GetTermsHash()),
+		hex.EncodeToString(res.Quote.GetCallId()),
+	)
+	fmt.Fprintf(&b, "payment_request:\n%s\n", res.Quote.GetPaymentRequest())
+
+	if res.Complete == nil {
+		fmt.Fprintf(&b, "complete:\n(none)\n")
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "status=%s\n", res.Complete.GetStatus().String())
+	if msg := strings.TrimSpace(res.Complete.GetMessage()); msg != "" {
+		fmt.Fprintf(&b, "message=%s\n", msg)
+	}
+	if ct := strings.TrimSpace(res.Complete.GetResponseContentType()); ct != "" {
 		fmt.Fprintf(&b, "content_type=%s\n", ct)
 	}
-	fmt.Fprintf(&b, "result:\n%s\n", string(res.Result.GetResult()))
+	fmt.Fprintf(&b, "response:\n%s\n", string(res.Complete.GetResponseBytes()))
 
 	return b.String()
 }
@@ -492,24 +507,34 @@ func writeJSONSummary(res pipelineResult, w io.Writer) error {
 		PriceMsat       uint64 `json:"price_msat"`
 		PriceSat        string `json:"price_sat"`
 		TermsHashHex    string `json:"terms_hash_hex"`
-		JobIDHex        string `json:"job_id_hex"`
+		CallIDHex       string `json:"call_id_hex"`
 		PaymentRequest  string `json:"payment_request"`
-		ResultText      string `json:"result_text"`
+		Status          string `json:"status"`
+		Message         string `json:"message,omitempty"`
+		ResponseText    string `json:"response_text"`
 		ContentType     string `json:"content_type"`
 	}{
-		PeerID:          res.PeerID,
-		ProtocolVersion: res.Terms.GetProtocolVersion(),
-		PriceMsat:       res.Terms.GetPriceMsat(),
-		PriceSat:        formatMsatAsSat(res.Terms.GetPriceMsat()),
-		TermsHashHex:    hex.EncodeToString(res.Terms.GetTermsHash()),
-		JobIDHex:        hex.EncodeToString(res.Terms.GetJobId()),
-		PaymentRequest:  res.Terms.GetPaymentRequest(),
-		ResultText:      "",
-		ContentType:     "",
+		PeerID:       res.PeerID,
+		Status:       "",
+		Message:      "",
+		ResponseText: "",
+		ContentType:  "",
 	}
-	if res.Result != nil {
-		payload.ResultText = string(res.Result.GetResult())
-		payload.ContentType = res.Result.GetContentType()
+
+	if res.Quote != nil {
+		payload.ProtocolVersion = res.Quote.GetProtocolVersion()
+		payload.PriceMsat = res.Quote.GetPriceMsat()
+		payload.PriceSat = formatMsatAsSat(res.Quote.GetPriceMsat())
+		payload.TermsHashHex = hex.EncodeToString(res.Quote.GetTermsHash())
+		payload.CallIDHex = hex.EncodeToString(res.Quote.GetCallId())
+		payload.PaymentRequest = res.Quote.GetPaymentRequest()
+	}
+
+	if res.Complete != nil {
+		payload.Status = res.Complete.GetStatus().String()
+		payload.Message = res.Complete.GetMessage()
+		payload.ResponseText = string(res.Complete.GetResponseBytes())
+		payload.ContentType = res.Complete.GetResponseContentType()
 	}
 
 	enc := json.NewEncoder(w)

@@ -126,7 +126,7 @@ func TestPeerMessaging_HandleCustomMessage_DispatchesJobMessages(t *testing.T) {
 
 	pm.HandleCustomMessage(context.Background(), &lnrpc.CustomMessage{
 		Peer: peerBytes,
-		Type: uint32(lcpwire.MessageTypeQuoteRequest),
+		Type: uint32(lcpwire.MessageTypeCall),
 		Data: payload,
 	})
 
@@ -137,7 +137,7 @@ func TestPeerMessaging_HandleCustomMessage_DispatchesJobMessages(t *testing.T) {
 	}
 	want := InboundCustomMessage{
 		PeerPubKey: peerPubKey,
-		MsgType:    uint16(lcpwire.MessageTypeQuoteRequest),
+		MsgType:    uint16(lcpwire.MessageTypeCall),
 		Payload:    payload,
 	}
 	if diff := cmp.Diff(want, received[0]); diff != "" {
@@ -305,7 +305,7 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestMarksReadyAndRepliesOnce(t
 		ProtocolVersion: lcpwire.ProtocolVersionV02,
 		MaxPayloadBytes: 123,
 		MaxStreamBytes:  1024,
-		MaxJobBytes:     2048,
+		MaxCallBytes:    2048,
 	})
 	if err != nil {
 		t.Fatalf("encode remote manifest: %v", err)
@@ -362,7 +362,7 @@ func TestPeerMessaging_HandleCustomMessage_LCPManifestRepliesOnceEvenIfAlreadySe
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			MaxPayloadBytes: 123,
 			MaxStreamBytes:  1024,
-			MaxJobBytes:     2048,
+			MaxCallBytes:    2048,
 		},
 	)
 	if err != nil {
@@ -406,7 +406,7 @@ func TestPeerMessaging_HandlePeerEvent_OfflineResetsState(t *testing.T) {
 			ProtocolVersion: lcpwire.ProtocolVersionV02,
 			MaxPayloadBytes: 123,
 			MaxStreamBytes:  1024,
-			MaxJobBytes:     2048,
+			MaxCallBytes:    2048,
 		},
 	)
 	if err != nil {

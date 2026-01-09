@@ -13,7 +13,7 @@ const (
 )
 
 func EncodeError(e Error) ([]byte, error) {
-	envelopeRecords, err := encodeJobEnvelope(e.Envelope)
+	envelopeRecords, err := encodeCallEnvelope(e.Envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func DecodeError(payload []byte) (Error, error) {
 		return Error{}, err
 	}
 
-	env, err := decodeJobEnvelope(m)
+	env, err := decodeCallEnvelope(m)
 	if err != nil {
 		return Error{}, err
 	}

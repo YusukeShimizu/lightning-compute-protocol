@@ -1,9 +1,10 @@
 # go-lcpd (Lightning Compute Protocol Daemon)
 
-`go-lcpd` is a reference implementation of LCP, an application-layer protocol carried over Lightning for quote → pay → stream(result) → `lcp_result`.
+`go-lcpd` is a reference implementation of LCP, an application-layer protocol carried over Lightning for
+manifest → call → quote → pay → stream(response) → `lcp_complete`.
 
 It provides:
-- `tools/lcpd-grpcd`: a gRPC daemon that speaks the LCP v0.2 wire protocol over BOLT #1 custom messages (via `lnd`)
+- `tools/lcpd-grpcd`: a gRPC daemon that speaks the LCP v0.3 wire protocol over BOLT #1 custom messages (via `lnd`)
 - `tools/lcpdctl`: a generated CLI client for the daemon (dev/debug)
 - `tools/lcpd-oneshot`: a minimal Requester helper (one-shot quote/pay or interactive `-chat`)
 

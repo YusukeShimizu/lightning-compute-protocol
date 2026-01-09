@@ -32,7 +32,7 @@ func EncodeStreamChunk(c StreamChunk) ([]byte, MsgID, error) {
 	env := c.Envelope
 	env.MsgID = msgID
 
-	envelopeRecords, err := encodeJobEnvelope(env)
+	envelopeRecords, err := encodeCallEnvelope(env)
 	if err != nil {
 		return nil, MsgID{}, err
 	}
@@ -60,7 +60,7 @@ func DecodeStreamChunk(payload []byte) (StreamChunk, error) {
 		return StreamChunk{}, err
 	}
 
-	env, err := decodeJobEnvelope(m)
+	env, err := decodeCallEnvelope(m)
 	if err != nil {
 		return StreamChunk{}, err
 	}

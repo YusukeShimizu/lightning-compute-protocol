@@ -4,31 +4,35 @@ import "github.com/bruwbird/lcp/go-lcpd/internal/domain/lcp"
 
 // MessageType is a BOLT #1 custom message type.
 //
-// LCP v0.2 uses odd types >= 32768.
+// LCP v0.3 uses odd types >= 32768.
 type MessageType uint16
 
 const (
-	// ProtocolVersionV02 is the protocol_version for LCP v0.2 as defined in
+	// ProtocolVersionV03 is the protocol_version for LCP v0.3 as defined in
 	// `docs/protocol/protocol.md`.
-	// v0.2 encodes to 2 (major*100 + minor).
-	ProtocolVersionV02 = uint16(2)
+	// v0.3 encodes to 3 (major*100 + minor).
+	ProtocolVersionV03 = uint16(3)
 
-	MessageTypeManifest      MessageType = 42081
-	MessageTypeQuoteRequest  MessageType = 42083
-	MessageTypeQuoteResponse MessageType = 42085
-	MessageTypeResult        MessageType = 42087
-	MessageTypeStreamBegin   MessageType = 42089
-	MessageTypeStreamChunk   MessageType = 42091
-	MessageTypeStreamEnd     MessageType = 42093
-	MessageTypeCancel        MessageType = 42095
-	MessageTypeError         MessageType = 42097
+	// ProtocolVersionV02 is a deprecated name kept for compatibility with
+	// older code in this repo. LCP v0.3 uses protocol_version=3.
+	ProtocolVersionV02 = ProtocolVersionV03
+
+	MessageTypeManifest    MessageType = 42101
+	MessageTypeCall        MessageType = 42103
+	MessageTypeQuote       MessageType = 42105
+	MessageTypeComplete    MessageType = 42107
+	MessageTypeStreamBegin MessageType = 42109
+	MessageTypeStreamChunk MessageType = 42111
+	MessageTypeStreamEnd   MessageType = 42113
+	MessageTypeCancel      MessageType = 42115
+	MessageTypeError       MessageType = 42117
 )
 
 type MsgID [32]byte
 
-type JobEnvelope struct {
+type CallEnvelope struct {
 	ProtocolVersion uint16
-	JobID           lcp.JobID
+	CallID          lcp.JobID
 	MsgID           MsgID
 	Expiry          uint64 // tu64 (unix epoch seconds)
 }
@@ -36,50 +40,59 @@ type JobEnvelope struct {
 type Manifest struct {
 	ProtocolVersion uint16
 
-	MaxPayloadBytes uint32
-	MaxStreamBytes  uint64
-	MaxJobBytes     uint64
-	MaxInflightJobs *uint16
-	SupportedTasks  []TaskTemplate
+	MaxPayloadBytes  uint32
+	MaxStreamBytes   uint64
+	MaxCallBytes     uint64
+	MaxInflightCalls *uint16
+	SupportedMethods []MethodDescriptor
 }
 
-type TaskTemplate struct {
-	TaskKind string
+type MethodDescriptor struct {
+	Method string
 
-	// ParamsBytes is task_kind dependent. For standardized kinds, this is a TLV
-	// stream as defined in `docs/protocol/protocol.md`.
+	// RequestContentTypes and ResponseContentTypes are optional hints for
+	// request/response stream content type selection.
+	RequestContentTypes  []string
+	ResponseContentTypes []string
+
+	DocsURI      *string
+	DocsSHA256   *lcp.Hash32
+	PolicyNotice *string
+}
+
+type Call struct {
+	Envelope CallEnvelope
+
+	Method string
+
+	// ParamsBytes is method-dependent opaque bytes.
 	ParamsBytes *[]byte
+
+	ParamsContentType *string
 }
 
-type QuoteRequest struct {
-	Envelope JobEnvelope
-
-	TaskKind string
-
-	// ParamsBytes is task_kind dependent. For standardized kinds, this is a TLV
-	// stream as defined in `docs/protocol/protocol.md`.
-	ParamsBytes *[]byte
-}
-
-type QuoteResponse struct {
-	Envelope JobEnvelope
+type Quote struct {
+	Envelope CallEnvelope
 
 	PriceMsat   uint64 // tu64
 	QuoteExpiry uint64 // tu64
 	TermsHash   lcp.Hash32
 
 	PaymentRequest string // BOLT11 invoice string (UTF-8)
+
+	ResponseContentType     *string
+	ResponseContentEncoding *string
 }
 
 type StreamKind uint16
 
 const (
-	StreamKindInput  StreamKind = 1
-	StreamKindResult StreamKind = 2
+	StreamKindRequest  StreamKind = 1
+	StreamKindResponse StreamKind = 2
 )
 
 type StreamBegin struct {
-	Envelope JobEnvelope
+	Envelope CallEnvelope
 
 	StreamID lcp.Hash32
 	Kind     StreamKind
@@ -91,7 +104,7 @@ type StreamBegin struct {
 }
 
 type StreamChunk struct {
-	Envelope JobEnvelope
+	Envelope CallEnvelope
 
 	StreamID lcp.Hash32
 	Seq      uint32 // tu32
@@ -99,41 +112,41 @@ type StreamChunk struct {
 }
 
 type StreamEnd struct {
-	Envelope JobEnvelope
+	Envelope CallEnvelope
 
 	StreamID lcp.Hash32
 	TotalLen uint64 // tu64
 	SHA256   lcp.Hash32
 }
 
-type ResultStatus uint16
+type CompleteStatus uint16
 
 const (
-	ResultStatusOK        ResultStatus = 0
-	ResultStatusFailed    ResultStatus = 1
-	ResultStatusCancelled ResultStatus = 2
+	CompleteStatusOK        CompleteStatus = 0
+	CompleteStatusFailed    CompleteStatus = 1
+	CompleteStatusCancelled CompleteStatus = 2
 )
 
-type ResultOK struct {
-	ResultStreamID lcp.Hash32
-	ResultHash     lcp.Hash32
-	ResultLen      uint64 // tu64
+type CompleteOK struct {
+	ResponseStreamID lcp.Hash32
+	ResponseHash     lcp.Hash32
+	ResponseLen      uint64 // tu64
 
-	ResultContentType     string
-	ResultContentEncoding string
+	ResponseContentType     string
+	ResponseContentEncoding string
 }
 
-// Result represents the v0.2 terminal job completion (`lcp_result`).
-type Result struct {
-	Envelope JobEnvelope
+// Complete represents the v0.3 terminal call completion (`lcp_complete`).
+type Complete struct {
+	Envelope CallEnvelope
 
-	Status  ResultStatus
-	OK      *ResultOK
+	Status  CompleteStatus
+	OK      *CompleteOK
 	Message *string // UTF-8 (only used when Status != ok)
 }
 
 type Cancel struct {
-	Envelope JobEnvelope
+	Envelope CallEnvelope
 
 	Reason *string // UTF-8
 }
@@ -142,21 +155,22 @@ type ErrorCode uint16
 
 const (
 	ErrorCodeUnsupportedVersion  ErrorCode = 1
-	ErrorCodeUnsupportedTask     ErrorCode = 2
-	ErrorCodeQuoteExpired        ErrorCode = 3
-	ErrorCodePaymentRequired     ErrorCode = 4
-	ErrorCodePaymentInvalid      ErrorCode = 5
-	ErrorCodePayloadTooLarge     ErrorCode = 6
-	ErrorCodeRateLimited         ErrorCode = 7
-	ErrorCodeUnsupportedParams   ErrorCode = 8
+	ErrorCodeManifestRequired    ErrorCode = 2
+	ErrorCodeUnsupportedMethod   ErrorCode = 3
+	ErrorCodeQuoteExpired        ErrorCode = 4
+	ErrorCodePaymentRequired     ErrorCode = 5
+	ErrorCodePaymentInvalid      ErrorCode = 6
+	ErrorCodePayloadTooLarge     ErrorCode = 7
+	ErrorCodeRateLimited         ErrorCode = 8
 	ErrorCodeUnsupportedEncoding ErrorCode = 9
 	ErrorCodeInvalidState        ErrorCode = 10
 	ErrorCodeChunkOutOfOrder     ErrorCode = 11
 	ErrorCodeChecksumMismatch    ErrorCode = 12
+	ErrorCodeStreamLimitExceeded ErrorCode = 13
 )
 
 type Error struct {
-	Envelope JobEnvelope
+	Envelope CallEnvelope
 
 	Code    ErrorCode
 	Message *string // UTF-8

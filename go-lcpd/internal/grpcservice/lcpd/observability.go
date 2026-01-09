@@ -18,38 +18,36 @@ import (
 
 const taskKindOpenAIChatCompletionsV1 = "openai.chat_completions.v1"
 
-type taskLogSummary struct {
-	taskKind        string
+type callLogSummary struct {
+	method          string
 	model           string
 	requestBytes    int
 	maxOutputTokens uint32
 }
 
-func summarizeTask(task *lcpdv1.Task) taskLogSummary {
-	if task == nil {
-		return taskLogSummary{}
+func summarizeCall(call *lcpdv1.CallSpec) callLogSummary {
+	if call == nil {
+		return callLogSummary{}
 	}
 
-	spec := task.GetOpenaiChatCompletionsV1()
-	if spec == nil {
-		return taskLogSummary{}
+	method := call.GetMethod()
+	summary := callLogSummary{
+		method:       method,
+		requestBytes: len(call.GetRequestBytes()),
 	}
 
-	model := ""
-	if params := spec.GetParams(); params != nil {
-		model = params.GetModel()
+	if method == taskKindOpenAIChatCompletionsV1 {
+		model, maxTokens := openAIChatCompletionsLogInfoFromRequestJSON(call.GetRequestBytes())
+		summary.model = model
+		summary.maxOutputTokens = maxTokens
 	}
 
-	return taskLogSummary{
-		taskKind:        taskKindOpenAIChatCompletionsV1,
-		model:           model,
-		requestBytes:    len(spec.GetRequestJson()),
-		maxOutputTokens: maxOutputTokensFromOpenAIChatCompletionsRequestJSON(spec.GetRequestJson()),
-	}
+	return summary
 }
 
 func maxOutputTokensFromOpenAIChatCompletionsRequestJSON(b []byte) uint32 {
 	var parsed struct {
+		Model               string  `json:"model,omitempty"`
 		MaxCompletionTokens *uint32 `json:"max_completion_tokens,omitempty"`
 		MaxTokens           *uint32 `json:"max_tokens,omitempty"`
 		MaxOutputTokens     *uint32 `json:"max_output_tokens,omitempty"`
@@ -69,15 +67,38 @@ func maxOutputTokensFromOpenAIChatCompletionsRequestJSON(b []byte) uint32 {
 	return 0
 }
 
-func (s *Service) summarizeStoredTask(peerID string, jobID lcp.JobID) taskLogSummary {
+func openAIChatCompletionsLogInfoFromRequestJSON(b []byte) (string, uint32) {
+	var parsed struct {
+		Model               string  `json:"model,omitempty"`
+		MaxCompletionTokens *uint32 `json:"max_completion_tokens,omitempty"`
+		MaxTokens           *uint32 `json:"max_tokens,omitempty"`
+		MaxOutputTokens     *uint32 `json:"max_output_tokens,omitempty"`
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		return "", 0
+	}
+
+	maxTokens := uint32(0)
+	switch {
+	case parsed.MaxCompletionTokens != nil:
+		maxTokens = *parsed.MaxCompletionTokens
+	case parsed.MaxTokens != nil:
+		maxTokens = *parsed.MaxTokens
+	case parsed.MaxOutputTokens != nil:
+		maxTokens = *parsed.MaxOutputTokens
+	}
+	return parsed.Model, maxTokens
+}
+
+func (s *Service) summarizeStoredCall(peerID string, jobID lcp.JobID) callLogSummary {
 	if s.jobs == nil {
-		return taskLogSummary{}
+		return callLogSummary{}
 	}
 	job, ok := s.jobs.Get(peerID, jobID)
 	if !ok {
-		return taskLogSummary{}
+		return callLogSummary{}
 	}
-	return summarizeTask(job.Task)
+	return summarizeCall(job.Call)
 }
 
 func unixSeconds(ts *timestamppb.Timestamp) int64 {
@@ -90,50 +111,51 @@ func unixSeconds(ts *timestamppb.Timestamp) int64 {
 func (s *Service) logQuoteReceived(
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	payloadBytes int,
-	terms *lcpdv1.Terms,
+	quote *lcpdv1.Quote,
 	started time.Time,
 ) {
 	s.logger.Infow(
 		"quote received",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
-		"task_kind", summary.taskKind,
+		"call_id", jobID.String(),
+		"method", summary.method,
 		"model", summary.model,
 		"request_bytes", summary.requestBytes,
 		"max_output_tokens", summary.maxOutputTokens,
 		"payload_bytes", payloadBytes,
-		"price_msat", terms.GetPriceMsat(),
-		"quote_expiry_unix", unixSeconds(terms.GetQuoteExpiry()),
-		"terms_hash", hex.EncodeToString(terms.GetTermsHash()),
+		"price_msat", quote.GetPriceMsat(),
+		"quote_expiry_unix", unixSeconds(quote.GetQuoteExpiry()),
+		"terms_hash", hex.EncodeToString(quote.GetTermsHash()),
 		"total_ms", time.Since(started).Milliseconds(),
 	)
 }
 
-func (s *Service) logResultReceived(
+func (s *Service) logCompleteReceived(
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
-	terms *lcpdv1.Terms,
+	summary callLogSummary,
+	quote *lcpdv1.Quote,
 	payDuration time.Duration,
 	waitDuration time.Duration,
-	res *lcpdv1.Result,
+	res *lcpdv1.Complete,
 	started time.Time,
 ) {
-	contentType, resultBytes := resultLoggingFields(res)
+	contentType, resultBytes := completeLoggingFields(res)
 
 	s.logger.Infow(
-		"result received",
+		"complete received",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
-		"task_kind", summary.taskKind,
+		"call_id", jobID.String(),
+		"method", summary.method,
 		"model", summary.model,
 		"request_bytes", summary.requestBytes,
 		"max_output_tokens", summary.maxOutputTokens,
-		"price_msat", terms.GetPriceMsat(),
-		"quote_expiry_unix", unixSeconds(terms.GetQuoteExpiry()),
-		"terms_hash", hex.EncodeToString(terms.GetTermsHash()),
+		"price_msat", quote.GetPriceMsat(),
+		"quote_expiry_unix", unixSeconds(quote.GetQuoteExpiry()),
+		"terms_hash", hex.EncodeToString(quote.GetTermsHash()),
+		"status", res.GetStatus(),
 		"result_bytes", resultBytes,
 		"content_type", contentType,
 		"pay_ms", payDuration.Milliseconds(),
@@ -142,36 +164,36 @@ func (s *Service) logResultReceived(
 	)
 }
 
-func resultLoggingFields(res *lcpdv1.Result) (string, int) {
+func completeLoggingFields(res *lcpdv1.Complete) (string, int) {
 	if res == nil {
 		return "", 0
 	}
 
-	if res.GetStatus() == lcpdv1.Result_STATUS_OK && res.GetResultLen() != 0 {
-		resultLen := res.GetResultLen()
+	if res.GetStatus() == lcpdv1.Complete_STATUS_OK && res.GetResponseLen() != 0 {
+		resultLen := res.GetResponseLen()
 		if resultLen > math.MaxInt {
-			return res.GetContentType(), math.MaxInt
+			return res.GetResponseContentType(), math.MaxInt
 		}
-		return res.GetContentType(), int(resultLen)
+		return res.GetResponseContentType(), int(resultLen)
 	}
 
-	return res.GetContentType(), len(res.GetResult())
+	return res.GetResponseContentType(), len(res.GetResponseBytes())
 }
 
 func (s *Service) requestQuoteWaiterError(
 	ctx context.Context,
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	err error,
 ) error {
 	st := grpcStatusFromWaiterError(ctx, err)
 	s.logger.Warnw(
 		"request_quote failed",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
+		"call_id", jobID.String(),
 		"grpc_code", status.Code(st),
-		"task_kind", summary.taskKind,
+		"method", summary.method,
 		"model", summary.model,
 	)
 	return st
@@ -180,16 +202,16 @@ func (s *Service) requestQuoteWaiterError(
 func (s *Service) requestQuoteLCPError(
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	lcpErr *lcpwire.Error,
 ) error {
 	s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 	s.logger.Warnw(
 		"request_quote failed",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
+		"call_id", jobID.String(),
 		"grpc_code", codes.FailedPrecondition,
-		"task_kind", summary.taskKind,
+		"method", summary.method,
 		"model", summary.model,
 		"lcp_error_code", lcpErr.Code,
 	)
@@ -199,7 +221,7 @@ func (s *Service) requestQuoteLCPError(
 func (s *Service) acceptAndExecuteVerifyError(
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	verifyErr error,
 ) error {
 	s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
@@ -207,9 +229,9 @@ func (s *Service) acceptAndExecuteVerifyError(
 		s.logger.Warnw(
 			"accept_and_execute failed",
 			"peer_id", peerID,
-			"job_id", jobID.String(),
+			"call_id", jobID.String(),
 			"grpc_code", st.Code(),
-			"task_kind", summary.taskKind,
+			"method", summary.method,
 			"model", summary.model,
 		)
 	}
@@ -220,7 +242,7 @@ func (s *Service) acceptAndExecuteLightningError(
 	ctx context.Context,
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	payErr error,
 ) error {
 	s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
@@ -228,9 +250,9 @@ func (s *Service) acceptAndExecuteLightningError(
 	s.logger.Warnw(
 		"accept_and_execute failed",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
+		"call_id", jobID.String(),
 		"grpc_code", status.Code(st),
-		"task_kind", summary.taskKind,
+		"method", summary.method,
 		"model", summary.model,
 	)
 	return st
@@ -240,7 +262,7 @@ func (s *Service) acceptAndExecuteWaiterError(
 	ctx context.Context,
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	err error,
 ) error {
 	s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
@@ -248,9 +270,9 @@ func (s *Service) acceptAndExecuteWaiterError(
 	s.logger.Warnw(
 		"accept_and_execute failed",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
+		"call_id", jobID.String(),
 		"grpc_code", status.Code(st),
-		"task_kind", summary.taskKind,
+		"method", summary.method,
 		"model", summary.model,
 	)
 	return st
@@ -259,16 +281,16 @@ func (s *Service) acceptAndExecuteWaiterError(
 func (s *Service) acceptAndExecuteLCPError(
 	peerID string,
 	jobID lcp.JobID,
-	summary taskLogSummary,
+	summary callLogSummary,
 	lcpErr *lcpwire.Error,
 ) error {
 	s.markJobState(peerID, jobID, requesterjobstore.StateFailed)
 	s.logger.Warnw(
 		"accept_and_execute failed",
 		"peer_id", peerID,
-		"job_id", jobID.String(),
+		"call_id", jobID.String(),
 		"grpc_code", codes.FailedPrecondition,
-		"task_kind", summary.taskKind,
+		"method", summary.method,
 		"model", summary.model,
 		"lcp_error_code", lcpErr.Code,
 	)

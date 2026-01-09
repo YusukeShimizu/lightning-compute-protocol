@@ -41,7 +41,7 @@ func TestQuoteRequestValidator_UnsupportedTaskKind(t *testing.T) {
 		t.Fatalf("expected validation error, got nil")
 	}
 
-	want := lcpwire.ErrorCodeUnsupportedTask
+	want := lcpwire.ErrorCodeUnsupportedMethod
 	if diff := cmp.Diff(want, err.Code); diff != "" {
 		t.Fatalf("error code mismatch (-want +got):\n%s", diff)
 	}
@@ -51,12 +51,8 @@ func TestQuoteRequestValidator_SupportedTasksTemplateMismatch(t *testing.T) {
 	t.Parallel()
 
 	validator := defaultValidator()
-	encoded := mustEncodeOpenAIChatCompletionsV1Params(
-		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-template"},
-	)
-	manifest := manifestWithTemplates(lcpwire.TaskTemplate{
-		TaskKind:    taskKindOpenAIChatCompletionsV1,
-		ParamsBytes: &encoded,
+	manifest := manifestWithTemplates(lcpwire.MethodDescriptor{
+		Method: "some.other.method",
 	})
 
 	req := newOpenAIChatCompletionsV1QuoteRequest("model-request")
@@ -66,7 +62,7 @@ func TestQuoteRequestValidator_SupportedTasksTemplateMismatch(t *testing.T) {
 		t.Fatalf("expected validation error, got nil")
 	}
 
-	want := lcpwire.ErrorCodeUnsupportedTask
+	want := lcpwire.ErrorCodeUnsupportedMethod
 	if diff := cmp.Diff(want, err.Code); diff != "" {
 		t.Fatalf("error code mismatch (-want +got):\n%s", diff)
 	}
@@ -76,12 +72,8 @@ func TestQuoteRequestValidator_SupportedTasksTemplateMatch(t *testing.T) {
 	t.Parallel()
 
 	validator := defaultValidator()
-	encoded := mustEncodeOpenAIChatCompletionsV1Params(
-		lcpwire.OpenAIChatCompletionsV1Params{Model: "model-template"},
-	)
-	manifest := manifestWithTemplates(lcpwire.TaskTemplate{
-		TaskKind:    taskKindOpenAIChatCompletionsV1,
-		ParamsBytes: &encoded,
+	manifest := manifestWithTemplates(lcpwire.MethodDescriptor{
+		Method: taskKindOpenAIChatCompletionsV1,
 	})
 
 	req := newOpenAIChatCompletionsV1QuoteRequest("model-template")
@@ -98,7 +90,7 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_AcceptsValidParams(t *tes
 		SupportedProtocolVersions: map[uint16]struct{}{
 			lcpwire.ProtocolVersionV02: {},
 		},
-		SupportedTaskKinds: map[string]struct{}{
+		SupportedMethods: map[string]struct{}{
 			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}
@@ -117,12 +109,12 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_RejectsMissingParams(t *t
 		SupportedProtocolVersions: map[uint16]struct{}{
 			lcpwire.ProtocolVersionV02: {},
 		},
-		SupportedTaskKinds: map[string]struct{}{
+		SupportedMethods: map[string]struct{}{
 			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}
 
-	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.Call) {
 		r.ParamsBytes = nil
 	})
 
@@ -131,7 +123,7 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_RejectsMissingParams(t *t
 		t.Fatalf("expected validation error, got nil")
 	}
 
-	want := lcpwire.ErrorCodeUnsupportedParams
+	want := lcpwire.ErrorCodeUnsupportedMethod
 	if diff := cmp.Diff(want, err.Code); diff != "" {
 		t.Fatalf("error code mismatch (-want +got):\n%s", diff)
 	}
@@ -144,7 +136,7 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_RejectsUnknownParams(t *t
 		SupportedProtocolVersions: map[uint16]struct{}{
 			lcpwire.ProtocolVersionV02: {},
 		},
-		SupportedTaskKinds: map[string]struct{}{
+		SupportedMethods: map[string]struct{}{
 			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}
@@ -165,7 +157,7 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_RejectsUnknownParams(t *t
 	}
 	encoded := buf.Bytes()
 
-	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.QuoteRequest) {
+	req := newOpenAIChatCompletionsV1QuoteRequest("gpt-5.2", func(r *lcpwire.Call) {
 		r.ParamsBytes = &encoded
 	})
 
@@ -174,7 +166,7 @@ func TestQuoteRequestValidator_OpenAIChatCompletionsV1_RejectsUnknownParams(t *t
 		t.Fatalf("expected validation error, got nil")
 	}
 
-	want := lcpwire.ErrorCodeUnsupportedParams
+	want := lcpwire.ErrorCodeUnsupportedMethod
 	if diff := cmp.Diff(want, vErr.Code); diff != "" {
 		t.Fatalf("error code mismatch (-want +got):\n%s", diff)
 	}
@@ -185,7 +177,7 @@ func defaultValidator() QuoteRequestValidator {
 		SupportedProtocolVersions: map[uint16]struct{}{
 			lcpwire.ProtocolVersionV02: {},
 		},
-		SupportedTaskKinds: map[string]struct{}{
+		SupportedMethods: map[string]struct{}{
 			taskKindOpenAIChatCompletionsV1: {},
 		},
 	}

@@ -12,7 +12,7 @@ import (
 
 const (
 	tlvTypeProtocolVersion = uint64(1)
-	tlvTypeJobID           = uint64(2)
+	tlvTypeCallID          = uint64(2)
 	tlvTypeMsgID           = uint64(3)
 	tlvTypeExpiry          = uint64(4)
 
@@ -149,10 +149,10 @@ func ptrCopyBytes(b []byte) *[]byte {
 	return &c
 }
 
-func validateJobScopeNotPresent(m map[uint64][]byte) error {
-	for _, t := range []uint64{tlvTypeJobID, tlvTypeMsgID, tlvTypeExpiry} {
+func validateCallScopeNotPresent(m map[uint64][]byte) error {
+	for _, t := range []uint64{tlvTypeCallID, tlvTypeMsgID, tlvTypeExpiry} {
 		if _, ok := m[t]; ok {
-			return errors.New("job-scope envelope tlvs must not be present")
+			return errors.New("call-scope envelope tlvs must not be present")
 		}
 	}
 	return nil

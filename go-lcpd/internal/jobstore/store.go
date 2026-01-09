@@ -33,7 +33,7 @@ type Job struct {
 	JobID      lcp.JobID
 	State      State
 
-	QuoteRequest *lcpwire.QuoteRequest
+	Call *lcpwire.Call
 
 	InputStream *InputStreamState
 
@@ -42,7 +42,7 @@ type Job struct {
 	PaymentHash     *lcp.Hash32
 	InvoiceAddIndex *uint64
 
-	QuoteResponse *lcpwire.QuoteResponse
+	Quote *lcpwire.Quote
 
 	CreatedAt time.Time
 }
@@ -141,7 +141,7 @@ func (s *Store) UpdateState(key Key, state State) bool {
 	return true
 }
 
-func (s *Store) SetQuoteResponse(key Key, resp lcpwire.QuoteResponse) bool {
+func (s *Store) SetQuote(key Key, quote lcpwire.Quote) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,11 +150,11 @@ func (s *Store) SetQuoteResponse(key Key, resp lcpwire.QuoteResponse) bool {
 		return false
 	}
 
-	respCopy := resp
-	job.QuoteResponse = &respCopy
-	job.QuoteExpiry = resp.QuoteExpiry
+	quoteCopy := quote
+	job.Quote = &quoteCopy
+	job.QuoteExpiry = quote.QuoteExpiry
 
-	termsCopy := resp.TermsHash
+	termsCopy := quote.TermsHash
 	job.TermsHash = &termsCopy
 
 	s.jobs[key] = job
@@ -184,13 +184,13 @@ func (s *Store) Len() int {
 }
 
 func cloneJob(job Job) Job {
-	if job.QuoteRequest != nil {
-		reqCopy := *job.QuoteRequest
+	if job.Call != nil {
+		reqCopy := *job.Call
 		if reqCopy.ParamsBytes != nil {
 			paramsCopy := append([]byte(nil), (*reqCopy.ParamsBytes)...)
 			reqCopy.ParamsBytes = &paramsCopy
 		}
-		job.QuoteRequest = &reqCopy
+		job.Call = &reqCopy
 	}
 	if job.InputStream != nil {
 		streamCopy := *job.InputStream
@@ -211,9 +211,9 @@ func cloneJob(job Job) Job {
 		addIndexCopy := *job.InvoiceAddIndex
 		job.InvoiceAddIndex = &addIndexCopy
 	}
-	if job.QuoteResponse != nil {
-		respCopy := *job.QuoteResponse
-		job.QuoteResponse = &respCopy
+	if job.Quote != nil {
+		quoteCopy := *job.Quote
+		job.Quote = &quoteCopy
 	}
 	return job
 }

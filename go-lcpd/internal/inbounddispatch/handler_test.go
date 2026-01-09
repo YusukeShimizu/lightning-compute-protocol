@@ -41,8 +41,8 @@ func TestHandler_DispatchesPerSpec(t *testing.T) {
 		wantRequester int
 	}{
 		{
-			name:          "quote_request -> provider",
-			msgType:       uint16(lcpwire.MessageTypeQuoteRequest),
+			name:          "call -> provider",
+			msgType:       uint16(lcpwire.MessageTypeCall),
 			wantProvider:  1,
 			wantRequester: 0,
 		},
@@ -53,14 +53,14 @@ func TestHandler_DispatchesPerSpec(t *testing.T) {
 			wantRequester: 0,
 		},
 		{
-			name:          "quote_response -> requester",
-			msgType:       uint16(lcpwire.MessageTypeQuoteResponse),
+			name:          "quote -> requester",
+			msgType:       uint16(lcpwire.MessageTypeQuote),
 			wantProvider:  0,
 			wantRequester: 1,
 		},
 		{
-			name:          "result -> requester",
-			msgType:       uint16(lcpwire.MessageTypeResult),
+			name:          "complete -> requester",
+			msgType:       uint16(lcpwire.MessageTypeComplete),
 			wantProvider:  0,
 			wantRequester: 1,
 		},
@@ -68,6 +68,12 @@ func TestHandler_DispatchesPerSpec(t *testing.T) {
 			name:          "error -> requester",
 			msgType:       uint16(lcpwire.MessageTypeError),
 			wantProvider:  0,
+			wantRequester: 1,
+		},
+		{
+			name:          "stream_begin -> both",
+			msgType:       uint16(lcpwire.MessageTypeStreamBegin),
+			wantProvider:  1,
 			wantRequester: 1,
 		},
 		{

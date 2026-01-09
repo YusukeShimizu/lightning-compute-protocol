@@ -7,7 +7,7 @@ const (
 )
 
 func EncodeCancel(c Cancel) ([]byte, error) {
-	envelopeRecords, err := encodeJobEnvelope(c.Envelope)
+	envelopeRecords, err := encodeCallEnvelope(c.Envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func DecodeCancel(payload []byte) (Cancel, error) {
 		return Cancel{}, err
 	}
 
-	env, err := decodeJobEnvelope(m)
+	env, err := decodeCallEnvelope(m)
 	if err != nil {
 		return Cancel{}, err
 	}
