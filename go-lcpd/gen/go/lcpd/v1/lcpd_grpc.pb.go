@@ -13,9 +13,9 @@
 //
 // LCP (Lightning Compute Protocol) is a Lightning L3 overlay protocol that
 // uses BOLT #1 custom messages carrying TLV streams to negotiate and execute
-// compute jobs (quote → payment → execution → result delivery).
+// method calls (manifest → call → quote → pay → stream → complete).
 //
-// This API is designed to be compatible with the LCP v0.2 wire protocol
+// This API is designed to be compatible with the LCP v0.3 wire protocol
 // described in `docs/protocol/protocol.md`.
 
 package lcpdv1
@@ -70,14 +70,14 @@ type LCPDServiceClient interface {
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: No local info is returned.
 	GetLocalInfo(ctx context.Context, in *GetLocalInfoRequest, opts ...grpc.CallOption) (*GetLocalInfoResponse, error)
-	// RequestQuote sends an `lcp_quote_request` to a specific peer.
+	// RequestQuote sends an `lcp_call` and a request stream to a specific peer.
 	//
-	// On success, it returns the provider's `lcp_quote_response` as `Terms`,
+	// On success, it returns the provider's `lcp_quote` as `Quote`,
 	// including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`
 	// (invoice swapping defense).
 	// Errors:
 	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing
-	//     `task`, or invalid task spec).
+	//     `call`, or invalid call spec).
 	//     Impact: No wire message is sent to the peer.
 	//   - NOT_FOUND: The target peer is unknown to the daemon.
 	//     Impact: No wire message is sent to the peer.
@@ -89,21 +89,21 @@ type LCPDServiceClient interface {
 	//     Impact: No quote is returned.
 	//   - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.
 	//     Impact: Quote outcome is unknown to the caller; retry MAY result in a new
-	//     `job_id` and a different invoice unless the implementation provides idempotency.
+	//     `call_id` and a different invoice unless the implementation provides idempotency.
 	//   - UNAVAILABLE: Transient transport failure sending/receiving peer messages.
 	//     Impact: Quote outcome is unknown; safe retries depend on idempotency.
 	RequestQuote(ctx context.Context, in *RequestQuoteRequest, opts ...grpc.CallOption) (*RequestQuoteResponse, error)
 	// AcceptAndExecute pays the invoice associated with the quote and waits for
-	// the `lcp_result`.
+	// the terminal `lcp_complete` and (when available) the validated response stream.
 	//
 	// This is a blocking call. Clients SHOULD set a deadline and MAY cancel via
 	// context cancellation (gRPC) or `CancelJob`.
 	//
 	// Errors:
-	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format),
+	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format),
 	//     or `pay_invoice=false`.
 	//     Impact: No payment attempt is made and no execution is started.
-	//   - NOT_FOUND: The daemon has no known quote/payment data for the given `job_id`.
+	//   - NOT_FOUND: The daemon has no known quote/payment data for the given `call_id`.
 	//     Impact: No payment attempt is made.
 	//   - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the
 	//     daemon refuses to pay/execute due to local policy.
@@ -119,9 +119,9 @@ type LCPDServiceClient interface {
 	//     Impact: Outcome may be unknown if failure happened after payment settlement.
 	AcceptAndExecute(ctx context.Context, in *AcceptAndExecuteRequest, opts ...grpc.CallOption) (*AcceptAndExecuteResponse, error)
 	// AcceptAndExecuteStream pays the invoice associated with the quote and streams
-	// the decoded result stream bytes as they arrive.
+	// the decoded response stream bytes as they arrive.
 	//
-	// The stream ends with a terminal `Result` event that indicates the final job
+	// The stream ends with a terminal `Complete` event that indicates the final job
 	// status and (when available) the validated stream metadata (hash/len).
 	//
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
@@ -133,7 +133,7 @@ type LCPDServiceClient interface {
 	// Cancellation is best-effort: the provider may have already completed the job.
 	//
 	// Errors:
-	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format).
+	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format).
 	//     Impact: No cancel message is sent.
 	//   - NOT_FOUND: The target peer is unknown to the daemon.
 	//     Impact: No cancel message is sent.
@@ -255,14 +255,14 @@ type LCPDServiceServer interface {
 	//   - INTERNAL: Unexpected server error.
 	//     Impact: No local info is returned.
 	GetLocalInfo(context.Context, *GetLocalInfoRequest) (*GetLocalInfoResponse, error)
-	// RequestQuote sends an `lcp_quote_request` to a specific peer.
+	// RequestQuote sends an `lcp_call` and a request stream to a specific peer.
 	//
-	// On success, it returns the provider's `lcp_quote_response` as `Terms`,
+	// On success, it returns the provider's `lcp_quote` as `Quote`,
 	// including a BOLT11 invoice whose `description_hash` MUST equal `terms_hash`
 	// (invoice swapping defense).
 	// Errors:
 	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id` format, missing
-	//     `task`, or invalid task spec).
+	//     `call`, or invalid call spec).
 	//     Impact: No wire message is sent to the peer.
 	//   - NOT_FOUND: The target peer is unknown to the daemon.
 	//     Impact: No wire message is sent to the peer.
@@ -274,21 +274,21 @@ type LCPDServiceServer interface {
 	//     Impact: No quote is returned.
 	//   - DEADLINE_EXCEEDED: The peer did not respond before the client/server deadline.
 	//     Impact: Quote outcome is unknown to the caller; retry MAY result in a new
-	//     `job_id` and a different invoice unless the implementation provides idempotency.
+	//     `call_id` and a different invoice unless the implementation provides idempotency.
 	//   - UNAVAILABLE: Transient transport failure sending/receiving peer messages.
 	//     Impact: Quote outcome is unknown; safe retries depend on idempotency.
 	RequestQuote(context.Context, *RequestQuoteRequest) (*RequestQuoteResponse, error)
 	// AcceptAndExecute pays the invoice associated with the quote and waits for
-	// the `lcp_result`.
+	// the terminal `lcp_complete` and (when available) the validated response stream.
 	//
 	// This is a blocking call. Clients SHOULD set a deadline and MAY cancel via
 	// context cancellation (gRPC) or `CancelJob`.
 	//
 	// Errors:
-	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format),
+	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format),
 	//     or `pay_invoice=false`.
 	//     Impact: No payment attempt is made and no execution is started.
-	//   - NOT_FOUND: The daemon has no known quote/payment data for the given `job_id`.
+	//   - NOT_FOUND: The daemon has no known quote/payment data for the given `call_id`.
 	//     Impact: No payment attempt is made.
 	//   - FAILED_PRECONDITION: The quote is expired, the job is not executable, or the
 	//     daemon refuses to pay/execute due to local policy.
@@ -304,9 +304,9 @@ type LCPDServiceServer interface {
 	//     Impact: Outcome may be unknown if failure happened after payment settlement.
 	AcceptAndExecute(context.Context, *AcceptAndExecuteRequest) (*AcceptAndExecuteResponse, error)
 	// AcceptAndExecuteStream pays the invoice associated with the quote and streams
-	// the decoded result stream bytes as they arrive.
+	// the decoded response stream bytes as they arrive.
 	//
-	// The stream ends with a terminal `Result` event that indicates the final job
+	// The stream ends with a terminal `Complete` event that indicates the final job
 	// status and (when available) the validated stream metadata (hash/len).
 	//
 	// Errors follow the same model as `AcceptAndExecute`, but note that streaming
@@ -318,7 +318,7 @@ type LCPDServiceServer interface {
 	// Cancellation is best-effort: the provider may have already completed the job.
 	//
 	// Errors:
-	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`job_id` format).
+	//   - INVALID_ARGUMENT: Request validation failed (e.g. `peer_id`/`call_id` format).
 	//     Impact: No cancel message is sent.
 	//   - NOT_FOUND: The target peer is unknown to the daemon.
 	//     Impact: No cancel message is sent.

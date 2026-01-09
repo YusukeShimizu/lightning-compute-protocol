@@ -1,87 +1,62 @@
-# LCP v0.2 Specification (Draft)
+# LCP v0.3 Specification Draft
 
-## LCP v0.2 Overview
-
-LCP is an application-layer protocol carried over Lightning’s existing transport.
-It enables a **quote → pay → stream** flow using existing Lightning node capabilities (plugins / external processes).
-LCP does not modify the BOLTs.
-
-This document defines **LCP v0.2**.
-
-Key changes (v0.2):
-
-* **NOT backward compatible** with v0.1.
-* Adds **chunked streaming** for large payloads (input and result).
-* Payment is **single upfront payment per job** (one invoice per job).
-* `lcp_manifest` exchange is **mandatory** before any job-scope messages.
-
-LCP v0.2 uses BOLT #1 custom messages over a direct peer connection.
+## Streaming Method Call Protocol over Lightning Custom Messages
 
 ---
 
-## 1. Goals
+## 1. Overview, goals, and non-goals
 
-LCP v0.2 defines:
+### 1.1 Overview
 
-* A minimal P2P message set to negotiate a compute job
-* Binding between payment (BOLT11 invoice) and job terms to prevent invoice swapping
-* Streaming delivery of large **input** and **result** payloads using chunked messages
-* Application-layer idempotency and replay resistance
-* Provider capability advertisement at connection scope (`lcp_manifest`)
+LCP is an application-layer protocol carried over Lightning’s existing transport (BOLT #1 custom messages).
+It enables a **manifest → call → quote → pay → stream → complete** flow using existing Lightning node capabilities (plugins / external processes).
+LCP does not modify the BOLTs.
 
-Non-goals:
+This document defines **LCP v0.3**.
+
+Key properties (v0.3):
+
+* **Not backward compatible** with earlier drafts.
+* Uses a **method-call model** (`method` string identifies the procedure).
+* **Streaming-only payloads**: request and response bodies are always transferred via streams (chunked messages).
+* Provider capability advertisement via mandatory **`lcp_manifest`** before any call messages.
+
+### 1.2 Goals
+
+LCP v0.3 defines:
+
+* A minimal P2P message set to negotiate and execute a **method call**
+* Binding between payment (BOLT11 invoice) and call terms to prevent invoice swapping
+* Streaming transfer of large **request** and **response** payloads using chunked messages
+* Connection-scope capability advertisement (supported methods + limits) via `lcp_manifest`
+* Application-layer idempotency and replay resistance for call-scope messages and stream chunks
+
+### 1.3 Non-goals
+
+LCP v0.3 does **not** define:
 
 * Forwarding via onion messages / blinded paths
 * Atomic swap guarantees beyond invoice binding
+* Standard semantics for any particular method (method semantics are referenced by method documentation)
 * Multi-party orchestration
+* A new non-Lightning transport
 
 ---
 
-## 2. Conventions and terminology
+## 2. Transport
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT, MAY are to be interpreted as described in RFC 2119.
+### 2.1 Direct peer requirement
 
-* Requester: the node requesting a job
-* Provider: the node executing a job and delivering the result
-* Job: a compute task identified by `job_id` (32 bytes)
-* Stream: a large payload transferred via `lcp_stream_*` messages
-* Connection scope: information tied to a connection (not tied to a job)
-* Job scope: information tied to a specific job
-
-All additional fields are encoded only as TLV streams.
-
-### 2.1 Protocol versioning
-
-LCP versions are written as `vMAJOR.MINOR` (for example, v0.2).
-
-The wire field `protocol_version` is a `u16` derived from the (major, minor) pair:
-
-* `protocol_version = major*100 + minor`
-
-Notes:
-
-* This specification defines LCP v0.2, therefore `protocol_version = 2`.
-* Patch-level revisions to this document (v0.2.x) do not change `protocol_version`.
-
----
-
-## 3. Transport
-
-### 3.1 Direct peer requirement
-
-All LCP v0.2 messages are sent as BOLT #1 custom messages.
+All LCP v0.3 messages are sent as BOLT #1 custom messages.
 
 * The Requester and Provider MUST have an active Lightning peer connection.
 * LCP MUST NOT define or require a new non-Lightning transport.
 
-Operational note (non-normative):
+How the Requester discovers the Provider’s network address is out of scope.
 
-* How the Requester learns the Provider's network address is out of scope.
-  This spec assumes a known pubkey (and a reachable address).
+### 2.2 Custom message type range
 
-### 3.2 Custom message type range
-
-LCP v0.2 uses the following message type numbers (all ≥ 32768).
+LCP v0.3 uses the following message type numbers (all ≥ 32768).
 
 BOLT #1 compatibility (odd/even parity rules):
 
@@ -90,309 +65,240 @@ BOLT #1 compatibility (odd/even parity rules):
 
 Assignments:
 
-* 42081: `lcp_manifest`
-* 42083: `lcp_quote_request`
-* 42085: `lcp_quote_response`
-* 42087: `lcp_result` (terminal job completion)
-* 42089: `lcp_stream_begin`
-* 42091: `lcp_stream_chunk`
-* 42093: `lcp_stream_end`
-* 42095: `lcp_cancel`
-* 42097: `lcp_error`
+* 42101: `lcp_manifest`
+* 42103: `lcp_call`
+* 42105: `lcp_quote`
+* 42107: `lcp_complete`
+* 42109: `lcp_stream_begin`
+* 42111: `lcp_stream_chunk`
+* 42113: `lcp_stream_end`
+* 42115: `lcp_cancel`
+* 42117: `lcp_error`
 
 Receivers MUST ignore unknown TLVs.
 Receivers MUST apply BOLT #1 odd/even parity rules to unknown custom message types.
 
 ---
 
-## 4. TLV (envelope)
+## 3. Envelope and encoding
 
-Each LCP message payload is a TLV stream called `tlvs`. Unknown TLVs MUST be ignored.
+### 3.1 Terminology and requirements language
 
-TLV stream encoding (MUST):
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT, MAY are to be interpreted as described in RFC 2119.
+
+* Requester: the node initiating a call
+* Provider: the node executing a call and delivering the response
+* Call: a method invocation identified by `call_id` (32 bytes)
+* Stream: a payload transferred via `lcp_stream_*` messages
+* Connection scope: information tied to a connection (not tied to a call)
+* Call scope: information tied to a specific call
+
+### 3.2 Protocol versioning
+
+LCP versions are written as `vMAJOR.MINOR` (for example, v0.3).
+
+The wire field `protocol_version` is a `u16` derived from the (major, minor) pair:
+
+* `protocol_version = major*100 + minor`
+
+This specification defines LCP v0.3, therefore:
+
+* `protocol_version = 3`
+
+Patch-level revisions (v0.3.x) do not change `protocol_version`.
+
+### 3.3 TLV stream encoding
+
+Each LCP message payload is a TLV stream called `tlvs`.
+
+Normative rules (MUST):
 
 * Each TLV record is encoded as `bigsize(type)`, `bigsize(length)`, then `value` (same as BOLT TLV streams).
 * Records MUST be sorted in ascending `type`.
 * Duplicate records with the same `type` MUST NOT be included.
+* Unknown TLVs MUST be ignored.
 
-### 4.1 type: 1 (`protocol_version`)
+### 3.4 Common TLVs
+
+#### type: 1 (`protocol_version`)
 
 * data: [`u16`:`protocol_version`]
 
-Meaning:
+Rules:
 
 * `protocol_version` MUST be included in every LCP message.
-* In this specification (LCP v0.2), `protocol_version` is 2.
+* Implementations that do not support the version SHOULD ignore the message and MAY disconnect.
 
-### 4.2 Job-scope envelope TLVs
+### 3.5 Call-scope envelope TLVs
 
-The following TLVs are common to all job-scope LCP messages (everything except `lcp_manifest`) (MUST).
+The following TLVs are common to all call-scope messages (everything except `lcp_manifest`) (MUST):
 
-The sender MUST include `job_id`, `msg_id`, and `expiry`.
-
-* type: 2 (`job_id`): [`32*byte`:`job_id`]
+* type: 2 (`call_id`): [`32*byte`:`call_id`]
 * type: 3 (`msg_id`): [`32*byte`:`msg_id`]
 * type: 4 (`expiry`): [`tu64`:`expiry`]
 
 Meaning:
 
-* `job_id` MUST be unpredictable (generated by the Requester).
-* `msg_id` MUST be unique within the replay window, per sender, per `job_id`,
-  except for `lcp_stream_chunk` where `msg_id` is deterministic (§5.5.4).
+* `call_id` MUST be unpredictable (generated by the Requester).
+* `msg_id` MUST be unique within the replay window, per sender, per `call_id`,
+  except for `lcp_stream_chunk` where `msg_id` is deterministic (§6.4).
 * `expiry` is Unix epoch seconds. The receiver MUST ignore messages where `expiry < now`.
 
 Replay / idempotency retention:
 
-To avoid unbounded memory usage, receivers MUST bound how long they retain replay / pending state.
-
 Define:
 
-* `MAX_ENVELOPE_EXPIRY_WINDOW_SECONDS`: an implementation-defined constant (RECOMMENDED: 600).
+* `MAX_ENVELOPE_EXPIRY_WINDOW_SECONDS`: implementation-defined (RECOMMENDED: 600).
 * `effective_expiry = min(expiry, now + MAX_ENVELOPE_EXPIRY_WINDOW_SECONDS)`
 
 Rules (MUST):
 
-* The receiver MUST de-duplicate by (`job_id`, `msg_id`) at least until `effective_expiry`.
-* If a duplicate (`job_id`, `msg_id`) is received before `effective_expiry`, it MUST be ignored.
+* The receiver MUST de-duplicate by (`call_id`, `msg_id`) at least until `effective_expiry`.
+* If a duplicate (`call_id`, `msg_id`) is received before `effective_expiry`, it MUST be ignored.
 * If `expiry > now + MAX_ENVELOPE_EXPIRY_WINDOW_SECONDS`, the receiver MUST either:
+
   * reject/ignore the message, or
-  * process it but retain replay/pending state only until `effective_expiry` (clamp).
+  * process it but retain state only until `effective_expiry` (clamp).
 
-### 4.3 Encoding of `byte` TLVs
+### 3.6 Encoding of byte/string TLVs
 
-The LCP wire format is a TLV stream. Therefore, application-defined data is carried in the value of `byte` TLVs.
+* Any TLV explicitly specified as a UTF-8 string in this spec MUST be valid UTF-8.
+* All other `byte` TLVs MUST be treated as opaque bytes.
 
-Normative rules:
-
-* Any `byte` TLV explicitly specified as a UTF-8 string in this spec MUST be valid UTF-8.
-* All other `byte` TLVs MUST be treated as application-defined opaque bytes.
-  If the receiver cannot interpret them, it MAY ignore them.
-
-### 4.4 List encodings (inside TLV values)
+### 3.7 List encodings inside TLV values
 
 To represent multiple elements without repeating TLV types in the outer stream, this spec defines list encodings inside TLV values.
 
-#### 4.4.1 `bigsize_list`
-
-* data: `bigsize(count)` + `count` repetitions of `bigsize(value_i)`
-
-#### 4.4.2 `string_list`
+#### 3.7.1 `string_list`
 
 * data: `bigsize(count)` + `count` repetitions of (`bigsize(len_i)` + `len_i` bytes)
 * Each element MUST be a UTF-8 string.
 
-#### 4.4.3 `bytes_list`
+#### 3.7.2 `bytes_list`
 
 * data: `bigsize(count)` + `count` repetitions of (`bigsize(len_i)` + `len_i` bytes)
-* Each element MUST be treated as application-defined opaque bytes.
+* Each element MUST be treated as opaque bytes.
 
 ---
 
-## 5. Messages
+## 4. Manifest
 
-## 5.1 type: 42081 (`lcp_manifest`)
+### 4.1 `lcp_manifest`
 
-`lcp_manifest` is a **mandatory** connection-scope message in which each peer declares limits and (optionally) supported task templates.
+Type: 42101 (`lcp_manifest`)
 
-* data: [`tlv_stream`:`tlvs`]
+`lcp_manifest` is a **mandatory** connection-scope message in which each peer declares limits and (optionally) supported methods.
 
 Constraints:
 
-* `lcp_manifest` is connection-scope and MUST NOT include job-scope envelope TLVs (`job_id`, `msg_id`, `expiry`).
+* `lcp_manifest` is connection-scope and MUST NOT include call-scope envelope TLVs (`call_id`, `msg_id`, `expiry`).
 * Each side MUST send exactly one `lcp_manifest` per connection.
-* No job-scope messages MUST be sent until **both** manifests have been received.
+* No call-scope messages MUST be sent until **both** manifests have been received.
 
-Message-specific TLVs:
+If a call-scope message is received before manifest exchange completes, the receiver MUST ignore it and MAY respond with `lcp_error(code=manifest_required)` (if `call_id` is present).
 
-### type: 11 (`max_payload_bytes`)
+### 4.2 Manifest TLVs
+
+#### type: 11 (`max_payload_bytes`)
 
 * data: [`tu32`:`max_payload_bytes`]
 
 Meaning:
 
-* Declares the maximum payload size (the BOLT custom message payload portion) that the sender can receive.
-* The peer MUST NOT send subsequent messages whose payload exceeds the receiver's declared `max_payload_bytes`.
-* Implementations SHOULD cap `max_payload_bytes` to roughly 1/4 of the BOLT #1 custom message maximum (`length=65535 bytes`), e.g. 16384 bytes.
+* Maximum custom-message payload size the sender can receive.
+* The peer MUST NOT send messages whose payload exceeds the receiver’s `max_payload_bytes`.
+* Implementations SHOULD cap `max_payload_bytes` to roughly 1/4 of the BOLT #1 custom message maximum (65535), e.g. 16384 bytes.
 
-### type: 14 (`max_stream_bytes`)
+#### type: 14 (`max_stream_bytes`)
 
 * data: [`tu64`:`max_stream_bytes`]
 
 Meaning:
 
-* Declares the maximum total decoded bytes the sender can receive for a single stream (`lcp_stream_begin` … `lcp_stream_end`).
+* Maximum total decoded bytes the sender can receive for a single stream.
 
-### type: 15 (`max_job_bytes`)
+#### type: 15 (`max_call_bytes`)
 
-* data: [`tu64`:`max_job_bytes`]
-
-Meaning:
-
-* Declares the maximum total decoded bytes the sender can receive across all streams in a job (input + result + any future streams).
-
-### type: 16 (`max_inflight_jobs`) (optional)
-
-* data: [`u16`:`max_inflight_jobs`]
+* data: [`tu64`:`max_call_bytes`]
 
 Meaning:
 
-* Declares the maximum concurrent active jobs the sender is willing to handle per connection.
+* Maximum total decoded bytes the sender can receive across all streams in a call (request + response).
 
-### type: 12 (`supported_tasks`) (optional)
+#### type: 16 (`max_inflight_calls`) (optional)
 
-* data: [`byte`:`supported_tasks`] (`bytes_list`)
+* data: [`u16`:`max_inflight_calls`]
 
 Meaning:
 
-* `supported_tasks` enumerates the task templates that the Provider accepts in `lcp_quote_request`.
-* Each element is a TLV stream called `task_tlvs`, corresponding to `lcp_quote_request`'s `task_kind` / `params`.
-* The Requester SHOULD select a task template from this list when constructing `lcp_quote_request`.
+* Maximum concurrent active calls per connection the sender is willing to handle.
 
-`task_tlvs` (the element TLV stream):
+#### type: 12 (`supported_methods`) (optional)
 
-* type: 20 (`task_kind`)
+* data: [`byte`:`supported_methods`] (`bytes_list`)
 
-  * data: [`byte`:`task_kind`] (UTF-8 string)
+Meaning:
 
-* type: 22 (`params_template`)
+* `supported_methods` enumerates method descriptors the Provider accepts in `lcp_call`.
+* Each element is a TLV stream called `method_tlvs`.
 
-  * data: [`byte`:`params_template`] (bytes depending on `task_kind`; standardized kinds include §5.2.1)
+`method_tlvs` (element TLV stream):
 
-Matching against `lcp_quote_request` (recommended):
+* type: 20 (`method`): UTF-8 string (MUST)
+* type: 23 (`request_content_types`) (optional): `string_list`
+* type: 24 (`response_content_types`) (optional): `string_list`
+* type: 26 (`docs_uri`) (optional): UTF-8 string
+* type: 27 (`docs_sha256`) (optional): 32 bytes
+* type: 28 (`policy_notice`) (optional): UTF-8 string
 
-* If the Provider declares `supported_tasks`, and the received `lcp_quote_request` does not match at least one task template, the Provider SHOULD return `lcp_error(code=unsupported_task)`.
-* Task template matching:
-  * `task_kind` MUST match as a string.
-  * `params` handling depends on `task_kind`. For standardized kinds defined in §5.2.1, the peer MUST follow the encoding rules there.
+Recommended matching rule:
+
+* If `supported_methods` is present and a received `lcp_call.method` does not match, the Provider SHOULD return `lcp_error(code=unsupported_method)`.
 
 ---
 
-## 5.2 type: 42083 (`lcp_quote_request`)
+## 5. Call lifecycle
 
-Starts a job negotiation and declares `task_kind` and optional parameters.
+LCP v0.3 is **streaming-only** for payloads:
 
-Input is NOT carried inline in v0.2. The Requester MUST send an input stream after the `lcp_quote_request` (§5.5).
+* The Requester MUST send the call request payload as a request stream.
+* The Provider MUST send the call response payload as a response stream.
+* There is no inline request/response body in control messages.
 
-* data: [`tlv_stream`:`tlvs`]
+### 5.1 `lcp_call`
 
-Required TLVs (minimum):
+Type: 42103 (`lcp_call`)
 
-* type: 20 (`task_kind`): [`byte`:`task_kind`] (UTF-8 string, e.g., `openai.chat_completions.v1`)
+Starts a call negotiation and declares the method name and an optional small parameter blob.
+
+Required TLVs:
+
+* type: 20 (`method`): [`byte`:`method`] (UTF-8 string)
 
 Optional TLVs:
 
-* type: 22 (`params`): [`byte`:`params`] (bytes depending on `task_kind`; standardized kinds include §5.2.1)
+* type: 22 (`params`): [`byte`:`params`] (opaque bytes)
+* type: 25 (`params_content_type`): [`byte`:`params_content_type`] (UTF-8 media type string)
 
-Meaning:
+Rules:
 
-* The Provider MAY reject unsupported tasks via `lcp_error`.
-* For standardized kinds defined in §5.2.1, the sender MUST follow the encoding rules there.
-* If the Provider declares `lcp_manifest.supported_tasks`, the Requester SHOULD choose matching `task_kind` / `params`.
+* The Provider MAY reject unsupported methods via `lcp_error`.
+* If the Provider advertised `supported_methods`, the Requester SHOULD choose a matching method.
 
-Input requirement (MUST):
+Request stream requirement (MUST):
 
-* After sending `lcp_quote_request`, the Requester MUST send exactly one input stream with `stream_kind=input` (§5.5.1).
-* The Provider MUST NOT send `lcp_quote_response` until it has received and validated the input stream.
+* After sending `lcp_call`, the Requester MUST send exactly one request stream with `stream_kind=request` (§6.1).
+* The Provider MUST NOT send `lcp_quote` until it has received and validated the request stream.
 
 Idempotency (recommended):
 
-* If the Provider receives multiple `lcp_quote_request` messages for the same `job_id`, it SHOULD return the same `lcp_quote_response` (if still valid) or SHOULD return an `lcp_error` indicating `quote_expired`.
+* If the Provider receives multiple `lcp_call` messages for the same `call_id`, it SHOULD return the same `lcp_quote` if still valid; otherwise it SHOULD return `lcp_error(code=quote_expired)`.
 
----
+### 5.2 `lcp_quote`
 
-### 5.2.1 Standardized `task_kind` (v0.2)
+Type: 42105 (`lcp_quote`)
 
-LCP v0.2 standardizes the following `task_kind` values:
-
-* `task_kind = "openai.chat_completions.v1"`
-* `task_kind = "openai.responses.v1"`
-
-The standardized kinds in this section define only how bytes are carried over LCP:
-
-* LCP does not interpret, validate, or re-encode the HTTP bodies (JSON or SSE). They are treated as opaque bytes.
-* Result stream chunk boundaries have no semantic meaning (they do not align with JSON tokens nor SSE events).
-
-#### `task_kind = "openai.chat_completions.v1"`
-
-Input stream interpretation:
-
-* The decoded input stream bytes MUST be the exact HTTP request body bytes for an OpenAI-compatible `POST /v1/chat/completions` call.
-* The Requester MUST set the input stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
-
-`params` encoding:
-
-* `params` MUST be a TLV stream called `openai_chat_completions_v1_params_tlvs`.
-* The TLV encoding for `openai_chat_completions_v1_params_tlvs` is the same as the TLV stream in §4.
-* `openai_chat_completions_v1_params_tlvs` MUST include at least `model`.
-
-`openai_chat_completions_v1_params_tlvs` (standard TLVs):
-
-* type: 1 (`model`): [`byte`:`model`] (UTF-8 string)
-  Meaning:
-  * `model` MUST identify the execution target (for example, an OpenAI model ID).
-
-Constraint (recommended):
-
-* Providers SHOULD reject `openai_chat_completions_v1_params_tlvs` containing unknown param types with `lcp_error(code=unsupported_params)`.
-
-Result:
-
-* The decoded result stream bytes MUST be the exact HTTP response body bytes for the corresponding OpenAI-compatible `POST /v1/chat/completions` call.
-* If the request JSON field `stream` is omitted or false (non-streaming):
-  * The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
-* If the request JSON field `stream` is true (streaming):
-  * The decoded result stream bytes MUST be the exact `text/event-stream` (SSE) response body bytes, without interpretation.
-  * The Provider MUST set the result stream `content_type="text/event-stream; charset=utf-8"` and `content_encoding="identity"`.
-
-Streaming note:
-
-* In the streaming case, the Provider MAY omit `total_len` / `sha256` in `lcp_stream_begin` (if unknown) and MUST provide them in `lcp_stream_end`.
-* The Requester MAY consume or forward decoded bytes before validating `lcp_stream_end`. If validation fails, the Requester SHOULD treat the stream as invalid and SHOULD NOT treat the job as successful.
-
-#### `task_kind = "openai.responses.v1"`
-
-Input stream interpretation:
-
-* The decoded input stream bytes MUST be the exact HTTP request body bytes for an OpenAI-compatible `POST /v1/responses` call.
-* The Requester MUST set the input stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
-
-`params` encoding:
-
-* `params` MUST be a TLV stream called `openai_responses_v1_params_tlvs`.
-* The TLV encoding for `openai_responses_v1_params_tlvs` is the same as the TLV stream in §4.
-* `openai_responses_v1_params_tlvs` MUST include at least `model`.
-
-`openai_responses_v1_params_tlvs` (standard TLVs):
-
-* type: 1 (`model`): [`byte`:`model`] (UTF-8 string)
-  Meaning:
-  * `model` MUST identify the execution target (for example, an OpenAI model ID).
-
-Constraint (recommended):
-
-* Providers SHOULD reject `openai_responses_v1_params_tlvs` containing unknown param types with `lcp_error(code=unsupported_params)`.
-
-Result:
-
-* The decoded result stream bytes MUST be the exact HTTP response body bytes for the corresponding OpenAI-compatible `POST /v1/responses` call.
-* If the request JSON field `stream` is omitted or false (non-streaming):
-  * The Provider MUST set the result stream `content_type="application/json; charset=utf-8"` and `content_encoding="identity"`.
-* If the request JSON field `stream` is true (streaming):
-  * The decoded result stream bytes MUST be the exact `text/event-stream` (SSE) response body bytes, without interpretation.
-  * The Provider MUST set the result stream `content_type="text/event-stream; charset=utf-8"` and `content_encoding="identity"`.
-
-Extensions:
-
-* Implementations MAY support additional `task_kind` values beyond the above.
-* If the parties have not pre-agreed on the encoding of `input` / `params`, the Provider SHOULD return `lcp_error` with `unsupported_task`.
-
----
-
-## 5.3 type: 42085 (`lcp_quote_response`)
-
-Provides a price and a BOLT11 invoice bound to the job terms.
-
-* data: [`tlv_stream`:`tlvs`]
+Provides a price and a BOLT11 invoice bound to the call terms.
 
 Required TLVs:
 
@@ -401,323 +307,358 @@ Required TLVs:
 * type: 32 (`terms_hash`): [`32*byte`:`terms_hash`]
 * type: 33 (`payment_request`): [`byte`:`payment_request`] (BOLT11 invoice string, UTF-8)
 
+Optional TLVs (commitment to response encoding):
+
+* type: 34 (`response_content_type`): UTF-8 string
+* type: 35 (`response_content_encoding`): UTF-8 string
+
 Invoice binding (MUST):
 
-* The Provider MUST set the BOLT11 invoice `description_hash` to exactly equal `terms_hash`.
-* Before paying, the Requester MUST verify:
+* Provider MUST set invoice `description_hash == terms_hash`.
+* Before paying, Requester MUST verify:
+
   * `description_hash == terms_hash`
-  * the invoice payee (destination node pubkey) matches the LCP peer's (Provider's) pubkey
-  * the invoice amount equals `price_msat` (amount-less invoices MUST be rejected)
-  * the invoice expiry time does not exceed `quote_expiry`
+  * invoice payee pubkey == Provider’s peer pubkey
+  * invoice amount == `price_msat` (amount-less invoices MUST be rejected)
+  * invoice expiry time does not exceed `quote_expiry`
 
 Invoice time rules (MUST):
 
-* Let `invoice_timestamp_unix` be the BOLT11 invoice timestamp (Unix epoch seconds).
-* Let `invoice_expiry_seconds` be the BOLT11 invoice expiry (seconds).
+* Let `invoice_timestamp_unix` be the invoice timestamp (Unix epoch seconds).
+* Let `invoice_expiry_seconds` be invoice expiry (seconds).
 * Define `invoice_expiry_unix = invoice_timestamp_unix + invoice_expiry_seconds`.
-* The Requester MUST verify `invoice_expiry_unix <= quote_expiry`.
-  * Implementations MAY include a small allowance for clock skew (RECOMMENDED: `ALLOWED_CLOCK_SKEW_SECONDS = 5`).
+* Requester MUST verify `invoice_expiry_unix <= quote_expiry`.
+
+  * Clock skew allowance MAY be applied (RECOMMENDED: 5 seconds).
 
 Execution rule (MUST):
 
-* The Provider MUST NOT start executing or delivering results for `job_id` until the invoice is settled.
+* Provider MUST NOT start executing or delivering response payloads until invoice settlement.
 
-`terms_hash` computation (MUST):
+#### 5.2.1 `terms_hash` computation
+
+`terms_hash` (MUST):
 
 * `terms_hash = SHA256(tlv_encode(terms_tlvs))`
-* `terms_tlvs` is a canonical TLV stream containing only:
-  * type: 1 (`protocol_version`): `u16`
-  * type: 2 (`job_id`): `32*byte`
-  * type: 3 (`price_msat`): `tu64`
-  * type: 4 (`quote_expiry`): `tu64`
-  * type: 20 (`task_kind`): UTF-8 string
-  * type: 50 (`input_hash`): `32*byte` (`SHA256(input_decoded_bytes)`)
-  * type: 52 (`input_len`): `tu64` (byte length of `input_decoded_bytes`)
-  * type: 53 (`input_content_type`): UTF-8 string
-  * type: 54 (`input_content_encoding`): UTF-8 string
-  * type: 51 (`params_hash`): `32*byte` (`SHA256(canonical_tlv(params))`)
 
-`canonical_tlv(params)` (MUST):
+`terms_tlvs` is a canonical TLV stream containing only:
 
-* If `params` is present, it MUST be interpreted as a TLV stream.
-* The receiver MUST compute `params_hash` by:
-  1. decoding the TLV stream (`params`) and rejecting invalid TLV encodings
-  2. re-encoding it in canonical TLV stream form (ascending type, no duplicates)
-  3. hashing the canonical re-encoding with SHA256
-* If `params` is absent, `params_hash = SHA256(empty)` (empty byte string).
+* type: 1 (`protocol_version`): `u16`
+* type: 2 (`call_id`): `32*byte`
+* type: 20 (`method`): UTF-8 string
+* type: 30 (`price_msat`): `tu64`
+* type: 31 (`quote_expiry`): `tu64`
+* type: 50 (`request_hash`): `32*byte` (`SHA256(request_decoded_bytes)`)
+* type: 52 (`request_len`): `tu64`
+* type: 53 (`request_content_type`): UTF-8 string
+* type: 54 (`request_content_encoding`): UTF-8 string
+* type: 51 (`params_hash`): `32*byte` (`SHA256(params_bytes)` or `SHA256(empty)`)
+* type: 55 (`response_content_type`) (optional): UTF-8 string
+* type: 56 (`response_content_encoding`) (optional): UTF-8 string
 
-Input binding source (MUST):
+Rules:
 
-* The Provider MUST compute (`input_hash`, `input_len`, `input_content_type`, `input_content_encoding`)
-  from the validated input stream (§5.5). If the input stream cannot be validated, the Provider MUST NOT issue a quote.
+* If `params` is present, `params_hash = SHA256(params_bytes)`. Otherwise `SHA256(empty)`.
+* If `lcp_quote` includes 34/35, Provider MUST include 55/56 with identical values.
 
----
+Request binding source (MUST):
 
-## 5.4 type: 42087 (`lcp_result`)
+* Provider MUST compute request hash/len/content metadata from the **validated request stream** (§6).
+* If the request stream cannot be validated, Provider MUST NOT issue a quote.
 
-Terminal job completion message.
+### 5.3 `lcp_complete`
 
-* data: [`tlv_stream`:`tlvs`]
+Type: 42107 (`lcp_complete`)
+
+Terminal call completion message.
 
 Required TLVs:
 
-* type: 100 (`status`): [`u16`:`status`]
+* type: 100 (`status`): `u16`
+
   * 0: `ok`
   * 1: `failed`
   * 2: `cancelled`
 
-If `status = ok`, required additional TLVs:
+If a response stream was delivered, include:
 
-* type: 101 (`result_stream_id`): [`32*byte`:`result_stream_id`]
-* type: 102 (`result_hash`): [`32*byte`:`result_hash`] (`SHA256(result_decoded_bytes)`)
-* type: 103 (`result_len`): [`tu64`:`result_len`] (byte length of `result_decoded_bytes`)
-* type: 104 (`result_content_type`): [`byte`:`result_content_type`] (UTF-8 string)
-* type: 105 (`result_content_encoding`): [`byte`:`result_content_encoding`] (UTF-8 string)
+* type: 101 (`response_stream_id`): 32 bytes
+* type: 102 (`response_hash`): 32 bytes (SHA256 of decoded response bytes)
+* type: 103 (`response_len`): `tu64`
+* type: 104 (`response_content_type`): UTF-8 string
+* type: 105 (`response_content_encoding`): UTF-8 string
 
-If `status != ok`, optional TLVs:
+If `status != ok`, optional:
 
-* type: 81 (`message`): [`byte`:`message`] (UTF-8 string)
+* type: 81 (`message`): UTF-8 string
 
-Meaning:
+Rules:
 
-* If `status=ok`, the Provider MUST have sent exactly one validated result stream (§5.5) matching the metadata in this message.
-* After receiving `lcp_result`, the Requester SHOULD treat the job as terminal and stop accepting further job-scope messages for that `job_id` (except duplicates within the replay window).
+* After post-payment execution begins, Provider SHOULD deliver a response stream even for failures (e.g., an error event stream) and then send `lcp_complete(status=failed)` including response stream metadata.
+* After receiving `lcp_complete`, Requester SHOULD treat the call as terminal.
+
+### 5.4 Minimal state machine (informative)
+
+Requester:
+
+1. Exchange `lcp_manifest`.
+2. Send `lcp_call`.
+3. Send request stream.
+4. Receive `lcp_quote`, verify, pay.
+5. Receive response stream.
+6. Receive `lcp_complete`.
+
+Provider:
+
+1. Exchange `lcp_manifest`.
+2. Receive `lcp_call`.
+3. Receive/validate request stream.
+4. Send `lcp_quote`.
+5. Wait for invoice settlement.
+6. Execute method.
+7. Send response stream.
+8. Send `lcp_complete`.
+9. On `lcp_cancel`, stop best-effort.
 
 ---
 
-## 5.5 Stream transfer (chunking)
+## 6. Stream transfer
 
-Streams are used for large payloads (input and result) and are carried with:
+Streams are transferred with:
 
-* `lcp_stream_begin` (42089)
-* `lcp_stream_chunk` (42091)
-* `lcp_stream_end` (42093)
+* `lcp_stream_begin` (42109)
+* `lcp_stream_chunk` (42111)
+* `lcp_stream_end` (42113)
 
-### 5.5.1 Stream kinds
+### 6.1 Stream kinds
 
-Stream kinds:
+* 1: `request`
+* 2: `response`
 
-* 1: `input`
-* 2: `result`
+Constraints:
 
-Constraints (v0.2):
+* Exactly one request stream MUST be sent after `lcp_call` and before `lcp_quote`.
+* Exactly one response stream SHOULD be sent after payment and before `lcp_complete`.
 
-* Exactly one input stream MUST be sent by the Requester after `lcp_quote_request` and before `lcp_quote_response`.
-* Exactly one result stream MUST be sent by the Provider after invoice settlement and before `lcp_result(status=ok)`.
-
-Receivers MUST reject any additional streams of the same kind for a job with `lcp_error(code=invalid_state)`.
-
-### 5.5.2 Content type / encoding
+### 6.2 Content type / encoding
 
 `content_type`:
 
-* A UTF-8 media type string (for example, `text/plain; charset=utf-8`).
+* UTF-8 media type string (e.g., `application/json; charset=utf-8`).
 
 `content_encoding`:
 
-* A UTF-8 identifier describing how stream chunk bytes are decoded into the logical stream bytes.
+* UTF-8 identifier describing decoding of chunk bytes into decoded stream bytes.
 
-This specification defines:
+This spec defines:
 
-* `identity`: chunk bytes are the decoded bytes (MUST be supported)
+* `identity` (MUST be supported)
 
 Receivers MUST reject unknown `content_encoding` with `lcp_error(code=unsupported_encoding)`.
 
-Unless explicitly stated otherwise, all `sha256` and `total_len` fields refer to the decoded stream bytes.
+All `sha256` and `total_len` fields refer to **decoded** stream bytes.
 
-### 5.5.3 type: 42089 (`lcp_stream_begin`)
+### 6.3 `lcp_stream_begin`
 
-* data: [`tlv_stream`:`tlvs`]
+Type: 42109
 
 Required TLVs:
 
-* type: 90 (`stream_id`): [`32*byte`:`stream_id`]
-* type: 91 (`stream_kind`): [`u16`:`stream_kind`]
-* type: 94 (`content_type`): [`byte`:`content_type`] (UTF-8 string)
-* type: 95 (`content_encoding`): [`byte`:`content_encoding`] (UTF-8 string)
+* type: 90 (`stream_id`): 32 bytes
+* type: 91 (`stream_kind`): `u16`
+* type: 94 (`content_type`): UTF-8 string
+* type: 95 (`content_encoding`): UTF-8 string
 
-Input stream requirements (`stream_kind = input`) (MUST):
+Optional (if known at stream start):
 
-* type: 92 (`total_len`): [`tu64`:`total_len`]
-* type: 93 (`sha256`): [`32*byte`:`sha256`]
+* type: 92 (`total_len`): `tu64`
+* type: 93 (`sha256`): 32 bytes
 
-Result stream (`stream_kind = result`):
+Rules:
 
-* `total_len` and `sha256` MAY be omitted if unknown at start.
-  (They MUST be provided in `lcp_stream_end`.)
+* Sender MAY omit `total_len` and `sha256` at begin if unknown.
+* Sender MUST provide `total_len` and `sha256` in `lcp_stream_end`.
 
 Limit enforcement (MUST):
 
-* The receiver MUST enforce `total_len <= max_stream_bytes` (from the sender's `lcp_manifest`) if `total_len` is present.
-* The receiver MUST enforce that total decoded bytes received do not exceed `max_stream_bytes` even if `total_len` was omitted.
-* The receiver MUST enforce that total decoded bytes across all streams in the job do not exceed `max_job_bytes`.
+* If `total_len` is present, receiver MUST enforce `total_len <= max_stream_bytes`.
+* Receiver MUST enforce received decoded bytes do not exceed `max_stream_bytes` even if omitted.
+* Receiver MUST enforce total decoded bytes across streams do not exceed `max_call_bytes`.
 
-### 5.5.4 type: 42091 (`lcp_stream_chunk`)
+### 6.4 `lcp_stream_chunk`
 
-* data: [`tlv_stream`:`tlvs`]
+Type: 42111
 
 Required TLVs:
 
-* type: 90 (`stream_id`): [`32*byte`:`stream_id`]
-* type: 96 (`seq`): [`tu32`:`seq`] (0,1,2,…)
-* type: 97 (`data`): [`byte`:`data`] (chunk payload)
+* type: 90 (`stream_id`): 32 bytes
+* type: 96 (`seq`): `tu32` (0,1,2,…)
+* type: 97 (`data`): bytes
 
-Chunk ordering rules (MUST):
+Ordering (MUST):
 
-* `seq` MUST start at 0 and increase by exactly 1 for each subsequent accepted chunk.
-* If `seq < expected_seq`, the receiver MUST treat the chunk as a duplicate and MUST ignore it.
-* If `seq > expected_seq`, the receiver MUST reject with `lcp_error(code=chunk_out_of_order)`.
+* `seq` MUST start at 0 and increase by exactly 1 for each accepted chunk.
+* If `seq < expected_seq`, receiver MUST treat as duplicate and ignore.
+* If `seq > expected_seq`, receiver MUST reject with `lcp_error(code=chunk_out_of_order)`.
 
 Deterministic `msg_id` (MUST):
 
-To keep replay state bounded, `lcp_stream_chunk` MUST set:
-
-* `msg_id = SHA256(stream_id || u32be(seq))` (32 bytes)
-
-Where `u32be(seq)` is `seq` encoded as a 4-byte big-endian unsigned integer.
+* `msg_id = SHA256(stream_id || u32be(seq))`
 
 Size rule (MUST):
 
-* The sender MUST ensure each `lcp_stream_chunk` message payload size does not exceed the peer's `max_payload_bytes`.
-* The sender SHOULD choose `len(data)` such that the full message fits within `max_payload_bytes` after TLV overhead.
+* Sender MUST ensure each message payload size ≤ peer’s `max_payload_bytes`.
 
-### 5.5.5 type: 42093 (`lcp_stream_end`)
+### 6.5 `lcp_stream_end`
 
-* data: [`tlv_stream`:`tlvs`]
+Type: 42113
 
 Required TLVs:
 
-* type: 90 (`stream_id`): [`32*byte`:`stream_id`]
-* type: 92 (`total_len`): [`tu64`:`total_len`]
-* type: 93 (`sha256`): [`32*byte`:`sha256`]
+* type: 90 (`stream_id`): 32 bytes
+* type: 92 (`total_len`): `tu64`
+* type: 93 (`sha256`): 32 bytes
 
 Validation (MUST):
 
-* The receiver MUST verify:
-  * total decoded bytes length equals `total_len`
+* Receiver MUST verify:
+
+  * decoded length == `total_len`
   * `SHA256(decoded_bytes) == sha256`
-* If validation fails, the receiver MUST send `lcp_error(code=checksum_mismatch)` and SHOULD treat the job as failed.
+* On failure, receiver MUST send `lcp_error(code=checksum_mismatch)` and SHOULD treat the call as failed.
 
 ---
 
-## 5.6 type: 42095 (`lcp_cancel`)
+## 7. Event stream format
 
-* data: [`tlv_stream`:`tlvs`]
+This section defines an **optional standardized streaming response encoding** for methods that want structured incremental output.
+
+If a method chooses this encoding, it MUST set the response stream:
+
+* `content_type = "application/lcp.events+jsonl; charset=utf-8"`
+* `content_encoding = "identity"`
+
+If another content type is used, response bytes are method-defined.
+
+### 7.1 Encoding
+
+For `application/lcp.events+jsonl; charset=utf-8`:
+
+* Decoded bytes MUST be valid UTF-8.
+* Response is **JSON Lines**:
+
+  * One JSON object per line
+  * Lines separated by `\n` (0x0A)
+  * Trailing newline is RECOMMENDED
+
+### 7.2 Minimum frame schema
+
+Each frame MUST be a JSON object with:
+
+* `type`: string
+* `seq`: non-negative integer
+
+Optional fields:
+
+* `time`: integer (Unix epoch seconds)
+* `data`: any JSON value
+* `error`: object
+
+### 7.3 Terminal frame rule
+
+* `seq` MUST start at 0 and increment by 1 per frame.
+* Stream MUST include exactly one terminal frame:
+
+  * `type="final"` (success) OR `type="error"` (application failure)
+* After terminal frame, sender MUST NOT emit additional frames.
+
+---
+
+## 8. Error, cancel, and rate limiting
+
+### 8.1 `lcp_cancel`
+
+Type: 42115
 
 Optional TLVs:
 
-* type: 70 (`reason`): [`byte`:`reason`] (UTF-8 string)
+* type: 70 (`reason`): UTF-8 string
 
 Meaning:
 
-* On receiving `lcp_cancel`, the receiver SHOULD stop further work for `job_id` best-effort.
-* If cancellation occurs after payment, refunds are out of scope.
+* Receiver SHOULD stop work best-effort.
+* Refunds are out of scope.
 
----
+### 8.2 `lcp_error`
 
-## 5.7 type: 42097 (`lcp_error`)
+Type: 42117
 
-Protocol-level terminal error.
-
-* data: [`tlv_stream`:`tlvs`]
+Protocol-level terminal error (invalid sequencing, unsupported method, stream checksum failure, etc).
 
 Required TLVs:
 
-* type: 80 (`code`): [`u16`:`code`]
+* type: 80 (`code`): `u16`
 
 Optional TLVs:
 
-* type: 81 (`message`): [`byte`:`message`] (UTF-8 string)
+* type: 81 (`message`): UTF-8 string
 
-Recommended error codes:
+Recommended codes:
 
 * 1: `unsupported_version`
-* 2: `unsupported_task`
-* 3: `quote_expired`
-* 4: `payment_required`
-* 5: `payment_invalid`
-* 6: `payload_too_large`
-* 7: `rate_limited`
-* 8: `unsupported_params`
+* 2: `manifest_required`
+* 3: `unsupported_method`
+* 4: `quote_expired`
+* 5: `payment_required`
+* 6: `payment_invalid`
+* 7: `payload_too_large`
+* 8: `rate_limited`
 * 9: `unsupported_encoding`
 * 10: `invalid_state`
 * 11: `chunk_out_of_order`
 * 12: `checksum_mismatch`
+* 13: `stream_limit_exceeded`
 
-Note:
+Rule of thumb:
 
-* `message` is human-readable supplemental information. Receivers MAY display it.
-
----
-
-## 6. Minimal state machine
-
-### 6.1 Requester
-
-1. Connect to the Provider (out of scope).
-2. Exchange `lcp_manifest` (MUST).
-3. Send `lcp_quote_request`.
-4. Send input stream:
-   1. `lcp_stream_begin(stream_kind=input, total_len, sha256, content_type, content_encoding)`
-   2. `lcp_stream_chunk` × N
-   3. `lcp_stream_end(total_len, sha256)`
-5. Receive `lcp_quote_response`. Verify invoice binding and payee. Pay the invoice.
-6. Receive result stream:
-   1. `lcp_stream_begin(stream_kind=result, …)`
-   2. `lcp_stream_chunk` × N
-   3. `lcp_stream_end(total_len, sha256)`
-7. Receive `lcp_result`.
-
-### 6.2 Provider
-
-1. Exchange `lcp_manifest` (MUST).
-2. Receive `lcp_quote_request`.
-3. Receive and validate input stream.
-4. Send `lcp_quote_response` with an invoice bound to terms.
-5. Wait for invoice settlement.
-6. Execute job.
-7. Send result stream.
-8. Send `lcp_result`.
-9. If `lcp_cancel` is received, stop work best-effort.
+* **Protocol** failures → `lcp_error`
+* **Method execution** failures → response stream (e.g., terminal event `type="error"`) + `lcp_complete(status=failed)`
 
 ---
 
-## 7. Security considerations
+## 9. Security and policy considerations
 
-### 7.1 Replay protection
+### 9.1 Replay protection
 
-Receivers MUST de-duplicate by (`job_id`, `msg_id`) at least until `effective_expiry` (see §4.2).
+Receivers MUST de-duplicate by (`call_id`, `msg_id`) at least until `effective_expiry` (§3.5).
+For `lcp_stream_chunk`, `msg_id` is deterministic (§6.4).
 
-For `lcp_stream_chunk`, `msg_id` is deterministic (§5.5.4) and stream reassembly state can be used to keep memory bounded.
+### 9.2 DoS resistance
 
-### 7.2 DoS resistance
+Implementations MUST enforce:
 
-* Implementations MUST enforce payload size limits and stream/job limits via:
-  * `lcp_manifest.max_payload_bytes`
-  * `lcp_manifest.max_stream_bytes`
-  * `lcp_manifest.max_job_bytes`
-* Implementations SHOULD enforce per-peer rate limits.
-* Providers MAY restrict who they serve (for example pubkey allowlists, or peers with existing channels).
-* Providers MAY return `rate_limited`.
+* `max_payload_bytes`
+* `max_stream_bytes`
+* `max_call_bytes`
 
-### 7.3 Preventing invoice swapping
+Implementations SHOULD rate limit per peer.
+Providers MAY restrict service (allowlists, channel requirements, etc).
 
-The Requester MUST satisfy at least:
+### 9.3 Invoice swapping prevention
 
-* `description_hash == terms_hash`
-* the invoice payee (destination node pubkey) matches the LCP peer's (Provider's) pubkey
+Requester MUST verify at least:
 
-This detects paying an invoice for a different node.
+* invoice `description_hash == terms_hash`
+* invoice payee pubkey matches Provider peer pubkey
+
+### 9.4 License and usage policy compliance
+
+Providers may invoke upstream models/APIs/datasets.
+
+Rules (MUST):
+
+* Provider MUST comply with applicable licenses, terms of service, and usage policies of any upstream systems used to fulfill a method.
+* Provider MUST reject or restrict calls that would violate those obligations.
+* Provider SHOULD disclose relevant restrictions via `policy_notice` in method descriptors when feasible.
 
 ---
-
-## 8. Trade-offs and limitations (direct peer connections)
-
-LCP v0.2 makes the following trade-offs explicit:
-
-* Direct connections. Privacy is not fully preserved compared to onion messages or blinded paths.
-* Payment happens before execution. This is not a perfect atomic swap.
-* Large payloads are supported via streaming, but are still subject to peer-declared limits.
-* Provider receives full input stream before quoting, which increases pre-payment bandwidth exposure (bounded by manifest limits).
-
-This specification does not define forwarding via onion messages or blinded paths.
